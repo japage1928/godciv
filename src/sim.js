@@ -46,8 +46,12 @@ const inBounds = (x, z) => x >= 0 && z >= 0 && x < SIZE && z < SIZE;
 // Breadth-first pathfinding on the walkable grid. Cheap at 48x48, and it
 // means villagers walk around water and buildings instead of steering
 // blindly through them (the Luanti v1 steer-to-target weakness).
-export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000) {
-  if (!inBounds(tx, tz) || grid[tx][tz].blocked) return null;
+export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000, avoidFarm = false) {
+  if (!inBounds(tx, tz)) return null;
+  // A blocked target (a finished building) is still reachable: the
+  // path ends on its doorstep. Before this fix, findPath returned
+  // null for every building target, so paveRoads could only ever
+  // pave toward farm plots and no road ever reached a hut.
   if (sx === tx && sz === tz) return [];
   const prev = new Map();
   const q = [[sx, sz]];
@@ -58,7 +62,10 @@ export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000) {
     const [x, z] = q[qi++]; steps++;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = x + dx, nz = z + dz;
-      if (!inBounds(nx, nz) || grid[nx][nz].blocked) continue;
+      if (!inBounds(nx, nz)) continue;
+      const isTarget = nx === tx && nz === tz;
+      if (grid[nx][nz].blocked && !isTarget) continue;
+      if (avoidFarm && grid[nx][nz].farm && !isTarget) continue;
       const k = key(nx, nz);
       if (prev.has(k)) continue;
       prev.set(k, key(x, z));
@@ -159,6 +166,7 @@ export function newWorld(seed) {
   for (let i = 0; i < 6; i++) state.villagers.push(makeVillager(state, spawnSpots[i][0], spawnSpots[i][1], i === 0));
   for (let i = 0; i < 4; i++) state.deer.push(makeDeer(state, cx + 8 + i * 2, cz + 8));
   for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
+  pavePlaza(grid, cx, cz);
   assignHomes(state);
   delegateRoles(state, grid);
   log(state, "The village wakes. Six villagers look to the sky, waiting for a sign.");
@@ -694,7 +702,7 @@ function doWork(state, grid, v, dt) {
             if (type === "hut") {
               grid[q.x][q.z].blocked = true;
               state.populationCap += 4;
-              log(state, "A new hut rises. The village can hold " + state.populationCap + " souls.");
+              log(state, "A new hut rises on the housing ring. The village can hold " + state.populationCap + " souls.");
             } else if (type === "granary") {
               grid[q.x][q.z].blocked = true;
               log(state, "A granary stands. Stored food will keep far longer now.");
@@ -714,7 +722,7 @@ function doWork(state, grid, v, dt) {
               grid[q.x][q.z].blocked = true;
               state.populationCap += 2;
               const added = clearFarmBed(state, grid, q.x, q.z);
-              log(state, "A farmhouse rises, with " + added + " new field plots around it. It houses 2 farmhands.");
+              log(state, "A farmhouse rises in the west fields, with " + added + " new field plots around it. It houses 2 farmhands.");
             }
           }
           assignHomes(state);
@@ -743,28 +751,41 @@ function doWork(state, grid, v, dt) {
 // central; the granary sits near the center and the fields. Each
 // candidate cell is scored for its type, and the best wins — so the
 // village grows in districts instead of sprawling at random.
+// District rules (v10, hard, not just scored): dwellings keep at
+// least 3 cells from each other, never enter the western farm
+// district, and farmhouses and farm beds stay west. The old scored
+// version let the cluster bonus and road bonus pull huts into a
+// 2-cell clump, which read as no organization at all.
+const DWELLING_TYPES = ["hut", "longhouse", "greathall", "farmhouse"];
 export function scoreSpot(state, grid, x, z, type) {
   const cx = state._cx, cz = state._cz;
   const dist = Math.hypot(x - cx, z - cz);
   const c = grid[x][z];
   if (c.blocked || c.water || c.farm || c.building || c.tree) return -Infinity;
+  // Hard spacing: no dwelling within 2 cells (Chebyshev) of another.
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (!dx && !dz) continue;
+    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+    if (n && n.building && DWELLING_TYPES.includes(n.building)) return -Infinity;
+  }
+  if ((type === "hut" || type === "longhouse" || type === "greathall") && x < cx - 3) return -Infinity;
+  if (type === "farmhouse" && x > cx - 5) return -Infinity;
   let score = 0;
-  // Breathing room: never build cheek-by-jowl with another dwelling.
+  // Road access: a road right next door is worth building beside.
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     if (!dx && !dz) continue;
     const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
-    if (n && n.building && ["hut", "longhouse", "greathall", "farmhouse"].includes(n.building)) score -= 4;
-    if (n && n.road) score += 2; // road access is worth clustering near
+    if (n && n.road) score += 2;
   }
-  // Cluster, at arm's length: buildings two cells away are good neighbours.
-  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
-    if (Math.abs(dx) < 2 && Math.abs(dz) < 2) continue;
+  // Cluster, at arm's length: buildings three to four cells away are
+  // good neighbours; closer than that is already hard-rejected above.
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) < 3) continue;
     const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
-    if (n && n.building) score += 1.5;
+    if (n && n.building) score += 1.0;
   }
   if (type === "hut" || type === "longhouse" || type === "greathall") {
-    score -= Math.abs(dist - 6) * 1.2; // housing ring, radius ~6
-    if (x < cx - 3) score -= 2; // keep the western farm district clear
+    score -= Math.abs(dist - 7) * 2.0; // housing ring, radius ~7
   } else if (type === "farmhouse") {
     score += x < cx ? 4 : -4; // farm district is west
     let farmsNear = 0;
@@ -805,6 +826,27 @@ export function findPlannedSpot(state, grid, type, minR = 3, maxR = 14) {
   return bestScore > -Infinity ? best : null;
 }
 
+// The village square: a road ring two cells out from the town
+// center, plus a straight farm road west to the fields. Laid at
+// founding so the village has visible structure from day one, and
+// re-laid once for older saves that were founded without it.
+export function pavePlaza(grid, cx, cz) {
+  let laid = 0;
+  const lay = (x, z) => {
+    if (!inBounds(x, z)) return;
+    const c = grid[x][z];
+    if (c.water || c.building || c.farm || c.road) return;
+    if (c.tree) { c.tree = false; c.blocked = false; }
+    if (c.stone > 0) { c.stone = 0; c.ore = 0; c.blocked = false; }
+    c.road = true; laid++;
+  };
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) === 2) lay(cx + dx, cz + dz);
+  }
+  for (let x = cx - 3; x >= cx - 6; x--) lay(x, cz);
+  return laid;
+}
+
 function findBuildSpot(state, grid, minR, maxR) {
   return findPlannedSpot(state, grid, "granary", minR, maxR);
 }
@@ -813,20 +855,24 @@ function paveRoads(state, grid) {
   const targets = state.buildings.filter((b) => ["hut", "longhouse", "greathall", "farmhouse", "workshop", "granary"].includes(b.type));
   if (!targets.length) return;
   const cx = state._cx, cz = state._cz;
-  // Pave toward the building or farm plot whose path has the fewest road cells yet.
+  // Finish one road at a time: pave the whole path to the target
+  // with the fewest unpaved cells left, instead of scattering short
+  // stubs. The old version picked the path with the fewest road
+  // cells, which paved new ground every check and never completed
+  // a single road.
   const allTargets = [...targets];
   if (state._farmCells.length) allTargets.push({ x: state._farmCells[0][0], z: state._farmCells[0][1] });
-  let bestPath = null, bestRoads = Infinity;
+  let bestPath = null, bestUnpaved = Infinity;
   for (const t of allTargets) {
-    const path = findPath(grid, cx, cz, t.x, t.z);
+    const path = findPath(grid, cx, cz, t.x, t.z, 4000, true); // roads route around fields, never through them
     if (!path) continue;
-    const roads = path.filter(([x, z]) => grid[x][z].road).length;
-    if (roads < bestRoads) { bestRoads = roads; bestPath = path; }
+    const unpaved = path.filter(([x, z]) => { const c = grid[x][z]; return !c.road && !c.building && !c.water && !c.farm; }).length;
+    if (unpaved > 0 && unpaved < bestUnpaved) { bestUnpaved = unpaved; bestPath = path; }
   }
   if (!bestPath) return;
   let paved = 0;
   for (const [x, z] of bestPath) {
-    if (paved >= 4) break;
+    if (paved >= 16) break;
     const c = grid[x][z];
     if (c.road || c.building || c.water || c.farm) continue;
     c.road = true;
@@ -853,9 +899,15 @@ export function expandVillage(state, grid) {
       } else if (top.type === "hut") spot = findHutSpot(state, grid);
       else spot = findPlannedSpot(state, grid, top.type, 2, 14);
       if (spot) {
-        const c = BUILD_COSTS[top.type];
-        state.buildQueue.push({ type: top.type, x: spot[0], z: spot[1], progress: 0, needWood: c.wood, needStone: c.stone, needOre: c.ore || 0 });
-        log(state, "The builders start a " + top.type + ": " + top.reason);
+        // Never queue two builds on the same cell: the grid is only
+        // marked when a build completes, so a second demand would
+        // otherwise pick the same best spot and duplicate the building.
+        const alreadyQueued = state.buildQueue.some((q) => q.x === spot[0] && q.z === spot[1]);
+        if (!alreadyQueued) {
+          const c = BUILD_COSTS[top.type];
+          state.buildQueue.push({ type: top.type, x: spot[0], z: spot[1], progress: 0, needWood: c.wood, needStone: c.stone, needOre: c.ore || 0 });
+          log(state, "The builders start a " + top.type + ": " + top.reason);
+        }
       }
     }
   }
@@ -865,7 +917,7 @@ export function expandVillage(state, grid) {
   if (state.villagers.length >= 6 && markers < 4 && state.buildQueue.length < 2 && s.wood >= 2) {
     const cx = state._cx, cz = state._cz;
     const corners = [[cx - 6, cz - 6], [cx + 6, cz - 6], [cx - 6, cz + 6], [cx + 6, cz + 6]];
-    const spot = corners.find(([x, z]) => inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree);
+    const spot = corners.find(([x, z]) => inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree && !state.buildQueue.some((q) => q.x === x && q.z === z));
     if (spot) {
       state.buildQueue.push({ type: "marker", x: spot[0], z: spot[1], progress: 0, needWood: 2, needStone: 0, needOre: 0 });
       log(state, "The villagers raise a boundary marker.");
@@ -882,7 +934,9 @@ export function findFarmBed(state, grid) {
   const cx = state._cx, cz = state._cz;
   let best = null, bestScore = -Infinity;
   for (let x = 4; x < SIZE - 4; x++) for (let z = 4; z < SIZE - 4; z++) {
-    if (Math.hypot(x - cx, z - cz) > 16) continue;
+    if (Math.hypot(x - cx, z - cz) > 14) continue;
+    if (x > cx - 5) continue; // farm beds stay in the western district
+    if (x + 1 > cx - 3) continue; // the whole bed stays west of the plaza
     let free = 0, farmsNear = 0, trees = 0;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       const c = grid[x + dx][z + dz];
@@ -895,7 +949,11 @@ export function findFarmBed(state, grid) {
     const newCells = free + trees;
     if (newCells < 3) continue; // a bed must add ground, not re-pick existing fields
     if (free + farmsNear + trees < 9) continue;
-    const score = farmsNear * 3 + newCells * 1.5 + (x < cx ? 3 : 0) - Math.hypot(x - cx, z - cz) * 0.3 - trees * 0.5;
+    // Rows: a bed that lines up with an existing bed row reads as
+    // fields, not scattered plots.
+    let rowBonus = 0;
+    for (const [fx, fz] of state._farmCells) if (Math.abs(fz - z) <= 1 && fx < cx) rowBonus += 0.4;
+    const score = farmsNear * 3 + newCells * 1.5 + rowBonus - Math.hypot(x - cx, z - cz) * 0.3 - trees * 0.5;
     if (score > bestScore) { bestScore = score; best = [x, z]; }
   }
   return best;
@@ -1142,6 +1200,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
     case "hut": {
       const spot = findHutSpot(state, grid);
       if (!spot) return { ok: false, reason: "No clear ground near the village for a hut." };
+      if (state.buildQueue.some((q) => q.x === spot[0] && q.z === spot[1])) return { ok: false, reason: "Builders are already raising a hut there." };
       if (state.stockpile.wood < 12 || state.stockpile.stone < 6) return { ok: false, reason: "Need 12 wood and 6 stone in the stockpile first." };
       state.buildQueue.push({ type: "hut", x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6, needOre: 0 });
       log(state, "You order a hut. A builder will take it up, if they choose."); setCd(10); break;
@@ -1231,6 +1290,11 @@ export function deserialize(json) {
   for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) state._farmCells.push([x, z]);
   for (const [x, z, stone, ore, blocked] of savedStones) { grid[x][z].stone = stone; grid[x][z].ore = ore; grid[x][z].blocked = !!blocked; }
   for (const [x, z, type] of savedBuildings) grid[x][z].building = type;
+  // Older saves were founded without a plaza: lay it once so the
+  // old village gains the same visible square and farm road.
+  let roadCount = 0;
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].road) roadCount++;
+  if (roadCount < 10) pavePlaza(grid, state._cx, state._cz);
   state._fire = savedFire || null; state._quake = savedQuake || null;
   return { state, grid };
 }

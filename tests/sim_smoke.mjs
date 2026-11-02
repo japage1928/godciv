@@ -64,7 +64,7 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   assert.ok(w5.state.stats.births >= 2, "6 days must bring births, got " + w5.state.stats.births);
   assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 6 days, deaths=" + w5.state.stats.deaths);
   assert.ok(w5.state.villagers.length > 6, "population must grow past the founding 6, got " + w5.state.villagers.length);
-  assert.ok(w5.state.buildings.some((b) => b.type === "hut" && b.x !== w5.state._cx - 2), "a second hut must be built");
+  assert.ok(w5.state.buildings.some((b) => b.type === "hut" && (b.x !== w5.state._cx - 2 || b.z !== w5.state._cz - 3)), "a second hut must be built");
 }
 
 // Leader delegation: every villager gets an assignment, matched to needs.
@@ -151,6 +151,39 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   const founding = s.buildings.find((b) => b.type === "hut");
   assert.ok(Math.max(Math.abs(spot[0] - founding.x), Math.abs(spot[1] - founding.z)) > 1, "planned hut must keep breathing room from the founding hut, spot=" + spot);
   assert.ok(scoreSpot(s, g, founding.x, founding.z, "hut") === -Infinity, "an occupied cell must score as unusable");
+}
+
+// Zoning (v10): the village is founded with a road plaza and a farm
+// road, dwellings keep 3 cells apart, and farm beds stay west.
+{
+  const { state: s, grid: g } = newWorld(19);
+  const roads = g.flat().filter((c) => c.road).length;
+  assert.ok(roads >= 12, "founding must lay a plaza + farm road, road cells=" + roads);
+  assert.ok(g[s._cx + 2][s._cz].road || g[s._cx - 2][s._cz].road, "plaza ring must have road cells beside the center");
+  // No dwelling spot may sit within 2 cells of the founding hut.
+  for (let x = 0; x < 48; x++) for (let z = 0; z < 48; z++) {
+    if (Math.max(Math.abs(x - (s._cx - 2)), Math.abs(z - (s._cz - 3))) <= 2 && !(x === s._cx - 2 && z === s._cz - 3)) {
+      assert.ok(scoreSpot(s, g, x, z, "hut") === -Infinity, "hut spot too close to founding hut at " + x + "," + z);
+    }
+  }
+  // 30 days on: every farm plot west, dwellings spaced, roads grown.
+  for (let i = 0; i < 21600; i++) step(s, g, 0.25);
+  for (const [x] of s._farmCells) assert.ok(x <= s._cx - 3, "farm plot must stay in the western district, x=" + x);
+  const dwellings = s.buildings.filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
+  for (let i = 0; i < dwellings.length; i++) for (let j = i + 1; j < dwellings.length; j++) {
+    const d = Math.max(Math.abs(dwellings[i].x - dwellings[j].x), Math.abs(dwellings[i].z - dwellings[j].z));
+    assert.ok(d >= 3, "dwellings must keep 3 cells apart, " + JSON.stringify(dwellings[i]) + " vs " + JSON.stringify(dwellings[j]));
+  }
+  const roadTotal = g.flat().filter((c) => c.road).length;
+  assert.ok(roadTotal >= 12, "roads must at least keep the founding plaza, road cells=" + roadTotal);
+  // Every dwelling must sit on or beside the road network.
+  for (const b of dwellings) {
+    let nearRoad = false;
+    for (let dx = -3; dx <= 3 && !nearRoad; dx++) for (let dz = -3; dz <= 3; dz++) {
+      if (g[b.x + dx] && g[b.x + dx][b.z + dz] && g[b.x + dx][b.z + dz].road) nearRoad = true;
+    }
+    assert.ok(nearRoad, "dwelling must connect to a road, " + JSON.stringify(b));
+  }
 }
 
 // Farmhouses: demand appears with mouths to feed, and a finished

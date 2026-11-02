@@ -341,7 +341,7 @@ export class Renderer {
       if (roadCells.length !== (this._roadCells || []).length) {
         this._roadCells = roadCells;
         if (this.roadMesh) { this.scene.remove(this.roadMesh); this.roadMesh.dispose?.(); }
-        this.roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.07, 0.95), new THREE.MeshLambertMaterial({ color: 0xa1887f }), Math.max(1, roadCells.length));
+        this.roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ color: 0xd7b98a }), Math.max(1, roadCells.length));
         const rm = new THREE.Matrix4();
         roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this.roadMesh.setMatrixAt(idx, rm); });
         this.scene.add(this.roadMesh);
