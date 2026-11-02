@@ -1,0 +1,42 @@
+/* GodCiv service worker: cache-first app shell so the game works offline
+   after the first load. Version the cache name when the shell changes. */
+const CACHE = "godciv-v1";
+const PRECACHE = [
+  "./",
+  "./index.html",
+  "./manifest.webmanifest",
+  "./icon.svg",
+  "./src/main.js",
+  "./src/sim.js",
+  "./src/render.js",
+  "./src/ollama.js",
+  "./vendor/three.module.js",
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  // Only cache same-origin GETs. Ollama and any other API calls go to the network.
+  if (event.request.method !== "GET" || url.origin !== location.origin) return;
+  event.respondWith(
+    caches.match(event.request, { ignoreSearch: true }).then((hit) => {
+      if (hit) return hit;
+      return fetch(event.request).then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(event.request, copy));
+        }
+        return res;
+      }).catch(() => caches.match("./index.html"));
+    })
+  );
+});

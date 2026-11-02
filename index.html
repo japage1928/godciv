@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#1a3a1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GodCiv">
+<meta name="description" content="GodCiv: a tiny voxel civilization run by individual villagers. You are the god. Nudge, bless, or bring catastrophe.">
+<title>GodCiv</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
+<style>
+  :root { color-scheme: dark; --panel: rgba(16,24,16,.92); --accent: #ffd700; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a0e; font-family: system-ui, -apple-system, sans-serif; color: #eef5ee; }
+  #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; }
+  #scene-wrap { position: relative; flex: 1; min-height: 0; }
+  #scene { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  #hud { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: calc(6px + env(safe-area-inset-top)) 8px 6px; background: var(--panel); font-size: 13px; z-index: 5; }
+  .chip { background: #243524; border: 1px solid #3a523a; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+  .chip b { color: #fff; }
+  #faith-wrap { display: flex; align-items: center; gap: 6px; }
+  .bar { height: 8px; background: #333; border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  #stat-effects { color: #ffab91; }
+  #top-actions { margin-left: auto; display: flex; gap: 6px; }
+  button, select, input { font: inherit; color: #eef5ee; background: #2a402a; border: 1px solid #4a6a4a; border-radius: 8px; padding: 8px 10px; }
+  button:active { background: #3a553a; }
+  button.cooling { opacity: .55; }
+  #godbar { display: flex; gap: 6px; overflow-x: auto; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); background: var(--panel); z-index: 5; scrollbar-width: none; }
+  #godbar::-webkit-scrollbar { display: none; }
+  #godbar button { flex: 0 0 auto; font-size: 20px; padding: 10px 12px; position: relative; }
+  #godbar button small { display: block; font-size: 10px; color: #cfe3cf; }
+  #godbar button .cd { position: absolute; top: 2px; right: 4px; font-size: 10px; color: #ffb74d; }
+  #panel { position: absolute; right: 8px; top: 8px; width: min(340px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 12px; z-index: 6; display: none; }
+  #panel.open { display: block; }
+  #panel h3, #panel h4 { margin: 8px 0 4px; }
+  #panel .muted, .muted { color: #a8bfa8; font-size: 12px; }
+  #panel .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  #panel select, #panel input { width: 100%; margin: 4px 0; }
+  #panel .bars label { display: flex; justify-content: space-between; font-size: 12px; margin-top: 6px; }
+  #panel .bars .bar { height: 7px; }
+  #log p { margin: 4px 0; font-size: 13px; }
+  .council { background: #1d2b1d; border: 1px solid #4a6a4a; border-radius: 8px; padding: 8px; margin-top: 10px; }
+  #arm-banner { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; background: #b71c1c; padding: 10px 14px; border-radius: 999px; z-index: 7; font-size: 14px; white-space: nowrap; max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; }
+  #toast { position: absolute; left: 50%; transform: translateX(-50%) translateY(8px); bottom: 118px; background: #111; border: 1px solid #555; padding: 10px 14px; border-radius: 10px; z-index: 8; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; max-width: calc(100% - 24px); text-align: center; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #whisper-box { position: absolute; left: 8px; right: 8px; bottom: 118px; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 10px; z-index: 8; display: none; }
+  #whisper-box input { width: 100%; margin-bottom: 8px; }
+  #start-overlay { position: fixed; inset: 0; z-index: 20; background: rgba(8,14,8,.94); display: flex; align-items: center; justify-content: center; padding: 20px; }
+  #start-card { max-width: 520px; width: 100%; background: #16241a; border: 1px solid #3a523a; border-radius: 16px; padding: 22px; }
+  #start-card h1 { margin: 0 0 6px; font-size: 34px; }
+  #start-card p { line-height: 1.5; }
+  #start-card .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  #start-card button { font-size: 16px; padding: 12px 16px; }
+  dialog { background: #16241a; color: #eef5ee; border: 1px solid #3a523a; border-radius: 14px; max-width: min(480px, calc(100vw - 24px)); padding: 18px; }
+  dialog label { display: block; font-size: 13px; margin: 10px 0 2px; }
+  dialog input { width: 100%; }
+  dialog .row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  @media (max-width: 560px) {
+    #hud { font-size: 12px; }
+    #panel { top: auto; bottom: 118px; right: 8px; left: 8px; width: auto; max-height: 46%; }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <span class="chip">🍞 <b id="stat-food">0</b></span>
+    <span class="chip">🪵 <b id="stat-wood">0</b></span>
+    <span class="chip">🪨 <b id="stat-stone">0</b></span>
+    <span class="chip">⛏️ <b id="stat-ore">0</b></span>
+    <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
+    <span class="chip" id="stat-day">Day 1</span>
+    <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
+    <span class="chip" id="stat-effects" style="display:none"></span>
+    <span id="top-actions">
+      <button id="btn-panel" title="Village panel">🏛️</button>
+      <button id="btn-rotate-l" title="Rotate left">⟲</button>
+      <button id="btn-rotate-r" title="Rotate right">⟳</button>
+      <button id="btn-speed" title="Game speed">1×</button>
+      <button id="btn-pause" title="Pause">⏸ Pause</button>
+      <button id="btn-save" title="Save now">💾</button>
+      <button id="btn-settings" title="Settings and Ollama">⚙️</button>
+    </span>
+  </div>
+
+  <div id="scene-wrap">
+    <canvas id="scene"></canvas>
+    <div id="arm-banner" style="display:none"></div>
+    <div id="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3 id="panel-title" style="margin:0">Village</h3>
+        <span class="muted" id="directive-label">No directive</span>
+      </div>
+      <div id="panel-body"></div>
+    </div>
+    <div id="toast" role="status"></div>
+    <div id="whisper-box">
+      <input id="whisper-input" maxlength="200" placeholder="Whisper to the village… (they may mishear you)">
+      <div class="row" style="display:flex;gap:6px"><button id="whisper-send">Whisper</button><button id="whisper-cancel">Cancel</button></div>
+    </div>
+  </div>
+
+  <div id="godbar" role="toolbar" aria-label="God powers">
+    <button data-god="bless" title="Bless: +10 food, +faith">✨<small>Bless</small><span class="cd"></span></button>
+    <button data-god="drought" title="Drought: crops stop growing">🌵<small>Drought</small><span class="cd"></span></button>
+    <button data-god="flood" title="Flood: villagers flee">🌊<small>Flood</small><span class="cd"></span></button>
+    <button data-god="fire" title="Fire: tap the ground">🔥<small>Fire</small><span class="cd"></span></button>
+    <button data-god="plague" title="Plague: some villagers fall sick">🤢<small>Plague</small><span class="cd"></span></button>
+    <button data-god="quake" title="Quake: tap the ground">🌍<small>Quake</small><span class="cd"></span></button>
+    <button data-god="hut" title="Order a hut (12 wood, 6 stone)">🛖<small>Order hut</small><span class="cd"></span></button>
+    <button data-god="villager" title="Call a wanderer (costs faith)">🧍<small>New soul</small><span class="cd"></span></button>
+    <button data-god="whisper" title="Whisper to the village">💬<small>Whisper</small><span class="cd"></span></button>
+  </div>
+</div>
+
+<div id="start-overlay">
+  <div id="start-card">
+    <h1>GodCiv</h1>
+    <p>You are the god of a tiny voxel village. You never control a villager directly. Each one has traits, skills, hunger, and fear, and decides for themselves whether to farm, mine, fish, hunt, build, or haul.</p>
+    <p>Your power is nudge and catastrophe: bless, whisper a directive through the leader, call drought, flood, fire, plague, or quake. Some villagers will disobey. Watch what they actually do.</p>
+    <p class="muted">Drag to look around · pinch to zoom · tap a villager to inspect them · tap the ground for cell info. Works offline after the first load. Progress saves on this device.</p>
+    <p class="muted" id="save-info"></p>
+    <div class="row">
+      <button id="btn-continue">Continue saved village</button>
+      <button id="btn-new-game">Found a new village</button>
+      <button id="btn-new" style="display:none"></button>
+    </div>
+    <p class="muted">A port of the Luanti GodCiv mod. The sim owns the truth; a local AI model, if enabled, only advises.</p>
+  </div>
+</div>
+
+<dialog id="settings-dialog">
+  <form method="dialog">
+    <h3 style="margin-top:0">Settings · Ollama council</h3>
+    <p class="muted">The council is advisory only. The model suggests a goal and a focus job; villagers can still disobey. Off by default.</p>
+    <label><input type="checkbox" id="set-enabled"> Enable Ollama council</label>
+    <label for="set-url">Ollama URL (on a phone, localhost will not work — use a LAN/server address)</label>
+    <input id="set-url" type="url" placeholder="http://192.168.1.10:11434/api/chat">
+    <label for="set-model">Model</label>
+    <input id="set-model" type="text" placeholder="qwen3:0.6b">
+    <label for="set-interval">Council interval (seconds, min 30)</label>
+    <input id="set-interval" type="number" min="30" step="10" value="90">
+    <p class="muted" id="set-status"></p>
+    <div class="row">
+      <button id="set-save">Save</button>
+      <button id="set-test" type="button">Test Ollama</button>
+      <button type="submit">Close</button>
+    </div>
+    <p class="muted">Ollama needs CORS for browser calls from another device. If the test fails from your phone, run Ollama with <code>OLLAMA_ORIGINS=*</code> on the host, or keep the council off — the game runs fully on its utility brain.</p>
+  </form>
+</dialog>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
