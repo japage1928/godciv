@@ -18,11 +18,13 @@ export const PRICES = { food: 2, fish: 2, meat: 3, wood: 1, stone: 1, ore: 4 };
 export const BUILD_COSTS = {
   hut: { wood: 12, stone: 6 },
   granary: { wood: 20, stone: 10 },
-  well: { wood: 8, stone: 8 },
+  well: { wood: 8, stone: 6 },
   workshop: { wood: 15, stone: 10, ore: 4 },
   shrine: { wood: 10, stone: 6 },
   marker: { wood: 2, stone: 0 },
   longhouse: { wood: 20, stone: 10 },
+  greathall: { wood: 30, stone: 15 },
+  farmhouse: { wood: 15, stone: 6 },
 };
 export const CHILD_DAYS = 3; // a newborn works after 3 dawns
 export const ELDER_DAYS = 45; // old-age death rolls start here
@@ -119,10 +121,10 @@ export function newWorld(seed) {
   }
   // Stone / ore clusters on high ground.
   const stoneSpots = [];
-  for (let i = 0; i < 26; i++) {
+  for (let i = 0; i < 30; i++) {
     const x = Math.floor(rng() * SIZE), z = Math.floor(rng() * SIZE);
-    if (grid[x][z].water || Math.hypot(x - cx, z - cz) < 9 || grid[x][z].tree || grid[x][z].farm) continue;
-    grid[x][z].stone = 6 + Math.floor(rng() * 6);
+    if (grid[x][z].water || Math.hypot(x - cx, z - cz) < 7 || grid[x][z].tree || grid[x][z].farm) continue;
+    grid[x][z].stone = 8 + Math.floor(rng() * 5);
     grid[x][z].ore = grid[x][z].h > 0.62 && rng() < 0.45 ? 3 + Math.floor(rng() * 3) : 0;
     grid[x][z].blocked = true;
     stoneSpots.push([x, z]);
@@ -186,10 +188,15 @@ export function makeVillager(state, x, z, leader = false, opts = {}) {
 
 // --- homes: a hut houses 4, a longhouse 8, the town center shelters 4 ---
 
-export function homeCapacity(b) { return b.type === "longhouse" ? 8 : 4; }
+export function homeCapacity(b) {
+  if (b.type === "longhouse") return 8;
+  if (b.type === "greathall") return 14;
+  if (b.type === "farmhouse") return 2;
+  return 4;
+}
 
 export function assignHomes(state) {
-  const homes = state.buildings.filter((b) => ["towncenter", "hut", "longhouse"].includes(b.type));
+  const homes = state.buildings.filter((b) => ["towncenter", "hut", "longhouse", "greathall", "farmhouse"].includes(b.type));
   const occ = {};
   for (const v of state.villagers) {
     if (v.home) {
@@ -253,6 +260,16 @@ function refusesAssignment(state, v) {
   return state._rng() < clamp(p, 0, 0.5);
 }
 
+// Is there any fishable shore on the map? (A land cell next to water.)
+export function hasShore(grid) {
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+    const c = grid[x][z];
+    if (c.water || c.blocked) continue;
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => inBounds(x + dx, z + dz) && grid[x + dx][z + dz].water)) return true;
+  }
+  return false;
+}
+
 // Leader delegation: the leader looks at what the village needs and
 // assigns a job to each villager. Delegation is a strong nudge, not an
 // order — a villager can still refuse it (see think()). The god never
@@ -266,10 +283,19 @@ export function delegateRoles(state, grid = null) {
   const pop = villagers.length;
   const hutCount = state.buildings.filter((b) => b.type === "hut").length;
   const demands = grid ? computeDemands(state, grid) : [];
+  const farmCells = state._farmCells ? state._farmCells.length : 18;
+  const shore = grid ? hasShore(grid) : true;
   const desired = {
-    farmer: clamp(Math.ceil(pop / 3), 1, 4),
-    fisher: edible < 25 ? 1 : 0,
-    hunter: edible < 25 ? 1 : 0,
+    // Farmers scale with the fields, not just mouths: the labor force
+    // has to keep up as farm beds are added.
+    farmer: clamp(Math.max(Math.ceil(pop / 3), Math.ceil(farmCells / 9)), 1, 5),
+    // Fishers are a standing food source, not an emergency measure:
+    // one fisher once the village can spare them, two as it grows,
+    // whenever a fishable shore exists. (Before v8, fishers were only
+    // delegated when food was already short, so with a full stockpile
+    // a village never saw a fisher at all.)
+    fisher: shore ? (pop >= 14 ? 2 : pop >= 6 ? 1 : 0) : 0,
+    hunter: edible < 25 || (s.meat === 0 && pop >= 10) ? 1 : 0,
     woodcutter: (s.wood < 25 || state.buildQueue.length) ? 2 : 1,
     miner: (s.stone < 20 || s.ore < 4 || state.buildQueue.length) ? 2 : 1,
     // Anticipate building: a builder is delegated while a demand is
@@ -319,7 +345,7 @@ function scoreJob(state, v, job) {
   if (v.traits.includes("lazy")) score -= 2;
   if (job === "farmer") { score += deficit(s.food + s.fish + s.meat, 40) * 0.35; if (state.elapsed < state.effects.droughtUntil) score -= state.buildings.some((b) => b.type === "well") ? 4 : 8; }
   if (job === "woodcutter") score += deficit(s.wood, 30) * 0.4 + (state.buildQueue.length ? 2 : 0);
-  if (job === "fisher") score += deficit(s.food + s.fish + s.meat, 40) * 0.25;
+  if (job === "fisher") score += deficit(s.food + s.fish + s.meat, 40) * 0.25 + deficit(s.fish, 10) * 0.3 + (s.fish < 5 ? 3 : 0) - (s.fish >= 30 ? 12 : s.fish >= 15 ? 6 : 0);
   if (job === "hunter") score += deficit(s.food + s.fish + s.meat, 40) * 0.22;
   if (job === "miner") score += deficit(s.stone, 24) * 0.25 + deficit(s.ore, 6) * 0.3;
   if (job === "builder") score += state.buildQueue.length ? 8 : -4;
@@ -467,12 +493,34 @@ export function computeDemands(state, grid) {
   const hutTotal = state.buildings.filter((b) => b.type === "hut" || b.type === "longhouse").length
     + state.buildQueue.filter((q) => q.type === "hut" || q.type === "longhouse").length;
   const demands = [];
-  const hutScore = homeless * 3 + (pop >= state.populationCap - 2 ? 4 : 0) + (state.day >= 2 && hutTotal < 2 ? 3 : 0);
+  const crowded = pop >= state.populationCap - 2;
+  const dwellings = state.buildings.filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
+  const hutScore = homeless * 3 + (crowded ? 4 : 0) + (state.day >= 2 && hutTotal < 2 ? 3 : 0);
   if (hutScore > 0) {
     const spot = grid ? !!findHutSpot(state, grid) : true;
     demands.push(spot
       ? { type: "hut", score: hutScore, reason: homeless ? homeless + " homeless villager" + (homeless > 1 ? "s" : "") + " need" + (homeless > 1 ? "" : "s") + " a home." : "The village is outgrowing its huts." }
       : { type: "longhouse", score: hutScore, reason: "No room for new huts — an old hut must grow." });
+  }
+  // Housing evolution: as demand rises and the village spreads, growing
+  // an existing dwelling beats sprawling further. A hut becomes a
+  // longhouse (8 beds), a longhouse becomes a great hall (14 beds).
+  // Upgrades only outbid a new hut once several dwellings stand.
+  const huts = state.buildings.filter((b) => b.type === "hut");
+  const longhouses = state.buildings.filter((b) => b.type === "longhouse");
+  if (crowded && dwellings.length >= 4 && huts.length && !queued("longhouse")) {
+    demands.push({ type: "longhouse", score: 5 + dwellings.length * 0.5, reason: "The village is spreading — grow a hut into a longhouse instead." });
+  }
+  if (crowded && longhouses.length && !queued("greathall")) {
+    demands.push({ type: "greathall", score: 6 + dwellings.length * 0.5, reason: "A longhouse must grow into a great hall for the growing village." });
+  }
+  // Farmsteads: a farmhouse anchors a farm district. Demand rises with
+  // mouths to feed and with fields that have no farmhouse nearby.
+  const farmhouses = state.buildings.filter((b) => b.type === "farmhouse");
+  const farmNeed = pop * 4;
+  const unanchored = state._farmCells ? state._farmCells.filter(([x, z]) => !farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5)).length : 0;
+  if (!queued("farmhouse") && (edible < farmNeed || unanchored >= 12) && pop >= 8) {
+    demands.push({ type: "farmhouse", score: 4 + Math.min(3, Math.floor(unanchored / 6)), reason: "The fields need a farmhouse to work from." });
   }
   if (!built("granary") && !queued("granary")) {
     const sc = edible >= 25 ? 3 : (state.spoiled > 0 ? 2 : 0);
@@ -577,7 +625,7 @@ function doWork(state, grid, v, dt) {
   const [tx, tz] = v.target || [];
   const cell = tx != null ? grid[tx][tz] : null;
   v.workTimer += dt;
-  const need = v.job === "builder" ? 2.5 : v.job === "fisher" ? 3.0 : 1.6;
+  const need = v.job === "builder" ? 2.5 : v.job === "fisher" ? 9.0 : 1.6;
   if (v.workTimer < need) return;
   v.workTimer = 0;
   const addCarry = (type, amt = 1) => {
@@ -611,19 +659,23 @@ function doWork(state, grid, v, dt) {
     const q = state.buildQueue[0];
     if (q) {
       q.progress += 1;
-      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8 }[q.type] || 6;
+      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7 }[q.type] || 6;
       if (q.progress >= needProgress) {
         state.buildQueue.shift();
         const cost = BUILD_COSTS[q.type] || { wood: 0, stone: 0, ore: 0 };
         if (state.stockpile.wood >= cost.wood && state.stockpile.stone >= cost.stone && state.stockpile.ore >= (cost.ore || 0)) {
           state.stockpile.wood -= cost.wood; state.stockpile.stone -= cost.stone; state.stockpile.ore -= cost.ore || 0;
           const type = q.type || "hut";
-          if (type === "longhouse") {
-            const old = state.buildings.find((b) => b.x === q.x && b.z === q.z);
-            if (old) old.type = "longhouse";
-            grid[q.x][q.z].building = "longhouse";
-            state.populationCap += 4;
-            log(state, "A hut grows into a longhouse. The village can hold " + state.populationCap + " souls.");
+          if (type === "longhouse" || type === "greathall") {
+            const from = type === "longhouse" ? "hut" : "longhouse";
+            const old = state.buildings.find((b) => b.x === q.x && b.z === q.z && b.type === from);
+            const target = old || state.buildings.find((b) => b.x === q.x && b.z === q.z);
+            if (target) target.type = type;
+            grid[q.x][q.z].building = type;
+            state.populationCap += type === "longhouse" ? 4 : 6;
+            log(state, type === "longhouse"
+              ? "A hut grows into a longhouse. The village can hold " + state.populationCap + " souls."
+              : "A longhouse grows into a great hall. The village can hold " + state.populationCap + " souls.");
           } else {
             state.buildings.push({ type, x: q.x, z: q.z, done: true });
             grid[q.x][q.z].building = type;
@@ -646,6 +698,11 @@ function doWork(state, grid, v, dt) {
             } else if (type === "shrine") {
               state.faith = clamp(state.faith + 5, 0, 100);
               log(state, "A shrine is raised. The people take heart.");
+            } else if (type === "farmhouse") {
+              grid[q.x][q.z].blocked = true;
+              state.populationCap += 2;
+              const added = clearFarmBed(state, grid, q.x, q.z);
+              log(state, "A farmhouse rises, with " + added + " new field plots around it. It houses 2 farmhands.");
             }
           }
           assignHomes(state);
@@ -653,7 +710,7 @@ function doWork(state, grid, v, dt) {
           if (state.fund >= 2) { state.fund -= 2; v.coins += 2; }
         } else {
           log(state, "The " + (q.type || "hut") + " frame stands unfinished: not enough in the stockpile.");
-          if (q.type !== "longhouse") { grid[q.x][q.z].building = null; grid[q.x][q.z].blocked = false; }
+          if (q.type !== "longhouse" && q.type !== "greathall") { grid[q.x][q.z].building = null; grid[q.x][q.z].blocked = false; }
         }
       }
     }
@@ -666,24 +723,89 @@ function doWork(state, grid, v, dt) {
 // village marks its boundary; roads are laid toward the huts; a
 // persistent food shortage clears new farm ground. The god's Order Hut
 // is only ever an extra, faster hut.
-function findBuildSpot(state, grid, minR, maxR) {
+// --- village planning: zoned placement, not first-free-cell ---
+//
+// Housing forms a ring around the town center with breathing room
+// between dwellings; farms stay in the western farm district; the
+// workshop sits near stone; the shrine hugs the altar; the well stays
+// central; the granary sits near the center and the fields. Each
+// candidate cell is scored for its type, and the best wins — so the
+// village grows in districts instead of sprawling at random.
+export function scoreSpot(state, grid, x, z, type) {
   const cx = state._cx, cz = state._cz;
-  for (let r = minR; r <= maxR; r++) for (let a = 0; a < 8; a++) {
-    const x = Math.round(cx + Math.cos(a * Math.PI / 4) * r), z = Math.round(cz + Math.sin(a * Math.PI / 4) * r);
-    if (inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree) return [x, z];
+  const dist = Math.hypot(x - cx, z - cz);
+  const c = grid[x][z];
+  if (c.blocked || c.water || c.farm || c.building || c.tree) return -Infinity;
+  let score = 0;
+  // Breathing room: never build cheek-by-jowl with another dwelling.
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    if (!dx && !dz) continue;
+    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+    if (n && n.building && ["hut", "longhouse", "greathall", "farmhouse"].includes(n.building)) score -= 4;
+    if (n && n.road) score += 2; // road access is worth clustering near
   }
-  return null;
+  // Cluster, at arm's length: buildings two cells away are good neighbours.
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (Math.abs(dx) < 2 && Math.abs(dz) < 2) continue;
+    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+    if (n && n.building) score += 1.5;
+  }
+  if (type === "hut" || type === "longhouse" || type === "greathall") {
+    score -= Math.abs(dist - 6) * 1.2; // housing ring, radius ~6
+    if (x < cx - 3) score -= 2; // keep the western farm district clear
+  } else if (type === "farmhouse") {
+    score += x < cx ? 4 : -4; // farm district is west
+    let farmsNear = 0;
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) farmsNear++;
+    }
+    score += farmsNear * 1.2;
+    score -= Math.abs(dist - 10) * 0.6;
+  } else if (type === "granary") {
+    score -= Math.abs(dist - 4) * 1.0;
+    let farmsNear = 0;
+    for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) farmsNear++;
+    }
+    score += farmsNear * 0.4;
+  } else if (type === "well") {
+    score -= dist * 1.5; // as central as possible
+  } else if (type === "shrine") {
+    const altar = state.buildings.find((b) => b.type === "altar");
+    if (altar) score -= Math.hypot(x - altar.x, z - altar.z) * 3;
+  } else if (type === "workshop") {
+    let nearestStone = Infinity;
+    for (const [sx, sz] of state._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
+    score -= nearestStone * 0.8;
+    score -= Math.abs(dist - 7) * 0.5;
+  }
+  return score;
+}
+
+export function findPlannedSpot(state, grid, type, minR = 3, maxR = 14) {
+  const cx = state._cx, cz = state._cz;
+  let best = null, bestScore = -Infinity;
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+    if (Math.hypot(x - cx, z - cz) < minR || Math.hypot(x - cx, z - cz) > maxR) continue;
+    const sc = scoreSpot(state, grid, x, z, type);
+    if (sc > bestScore) { bestScore = sc; best = [x, z]; }
+  }
+  return bestScore > -Infinity ? best : null;
+}
+
+function findBuildSpot(state, grid, minR, maxR) {
+  return findPlannedSpot(state, grid, "granary", minR, maxR);
 }
 
 function paveRoads(state, grid) {
-  const huts = state.buildings.filter((b) => b.type === "hut");
-  if (!huts.length) return;
+  const targets = state.buildings.filter((b) => ["hut", "longhouse", "greathall", "farmhouse", "workshop", "granary"].includes(b.type));
+  if (!targets.length) return;
   const cx = state._cx, cz = state._cz;
-  // Pave toward the hut or farm plot whose path has the fewest road cells yet.
-  const targets = [...huts];
-  if (state._farmCells.length) targets.push({ x: state._farmCells[0][0], z: state._farmCells[0][1] });
+  // Pave toward the building or farm plot whose path has the fewest road cells yet.
+  const allTargets = [...targets];
+  if (state._farmCells.length) allTargets.push({ x: state._farmCells[0][0], z: state._farmCells[0][1] });
   let bestPath = null, bestRoads = Infinity;
-  for (const t of targets) {
+  for (const t of allTargets) {
     const path = findPath(grid, cx, cz, t.x, t.z);
     if (!path) continue;
     const roads = path.filter(([x, z]) => grid[x][z].road).length;
@@ -699,7 +821,7 @@ function paveRoads(state, grid) {
     if (c.tree) { c.tree = false; c.blocked = false; }
     paved++;
   }
-  if (paved) log(state, "Villagers lay a dirt road toward the huts.");
+  if (paved) log(state, "Villagers lay a dirt road toward the " + (bestPath ? "village districts." : "huts."));
 }
 
 export function expandVillage(state, grid) {
@@ -713,8 +835,11 @@ export function expandVillage(state, grid) {
       if (top.type === "longhouse") {
         const hut = state.buildings.find((b) => b.type === "hut");
         if (hut) spot = [hut.x, hut.z];
+      } else if (top.type === "greathall") {
+        const lh = state.buildings.find((b) => b.type === "longhouse");
+        if (lh) spot = [lh.x, lh.z];
       } else if (top.type === "hut") spot = findHutSpot(state, grid);
-      else spot = findBuildSpot(state, grid, 3, 7);
+      else spot = findPlannedSpot(state, grid, top.type, 2, 14);
       if (spot) {
         const c = BUILD_COSTS[top.type];
         state.buildQueue.push({ type: top.type, x: spot[0], z: spot[1], progress: 0, needWood: c.wood, needStone: c.stone, needOre: c.ore || 0 });
@@ -735,24 +860,61 @@ export function expandVillage(state, grid) {
     }
   }
   paveRoads(state, grid);
-  if (edible < 20 && state._farmCells.length < 30) {
-    const cx = state._cx, cz = state._cz;
-    let spot = null;
-    outer: for (const [fx, fz] of state._farmCells) {
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const x = fx + dx, z = fz + dz;
-        if (!inBounds(x, z)) continue;
-        const c = grid[x][z];
-        if (c.water || c.blocked || c.tree || c.farm || c.building) continue;
-        if (Math.hypot(x - cx, z - cz) > 14) continue;
-        spot = [x, z]; break outer;
-      }
+  expandFarms(state, grid);
+}
+
+// Farms grow in beds, not single cells: a 3x3 bed cleared next to the
+// existing farm district, biased west, as mouths to feed grow. A bed
+// near a farmhouse grows faster (see the crop loop in step()).
+export function findFarmBed(state, grid) {
+  const cx = state._cx, cz = state._cz;
+  let best = null, bestScore = -Infinity;
+  for (let x = 4; x < SIZE - 4; x++) for (let z = 4; z < SIZE - 4; z++) {
+    if (Math.hypot(x - cx, z - cz) > 16) continue;
+    let free = 0, farmsNear = 0, trees = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const c = grid[x + dx][z + dz];
+      if (c.water || c.building || c.road) { free = -99; break; }
+      if (c.farm) farmsNear++;
+      else if (!c.blocked) free++;
+      else if (c.tree) trees++;
     }
-    if (spot) {
-      const c = grid[spot[0]][spot[1]];
-      c.farm = true; c.crop = 0; c.cropGrow = 0;
-      state._farmCells.push(spot);
-      log(state, "The farmers clear new ground for crops.");
+    if (free < 0) continue;
+    const newCells = free + trees;
+    if (newCells < 3) continue; // a bed must add ground, not re-pick existing fields
+    if (free + farmsNear + trees < 9) continue;
+    const score = farmsNear * 3 + newCells * 1.5 + (x < cx ? 3 : 0) - Math.hypot(x - cx, z - cz) * 0.3 - trees * 0.5;
+    if (score > bestScore) { bestScore = score; best = [x, z]; }
+  }
+  return best;
+}
+
+export function clearFarmBed(state, grid, cx0, cz0) {
+  let added = 0;
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const x = cx0 + dx, z = cz0 + dz;
+    if (!inBounds(x, z)) continue;
+    const c = grid[x][z];
+    if (c.water || c.building || c.road || c.farm) continue;
+    if (c.tree) { c.tree = false; }
+    if (c.stone > 0) { c.stone = 0; c.ore = 0; }
+    c.blocked = false; c.farm = true; c.crop = 0; c.cropGrow = 0;
+    state._farmCells.push([x, z]);
+    added++;
+  }
+  return added;
+}
+
+export function expandFarms(state, grid) {
+  const s = state.stockpile;
+  const edible = s.food + s.fish + s.meat;
+  const pop = state.villagers.length;
+  const plotsPerPerson = state._farmCells.length / Math.max(1, pop);
+  if ((edible < 20 || edible < pop * 4 || plotsPerPerson < 2) && state._farmCells.length < 54) {
+    const bed = findFarmBed(state, grid);
+    if (bed) {
+      const added = clearFarmBed(state, grid, bed[0], bed[1]);
+      if (added) log(state, "The farmers clear a new bed of fields.");
     }
   }
 }
@@ -798,11 +960,14 @@ export function step(state, grid, dt) {
     state.effects.droughtUntil = Math.min(state.effects.droughtUntil, state.elapsed);
   }
 
-  // Crops grow.
+  // Crops grow. Plots within 5 cells of a farmhouse grow half again
+  // as fast — the farmhouse anchors the district.
   if (state.elapsed >= state.effects.droughtUntil) {
+    const farmhouses = state.buildings.filter((b) => b.type === "farmhouse");
     for (const [x, z] of state._farmCells) {
       const c = grid[x][z];
-      if (c.crop >= 0 && c.crop < 3) { c.cropGrow += dt; if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; } }
+      const nearHouse = farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5);
+      if (c.crop >= 0 && c.crop < 3) { c.cropGrow += dt * (nearHouse ? 1.5 : 1); if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; } }
     }
   }
   // Stone slowly weathers back, on a timer, so building never stalls
@@ -810,7 +975,7 @@ export function step(state, grid, dt) {
   if (state.elapsed >= (state.stoneAt || 30)) {
     state.stoneAt = state.elapsed + 30;
     const [x, z] = state._stoneSpots[Math.floor(state._rng() * state._stoneSpots.length)];
-    if (grid[x][z].stone < 8) { grid[x][z].stone++; grid[x][z].blocked = true; }
+    if (grid[x][z].stone < 10) { grid[x][z].stone += 2; grid[x][z].blocked = true; }
   }
 
   // Deer wander / flee.
@@ -980,13 +1145,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
 }
 
 function findHutSpot(state, grid) {
-  const cx = state._cx, cz = state._cz;
-  const candidates = [];
-  for (let r = 4; r <= 10; r++) for (let a = 0; a < 8; a++) {
-    const x = Math.round(cx + Math.cos(a * Math.PI / 4) * r), z = Math.round(cz + Math.sin(a * Math.PI / 4) * r);
-    if (inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building) candidates.push([x, z]);
-  }
-  return candidates[0] || null;
+  return findPlannedSpot(state, grid, "hut", 4, 12);
 }
 
 export function leader(state) {

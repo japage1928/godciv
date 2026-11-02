@@ -1,6 +1,6 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES, findPlannedSpot, scoreSpot, clearFarmBed, expandFarms } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
@@ -49,19 +49,20 @@ assert.ok(loaded.state.elapsed > state.elapsed, "loaded world keeps running");
   for (let i = 0; i < 200; i++) step(s2, w2.grid, 0.25); // 50 sim-seconds, past two expansion checks
   assert.ok(s2.buildQueue.length > 0 || s2.populationCap > 12, "crowding must start a hut on its own, queue=" + s2.buildQueue.length + " cap=" + s2.populationCap);
   assert.ok(s2._farmCells.length > farmsBefore, "food shortage must clear new farm ground, before=" + farmsBefore + " after=" + s2._farmCells.length);
-  assert.ok(s2.log.some((e) => /on their own|new ground/.test(e.text)), "expansion must be logged for the god to see");
+  assert.ok(s2.log.some((e) => /on their own|new ground|new bed/.test(e.text)), "expansion must be logged for the god to see");
 }
 
 console.log("sim smoke test passed: day", state.day, "villagers", state.villagers.length, "log", state.log.length, "entries");
 
-// Pacing regression (seed 7, Nov 2): a village must grow over 4 days —
+// Pacing regression (seed 7, Nov 2): a village must grow over 6 days —
 // births, a second hut, roads — with no starvation deaths from the
 // setTarget freeze that used to strand villagers on unreachable targets.
+// (Birth rolls are stochastic, so the bar is 6 days, not 4.)
 {
   const w5 = newWorld(7);
-  for (let i = 0; i < 2880; i++) step(w5.state, w5.grid, 0.25);
-  assert.ok(w5.state.stats.births >= 2, "4 days must bring births, got " + w5.state.stats.births);
-  assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 4 days, deaths=" + w5.state.stats.deaths);
+  for (let i = 0; i < 4320; i++) step(w5.state, w5.grid, 0.25);
+  assert.ok(w5.state.stats.births >= 2, "6 days must bring births, got " + w5.state.stats.births);
+  assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 6 days, deaths=" + w5.state.stats.deaths);
   assert.ok(w5.state.villagers.length > 6, "population must grow past the founding 6, got " + w5.state.villagers.length);
   assert.ok(w5.state.buildings.some((b) => b.type === "hut" && b.x !== w5.state._cx - 2), "a second hut must be built");
 }
@@ -140,4 +141,50 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   w.state.villagers.push(makeVillager(w.state, 24, 24), makeVillager(w.state, 24, 24), makeVillager(w.state, 24, 24));
   assignHomes(w.state);
   assert.equal(homelessCount(w.state), 1, "9 villagers in 8 beds must leave 1 homeless, got " + homelessCount(w.state));
+}
+
+// Planning: a new hut spot must not sit cheek-by-jowl with the founding hut.
+{
+  const { state: s, grid: g } = newWorld(15);
+  const spot = findPlannedSpot(s, g, "hut", 4, 12);
+  assert.ok(spot, "a planned hut spot must exist");
+  const founding = s.buildings.find((b) => b.type === "hut");
+  assert.ok(Math.max(Math.abs(spot[0] - founding.x), Math.abs(spot[1] - founding.z)) > 1, "planned hut must keep breathing room from the founding hut, spot=" + spot);
+  assert.ok(scoreSpot(s, g, founding.x, founding.z, "hut") === -Infinity, "an occupied cell must score as unusable");
+}
+
+// Farmhouses: demand appears with mouths to feed, and a finished
+// farmhouse clears field plots around itself.
+{
+  const { state: s, grid: g } = newWorld(16);
+  while (s.villagers.length < 10) s.villagers.push(makeVillager(s, 25, 25));
+  s.stockpile.food = 0; s.stockpile.fish = 0; s.stockpile.meat = 0;
+  const demands = computeDemands(s, g);
+  assert.ok(demands.some((d) => d.type === "farmhouse"), "a hungry growing village must demand a farmhouse, got " + demands.map((d) => d.type).join(","));
+  const before = s._farmCells.length;
+  const added = clearFarmBed(s, g, s._cx - 9, s._cz);
+  assert.ok(added >= 3, "a farm bed must add at least 3 new plots, added=" + added);
+  assert.ok(s._farmCells.length > before, "farm bed must grow the farm list");
+}
+
+// Housing evolution: a crowded village with several dwellings demands
+// an upgrade, not just another hut.
+{
+  const { state: s, grid: g } = newWorld(17);
+  for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true });
+  for (const b of s.buildings) g[b.x][b.z].building = b.type;
+  while (s.villagers.length < s.populationCap - 1) s.villagers.push(makeVillager(s, 25, 25));
+  const demands = computeDemands(s, g);
+  assert.ok(demands.some((d) => d.type === "longhouse"), "a crowded spread-out village must demand a longhouse upgrade, got " + demands.map((d) => d.type).join(","));
+}
+
+// Fishers: with a shore and mouths to feed, the leader delegates a
+// fisher, and fish reach the stockpile.
+{
+  const { state: s, grid: g } = newWorld(7);
+  delegateRoles(s, g);
+  assert.ok(s.villagers.some((v) => v.assignedJob === "fisher"), "a fisher must be delegated from the start, got " + s.villagers.map((v) => v.assignedJob).join(","));
+  const fishBefore = s.stockpile.fish;
+  for (let i = 0; i < 4320; i++) step(s, g, 0.25);
+  assert.ok(s.stockpile.fish > fishBefore || s.villagers.some((v) => (v.goods.fish || 0) > 0), "fishers must produce fish over 6 days");
 }

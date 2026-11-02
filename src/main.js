@@ -6,7 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v7";
+const APP_VERSION = "v8";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -103,8 +103,12 @@ function renderPanel() {
     const demands = computeDemands(s, world.grid);
     const huts = s.buildings.filter((b) => b.type === "hut").length;
     const longhouses = s.buildings.filter((b) => b.type === "longhouse").length;
+    const greathalls = s.buildings.filter((b) => b.type === "greathall").length;
+    const farmhouses = s.buildings.filter((b) => b.type === "farmhouse").length;
+    const farmPlots = world.grid.flat().filter((c) => c.farm).length;
     $("panel-body").innerHTML = `
-      <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p>Farms: <b>${farmPlots} plots</b>${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") + " (plots near one grow faster)" : " · no farmhouse yet"} · Food sources: farmers ${counts.farmer || 0} · fishers ${counts.fisher || 0} · hunters ${counts.hunter || 0}</p>
       <p>Market: fund <b>${s.fund}</b> coins · ${s.stats.trades || 0} trades · prices: ${Object.keys(PRICES).map((g) => g + " " + PRICES[g]).join(" · ")} — villagers trade personal goods at the town center; a broke villager still eats from the stockpile.</p>
       <p>Births: <b>${rates.birthRate.toFixed(1)}%/day</b> · Deaths: <b>${rates.deathRate.toFixed(1)}%/day</b> (${rates.birthsPerDay.toFixed(1)} births, ${rates.deathsPerDay.toFixed(1)} deaths per day, last ${s.rateHistory.length || 0} dawns · ${s.stats.births} born, ${s.stats.deaths} died all time)</p>
       <p>Builders need: <b>${demands.length ? demands[0].type + " — " + demands[0].reason : "nothing pressing"}</b></p>

@@ -253,6 +253,24 @@ export class Renderer {
       add(new THREE.BoxGeometry(0.7, 0.2, 0.7), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x664d00 }), 1.7);
       const flame = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.35, 6), new THREE.MeshBasicMaterial({ color: 0xfff176 }));
       flame.position.y = 2.0; g.add(flame);
+    } else if (type === "greathall") {
+      add(new THREE.BoxGeometry(3.2, 1.3, 2.0), wood, 0.65);
+      const door = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
+      door.position.set(0, 0.4, 1.03); g.add(door);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(2.4, 1.0, 4), new THREE.MeshLambertMaterial({ color: 0x4e342e }));
+      roof.position.y = 1.8; roof.rotation.y = Math.PI / 4; roof.scale.z = 0.65; g.add(roof);
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.6, 0.6), stone);
+      tower.position.set(1.4, 0.8, -0.7); g.add(tower);
+      const banner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
+      banner.position.set(0, 1.2, 1.05); g.add(banner);
+    } else if (type === "farmhouse") {
+      add(new THREE.BoxGeometry(1.8, 1.0, 1.5), new THREE.MeshLambertMaterial({ color: 0xa1887f }), 0.5);
+      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
+      door.position.set(0, 0.35, 0.78); g.add(door);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0x8d6e63 }));
+      roof.position.y = 1.4; roof.rotation.y = Math.PI / 4; g.add(roof);
+      const silo = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.3, 8), stone);
+      silo.position.set(1.05, 0.65, -0.4); g.add(silo);
     }
     return g;
   }
