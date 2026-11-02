@@ -171,11 +171,29 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 // an upgrade, not just another hut.
 {
   const { state: s, grid: g } = newWorld(17);
-  for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true });
+  for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true, builtDay: 1 });
   for (const b of s.buildings) g[b.x][b.z].building = b.type;
   while (s.villagers.length < s.populationCap - 1) s.villagers.push(makeVillager(s, 25, 25));
   const demands = computeDemands(s, g);
   assert.ok(demands.some((d) => d.type === "longhouse"), "a crowded spread-out village must demand a longhouse upgrade, got " + demands.map((d) => d.type).join(","));
+}
+
+// Upgrades also fire when nearly crowded (within 4 of the cap): in the
+// 30-day playtest the cap always jumped ahead, so the within-2 rule
+// never fired and no dwelling ever evolved.
+{
+  const { state: s, grid: g } = newWorld(18);
+  for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true, builtDay: 1 });
+  for (const b of s.buildings) g[b.x][b.z].building = b.type;
+  s.populationCap = 28;
+  while (s.villagers.length < 24) s.villagers.push(makeVillager(s, 25, 25));
+  const demands = computeDemands(s, g);
+  assert.ok(demands.some((d) => d.type === "longhouse"), "a nearly crowded village must demand an upgrade, got " + demands.map((d) => d.type).join(","));
+  // A grown village demands a shrine as a gathering place, even with faith fine.
+  s.faith = 60;
+  while (s.villagers.length < 14) s.villagers.push(makeVillager(s, 25, 25));
+  const demands2 = computeDemands(s, g);
+  assert.ok(demands2.some((d) => d.type === "shrine"), "a 14-person village must demand a shrine, got " + demands2.map((d) => d.type).join(","));
 }
 
 // Fishers: with a shore and mouths to feed, the leader delegates a

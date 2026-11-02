@@ -6,7 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v8";
+const APP_VERSION = "v9";
 
 let world = null; // {state, grid}
 let renderer = null;

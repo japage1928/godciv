@@ -125,7 +125,7 @@ export function newWorld(seed) {
     const x = Math.floor(rng() * SIZE), z = Math.floor(rng() * SIZE);
     if (grid[x][z].water || Math.hypot(x - cx, z - cz) < 7 || grid[x][z].tree || grid[x][z].farm) continue;
     grid[x][z].stone = 8 + Math.floor(rng() * 5);
-    grid[x][z].ore = grid[x][z].h > 0.62 && rng() < 0.45 ? 3 + Math.floor(rng() * 3) : 0;
+    grid[x][z].ore = grid[x][z].h > 0.55 && rng() < 0.6 ? 4 + Math.floor(rng() * 3) : 0;
     grid[x][z].blocked = true;
     stoneSpots.push([x, z]);
   }
@@ -137,9 +137,9 @@ export function newWorld(seed) {
     directive: null, // { focusJob } — a nudge, not an order
     buildQueue: [], // {type,x,z,progress,needWood,needStone}
     buildings: [
-      { type: "towncenter", x: cx, z: cz },
-      { type: "altar", x: cx + 2, z: cz },
-      { type: "hut", x: cx - 2, z: cz - 3, done: true },
+      { type: "towncenter", x: cx, z: cz, builtDay: 1 },
+      { type: "altar", x: cx + 2, z: cz, builtDay: 1 },
+      { type: "hut", x: cx - 2, z: cz - 3, done: true, builtDay: 1 },
     ],
     villagers: [], deer: [], log: [],
     effects: { droughtUntil: -1, floodUntil: -1, plagueUntil: -1 },
@@ -152,11 +152,13 @@ export function newWorld(seed) {
   state._rng = rng;
   state._farmCells = farmCells;
   state._stoneSpots = stoneSpots;
+  state._oreSpots = stoneSpots.filter(([x, z]) => grid[x][z].ore > 0);
   state._cx = cx; state._cz = cz;
 
   const spawnSpots = [[cx + 1, cz + 1], [cx - 1, cz + 1], [cx + 1, cz - 1], [cx - 1, cz - 1], [cx, cz + 2], [cx + 2, cz + 2]];
   for (let i = 0; i < 6; i++) state.villagers.push(makeVillager(state, spawnSpots[i][0], spawnSpots[i][1], i === 0));
   for (let i = 0; i < 4; i++) state.deer.push(makeDeer(state, cx + 8 + i * 2, cz + 8));
+  for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
   assignHomes(state);
   delegateRoles(state, grid);
   log(state, "The village wakes. Six villagers look to the sky, waiting for a sign.");
@@ -351,6 +353,7 @@ function scoreJob(state, v, job) {
   if (job === "builder") score += state.buildQueue.length ? 8 : -4;
   if (job === "hauler") score += v.carry ? 7 : 1.5;
   if (v.assignedJob === job) score += 12; // leader delegation: strong nudge, still refuseable
+  if (job === "fisher" && v.assignedJob === "fisher") score += 6; // a standing post: the delegated fisher stays at the shore instead of drifting to building/hauling while fish are plentiful
   if (state.directive && state.directive.focusJob === job) score += refusesDirective(state, v, job) ? -6 : 6;
   if (v.personalFocus === job) score += 4;
   if (v.job === job) score += 1; // stickiness: don't churn jobs every tick
@@ -398,6 +401,7 @@ function setTarget(state, grid, v, x, z) {
 // buyers to sellers at fixed prices; it runs every 30 sim-seconds.
 export function runMarket(state) {
   let trades = 0;
+  const summaries = [];
   for (let round = 0; round < 3 && trades < 3; round++) {
     let done = false;
     for (const buyer of state.villagers) {
@@ -415,13 +419,16 @@ export function runMarket(state) {
         seller.goods[g]--; buyer.goods[g] = (buyer.goods[g] || 0) + 1;
         buyer.coins -= price; seller.coins += price;
         state.stats.trades = (state.stats.trades || 0) + 1; trades++;
-        log(state, "At the market, " + seller.name + " trades 1 " + g + " to " + buyer.name + " for " + price + " coin" + (price > 1 ? "s" : "") + ".");
+        summaries.push(seller.name + " trades " + g + " to " + buyer.name);
         done = true; break;
       }
       if (done) break;
     }
     if (!done) break;
   }
+  // One log line per market round, so trades don't crowd births,
+  // deaths, and building news out of the god log.
+  if (summaries.length) log(state, "At the market: " + summaries.join("; ") + ".");
 }
 
 // --- demographics: age-based birth and death rates ---
@@ -505,14 +512,19 @@ export function computeDemands(state, grid) {
   // Housing evolution: as demand rises and the village spreads, growing
   // an existing dwelling beats sprawling further. A hut becomes a
   // longhouse (8 beds), a longhouse becomes a great hall (14 beds).
-  // Upgrades only outbid a new hut once several dwellings stand.
+  // Two triggers: near-crowding, OR prosperity — several dwellings,
+  // an old hut, and surplus wood and stone. The prosperity trigger
+  // exists because in the 30-day playtest the cap always jumped ahead
+  // of population, so crowding-only upgrades never fired at all.
   const huts = state.buildings.filter((b) => b.type === "hut");
   const longhouses = state.buildings.filter((b) => b.type === "longhouse");
-  if (crowded && dwellings.length >= 4 && huts.length && !queued("longhouse")) {
-    demands.push({ type: "longhouse", score: 5 + dwellings.length * 0.5, reason: "The village is spreading — grow a hut into a longhouse instead." });
+  const oldestHutAge = huts.length ? state.day - Math.min(...huts.map((b) => b.builtDay || 1)) : 0;  const prosperous = s.wood >= 40 && s.stone >= 20 && oldestHutAge >= 8;
+  const nearCrowded = pop >= state.populationCap - 4;
+  if ((nearCrowded || prosperous) && dwellings.length >= 4 && huts.length && !queued("longhouse")) {
+    demands.push({ type: "longhouse", score: 5 + dwellings.length * 0.5 + (prosperous ? 2 : 0), reason: "The village is spreading — grow a hut into a longhouse instead." });
   }
-  if (crowded && longhouses.length && !queued("greathall")) {
-    demands.push({ type: "greathall", score: 6 + dwellings.length * 0.5, reason: "A longhouse must grow into a great hall for the growing village." });
+  if ((nearCrowded || prosperous) && longhouses.length && !queued("greathall")) {
+    demands.push({ type: "greathall", score: 6 + dwellings.length * 0.5 + (prosperous ? 2 : 0), reason: "A longhouse must grow into a great hall for the growing village." });
   }
   // Farmsteads: a farmhouse anchors a farm district. Demand rises with
   // mouths to feed and with fields that have no farmhouse nearby.
@@ -532,8 +544,8 @@ export function computeDemands(state, grid) {
   if (!built("workshop") && !queued("workshop") && s.ore >= 4) {
     demands.push({ type: "workshop", score: 3, reason: "Ore is piling up — tools are needed." });
   }
-  if (!built("shrine") && !queued("shrine") && state.faith < 45) {
-    demands.push({ type: "shrine", score: 3, reason: "Faith is low — the people need a shrine." });
+  if (!built("shrine") && !queued("shrine") && (state.faith < 45 || pop >= 14)) {
+    demands.push({ type: "shrine", score: 3, reason: state.faith < 45 ? "Faith is low — the people need a shrine." : "The village has grown — it needs a gathering shrine." });
   }
   demands.sort((a, b) => b.score - a.score);
   return demands;
@@ -586,7 +598,7 @@ function think(state, grid, v) {
     }
     if (second) {
       job = second; v.delegated = false;
-      if (state._rng() < 0.2) log(state, v.name + " ignores the leader's delegation and works as a " + job + " instead.");
+      if (state._rng() < 0.08) log(state, v.name + " ignores the leader's delegation and works as a " + job + " instead.");
     }
   }
   v.job = job;
@@ -677,7 +689,7 @@ function doWork(state, grid, v, dt) {
               ? "A hut grows into a longhouse. The village can hold " + state.populationCap + " souls."
               : "A longhouse grows into a great hall. The village can hold " + state.populationCap + " souls.");
           } else {
-            state.buildings.push({ type, x: q.x, z: q.z, done: true });
+            state.buildings.push({ type, x: q.x, z: q.z, done: true, builtDay: state.day });
             grid[q.x][q.z].building = type;
             if (type === "hut") {
               grid[q.x][q.z].blocked = true;
@@ -833,10 +845,10 @@ export function expandVillage(state, grid) {
     if (canAfford(state, top.type)) {
       let spot = null;
       if (top.type === "longhouse") {
-        const hut = state.buildings.find((b) => b.type === "hut");
+        const hut = [...state.buildings].filter((b) => b.type === "hut").sort((a, b) => (a.builtDay || 1) - (b.builtDay || 1))[0];
         if (hut) spot = [hut.x, hut.z];
       } else if (top.type === "greathall") {
-        const lh = state.buildings.find((b) => b.type === "longhouse");
+        const lh = [...state.buildings].filter((b) => b.type === "longhouse").sort((a, b) => (a.builtDay || 1) - (b.builtDay || 1))[0];
         if (lh) spot = [lh.x, lh.z];
       } else if (top.type === "hut") spot = findHutSpot(state, grid);
       else spot = findPlannedSpot(state, grid, top.type, 2, 14);
@@ -976,6 +988,11 @@ export function step(state, grid, dt) {
     state.stoneAt = state.elapsed + 30;
     const [x, z] = state._stoneSpots[Math.floor(state._rng() * state._stoneSpots.length)];
     if (grid[x][z].stone < 10) { grid[x][z].stone += 2; grid[x][z].blocked = true; }
+    // Ore weathers back slowly too, so a workshop stays reachable.
+    if (state._oreSpots && state._oreSpots.length && state._rng() < 0.3) {
+      const [ox, oz] = state._oreSpots[Math.floor(state._rng() * state._oreSpots.length)];
+      if (grid[ox][oz].ore < 6) { grid[ox][oz].ore++; grid[ox][oz].blocked = true; }
+    }
   }
 
   // Deer wander / flee.
@@ -1037,9 +1054,14 @@ export function step(state, grid, dt) {
       if (v.state === "eat") {
         // Eat personal goods first, then buy from the stockpile with
         // coins; a villager with no coins still gets a communal ration.
+        // Most-abundant kind first, so a fish surplus gets eaten
+        // instead of sitting in storage while food spoils away at dawn.
         const s = state.stockpile;
-        const eatKind = v.goods.food > 0 ? "food" : v.goods.fish > 0 ? "fish" : v.goods.meat > 0 ? "meat"
-          : s.food > 0 ? "food" : s.fish > 0 ? "fish" : s.meat > 0 ? "meat" : null;
+        const mostAbundant = (store) => [["food", store.food || 0], ["fish", store.fish || 0], ["meat", store.meat || 0]]
+          .sort((a, b) => b[1] - a[1]).find(([, n]) => n > 0);
+        const personal = mostAbundant(v.goods);
+        const pile = mostAbundant(s);
+        const eatKind = personal ? personal[0] : pile ? pile[0] : null;
         if (eatKind) {
           if (v.goods[eatKind] > 0) v.goods[eatKind]--;
           else {
@@ -1163,8 +1185,8 @@ export function serialize(state, grid) {
     if (c.building) buildings.push([x, z, c.building]);
     if (c.road) roads.push([x, z]);
   }
-  const { _rng, _farmCells, _stoneSpots, _fire, _quake, ...rest } = state;
-  void _rng; void _farmCells; void _stoneSpots;
+  const { _rng, _farmCells, _stoneSpots, _oreSpots, _fire, _quake, ...rest } = state;
+  void _rng; void _farmCells; void _stoneSpots; void _oreSpots;
   return JSON.stringify({ ...rest, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
 }
 
@@ -1198,6 +1220,7 @@ export function deserialize(json) {
     if (v.toolTick == null) v.toolTick = 0;
     if (!("home" in v)) v.home = null;
   }
+  for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
   assignHomes(state);
   state._rng = mulberry32((data.seed ^ 0x9e3779b9) + Math.floor(state.elapsed * 1000));
   for (const [x, z, crop, grow] of savedCrops) { grid[x][z].farm = true; grid[x][z].crop = crop; grid[x][z].cropGrow = grow; }
