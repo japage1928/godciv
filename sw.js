@@ -1,6 +1,6 @@
 /* GodCiv service worker: cache-first app shell so the game works offline
    after the first load. Version the cache name when the shell changes. */
-const CACHE = "godciv-v2";
+const CACHE = "godciv-v3";
 const PRECACHE = [
   "./",
   "./index.html",
@@ -27,6 +27,17 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   // Only cache same-origin GETs. Ollama and any other API calls go to the network.
   if (event.request.method !== "GET" || url.origin !== location.origin) return;
+  // Navigations are network-first: a cached old shell must never hide a
+  // deploy (the stale-PWA lesson). Cached HTML is only the offline fallback.
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request).then((res) => {
+        if (res && res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(event.request, copy)); }
+        return res;
+      }).catch(() => caches.match(event.request, { ignoreSearch: true }).then((hit) => hit || caches.match("./index.html")))
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;

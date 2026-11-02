@@ -6,8 +6,14 @@ import { SIZE } from "./sim.js";
 const JOB_COLORS = { farmer: 0x4caf50, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63 };
 const CELL = 1;
 
-// Procedural canvas texture: speckled ground so tiles read as grass/dirt
-// instead of flat colour. No image assets, so it works offline.
+// Pure pan math, exported so tests can prove all four drag directions
+// move the view and that opposite drags cancel. Screen-right on the ground
+// is (cos yaw, -sin yaw) and screen-down is (sin yaw, cos yaw).
+export function computePanDelta(yaw, scale, dx, dy) {
+  const sin = Math.sin(yaw), cos = Math.cos(yaw);
+  return [-(dx * cos + dy * sin) * scale, -(-dx * sin + dy * cos) * scale];
+}
+
 function makeSpeckleTexture(base, speckles, size = 128) {
   const c = document.createElement("canvas");
   c.width = size; c.height = size;
@@ -370,18 +376,20 @@ export class Renderer {
   centerOn(x, z) { this.target.set(x, 0, z); }
 
   // Drag the world under the finger: the ground point under the finger
-  // stays under the finger. Screen-right on the ground is (cos yaw, -sin yaw)
-  // and screen-down on the ground is (sin yaw, cos yaw) for this camera.
-  // The v1 code had the yaw sign flipped here, so dragging felt diagonal.
+  // stays under the finger. The v1 code had the yaw sign flipped here, so
+  // dragging along a diagonal cancelled out in one axis and the view only
+  // moved right/down. See computePanDelta and tests/pan_smoke.mjs.
   _panBy(dx, dy) {
     const h = this.canvas.clientHeight || window.innerHeight;
     const scale = (2 * this.distance * Math.tan((this.camera.fov * Math.PI / 180) / 2)) / Math.max(1, h);
-    const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
-    this.target.x -= (dx * cos + dy * sin) * scale;
-    this.target.z -= (-dx * sin + dy * cos) * scale;
-    this.target.x = Math.max(-2, Math.min(SIZE + 2, this.target.x));
-    this.target.z = Math.max(-2, Math.min(SIZE + 2, this.target.z));
+    const [dtx, dtz] = computePanDelta(this.yaw, scale, dx, dy);
+    this.target.x += dtx;
+    this.target.z += dtz;
+    this.target.x = Math.max(-8, Math.min(SIZE + 8, this.target.x));
+    this.target.z = Math.max(-8, Math.min(SIZE + 8, this.target.z));
   }
+
+  panScreen(dx, dy) { this._panBy(dx, dy); }
 
   _initInput() {
     const pointers = new Map();
@@ -438,6 +446,7 @@ export class Renderer {
     };
     el.addEventListener("pointerup", up);
     el.addEventListener("pointercancel", up);
+    el.addEventListener("lostpointercapture", () => { pointers.clear(); pinch = null; });
     el.addEventListener("wheel", (e) => { e.preventDefault(); this.zoom(1 + Math.sign(e.deltaY) * 0.1); }, { passive: false });
   }
 

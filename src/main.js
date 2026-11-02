@@ -6,6 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
+const APP_VERSION = "v3";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -40,6 +41,8 @@ function renderHUD() {
   $("faith-fill").style.width = s.faith + "%";
   $("stat-day").textContent = "Day " + s.day + " · " + fmtTime(s);
   $("stat-pop").textContent = s.villagers.length + "/" + s.populationCap;
+  if (renderer) $("stat-view").textContent = "View " + Math.round(renderer.target.x) + "," + Math.round(renderer.target.z);
+  $("version-chip").textContent = APP_VERSION;
   const effects = [];
   if (s.elapsed < s.effects.droughtUntil) effects.push("Drought");
   if (s.elapsed < s.effects.floodUntil) effects.push("Flood");
@@ -242,6 +245,18 @@ function bindUI() {
   $("btn-rotate-r").addEventListener("click", () => renderer.rotate(1));
   $("btn-zoom-in").addEventListener("click", () => renderer.zoomIn());
   $("btn-zoom-out").addEventListener("click", () => renderer.zoomOut());
+  // Arrow pad: hold to pan. This works even if a browser gesture eats a
+  // drag, and the View chip above shows the target moving.
+  document.querySelectorAll("[data-pan]").forEach((btn) => {
+    const [dx, dy] = btn.dataset.pan.split(",").map(Number);
+    let timer = null;
+    const start = (e) => { e.preventDefault(); if (renderer) renderer.panScreen(dx, dy); timer = setInterval(() => renderer && renderer.panScreen(dx, dy), 50); };
+    const stop = () => { clearInterval(timer); timer = null; };
+    btn.addEventListener("pointerdown", start);
+    btn.addEventListener("pointerup", stop);
+    btn.addEventListener("pointercancel", stop);
+    btn.addEventListener("pointerleave", stop);
+  });
   $("btn-save").addEventListener("click", () => saveGame(false));
   $("btn-settings").addEventListener("click", () => {
     $("set-enabled").checked = ollama.enabled;
@@ -310,6 +325,13 @@ requestAnimationFrame(loop);
 
 // Register the service worker for install/offline. Fail silently on
 // file:// or in browsers that block it; the game still runs.
+// If an update takes control on a page that already had one, reload once
+// so the user is never stuck on a cached old version after a deploy.
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
   window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
 }

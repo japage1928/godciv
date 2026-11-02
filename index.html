@@ -16,9 +16,9 @@
 <style>
   :root { color-scheme: dark; --panel: rgba(16,24,16,.92); --accent: #ffd700; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a0e; font-family: system-ui, -apple-system, sans-serif; color: #eef5ee; }
-  #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; }
-  #scene-wrap { position: relative; flex: 1; min-height: 0; }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0e1a0e; font-family: system-ui, -apple-system, sans-serif; color: #eef5ee; }
+  #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; touch-action: none; }
+  #scene-wrap { position: relative; flex: 1; min-height: 0; touch-action: none; }
   #scene { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
   #hud { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: calc(6px + env(safe-area-inset-top)) 8px 6px; background: var(--panel); font-size: 13px; z-index: 5; }
   .chip { background: #243524; border: 1px solid #3a523a; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
@@ -49,6 +49,12 @@
   #arm-banner { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; background: #b71c1c; padding: 10px 14px; border-radius: 999px; z-index: 7; font-size: 14px; white-space: nowrap; max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%) translateY(8px); bottom: 118px; background: #111; border: 1px solid #555; padding: 10px 14px; border-radius: 10px; z-index: 8; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; max-width: calc(100% - 24px); text-align: center; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #panpad { position: absolute; left: 8px; bottom: 118px; z-index: 7; display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; opacity: .92; }
+  #panpad button { font-size: 20px; padding: 0; background: rgba(16,24,16,.85); touch-action: none; }
+  #panpad .up { grid-column: 2; grid-row: 1; }
+  #panpad .left { grid-column: 1; grid-row: 2; }
+  #panpad .right { grid-column: 3; grid-row: 2; }
+  #panpad .down { grid-column: 2; grid-row: 3; }
   #whisper-box { position: absolute; left: 8px; right: 8px; bottom: 118px; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 10px; z-index: 8; display: none; }
   #whisper-box input { width: 100%; margin-bottom: 8px; }
   #start-overlay { position: fixed; inset: 0; z-index: 20; background: rgba(8,14,8,.94); display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -80,6 +86,8 @@
     <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
     <span class="chip" id="stat-day">Day 1</span>
     <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
+    <span class="chip" id="stat-view">View 24,24</span>
+    <span class="chip" id="version-chip">v3</span>
     <span class="chip" id="stat-effects" style="display:none"></span>
     <span id="top-actions">
       <button id="btn-panel" title="Village panel">🏛️</button>
@@ -105,6 +113,12 @@
       <div id="panel-body"></div>
     </div>
     <div id="toast" role="status"></div>
+    <div id="panpad" aria-label="Pan view">
+      <button class="up" data-pan="0,-40" title="Pan up">▲</button>
+      <button class="left" data-pan="-40,0" title="Pan left">◀</button>
+      <button class="right" data-pan="40,0" title="Pan right">▶</button>
+      <button class="down" data-pan="0,40" title="Pan down">▼</button>
+    </div>
     <div id="whisper-box">
       <input id="whisper-input" maxlength="200" placeholder="Whisper to the village… (they may mishear you)">
       <div class="row" style="display:flex;gap:6px"><button id="whisper-send">Whisper</button><button id="whisper-cancel">Cancel</button></div>
