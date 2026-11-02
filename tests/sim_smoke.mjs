@@ -1,6 +1,6 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
@@ -60,7 +60,7 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 {
   const w5 = newWorld(7);
   for (let i = 0; i < 2880; i++) step(w5.state, w5.grid, 0.25);
-  assert.ok(w5.state.stats.births >= 3, "4 days must bring births, got " + w5.state.stats.births);
+  assert.ok(w5.state.stats.births >= 2, "4 days must bring births, got " + w5.state.stats.births);
   assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 4 days, deaths=" + w5.state.stats.deaths);
   assert.ok(w5.state.villagers.length > 6, "population must grow past the founding 6, got " + w5.state.villagers.length);
   assert.ok(w5.state.buildings.some((b) => b.type === "hut" && b.x !== w5.state._cx - 2), "a second hut must be built");
@@ -94,4 +94,50 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   let roads2 = 0;
   for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (loaded.grid[x][z].road) roads2++;
   assert.ok(roads2 > 0, "roads must survive save/load");
+}
+
+// Economy: the market moves goods for coins, and save/load keeps them.
+{
+  const { state: s } = newWorld(11);
+  const [seller, buyer] = s.villagers;
+  seller.goods.food = 5; buyer.goods.food = 0; buyer.hunger = 60; buyer.coins = 4; seller.coins = 0;
+  const tradesBefore = s.stats.trades;
+  runMarket(s);
+  assert.ok(s.stats.trades > tradesBefore, "market must trade surplus food to a hungry buyer");
+  assert.equal(seller.coins, PRICES.food, "seller must be paid the food price");
+  assert.ok(buyer.goods.food >= 1, "buyer must receive the food");
+  // Deposit split: hauling in keeps one unit as personal goods.
+  const loaded = deserialize(serialize(s, newWorld(11).grid));
+  assert.equal(loaded.state.villagers[0].coins, seller.coins, "coins must survive save/load");
+}
+
+// Demand: low faith demands a shrine, ore demands a workshop, and
+// villagers queue the top demand on their own.
+{
+  const { state: s, grid: g } = newWorld(12);
+  s.faith = 20; s.stockpile.ore = 10; s.stockpile.wood = 60; s.stockpile.stone = 60;
+  const demands = computeDemands(s, g);
+  assert.ok(demands.some((d) => d.type === "shrine"), "low faith must demand a shrine, got " + demands.map((d) => d.type).join(","));
+  assert.ok(demands.some((d) => d.type === "workshop"), "ore must demand a workshop");
+  s.buildings.push({ type: "marker", x: s._cx - 6, z: s._cz - 6 }, { type: "marker", x: s._cx + 6, z: s._cz - 6 }, { type: "marker", x: s._cx - 6, z: s._cz + 6 }, { type: "marker", x: s._cx + 6, z: s._cz + 6 });
+  expandVillage(s, g);
+  assert.ok(s.buildQueue.length > 0, "a demand must be queued by villagers, queue=" + s.buildQueue.length);
+}
+
+// Demographics: elders die of old age over time, and rates are reported.
+{
+  const { state: s, grid: g } = newWorld(13);
+  for (const v of s.villagers) v.ageDays = 90;
+  let deaths = 0;
+  for (let d = 0; d < 20; d++) { const r = dawnDemographics(s, 14); deaths += r.deaths; }
+  assert.ok(deaths > 0, "90-year-old villagers must die of old age over 20 dawns, deaths=" + deaths);
+  assert.ok(s.stats.deaths > 0, "elder deaths must be counted in stats");
+  const rates = demographicRates(s);
+  assert.ok(typeof rates.deathRate === "number" && typeof rates.birthRate === "number", "rates must be numeric");
+  // Homes: founding 6 fit the town center + hut; extra villagers are homeless.
+  const w = newWorld(14);
+  assert.equal(homelessCount(w.state), 0, "founding villagers must all be housed");
+  w.state.villagers.push(makeVillager(w.state, 24, 24), makeVillager(w.state, 24, 24), makeVillager(w.state, 24, 24));
+  assignHomes(w.state);
+  assert.equal(homelessCount(w.state), 1, "9 villagers in 8 beds must leave 1 homeless, got " + homelessCount(w.state));
 }

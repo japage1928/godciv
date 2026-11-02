@@ -1,12 +1,12 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v6";
+const APP_VERSION = "v7";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -61,8 +61,11 @@ function renderHUD() {
 function villagerCard(v) {
   if (!v) return "";
   const carry = v.carry ? v.carry.amt + " " + v.carry.type : "empty hands";
+  const goods = Object.keys(PRICES).filter((g) => (v.goods[g] || 0) > 0).map((g) => g + " " + v.goods[g]).join(" · ") || "no personal goods";
+  const age = v.ageDays < 3 ? "child" : v.ageDays >= 45 ? "elder, " + v.ageDays + "d" : v.ageDays + "d old";
   return `<h3>${v.name}${v.leader ? " · Leader" : ""}</h3>
-    <p class="muted">${v.job} · ${v.state} · ${carry}</p>
+    <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}</p>
+    <p>Coins: <b>${v.coins}</b> · Personal goods: ${goods}</p>
     <p>Delegated by the leader: <b>${v.assignedJob || "none yet"}</b>${v.delegated ? " · following it" : v.assignedJob ? " · chose own work" : ""}</p>
     <p>Traits: ${v.traits.join(", ")}</p>
     <div class="bars">
@@ -96,8 +99,15 @@ function renderPanel() {
     const assigned = {};
     for (const o of s.villagers) if (o.assignedJob) assigned[o.assignedJob] = (assigned[o.assignedJob] || 0) + 1;
     const l = s.villagers.find((o) => o.leader);
+    const rates = demographicRates(s);
+    const demands = computeDemands(s, world.grid);
+    const huts = s.buildings.filter((b) => b.type === "hut").length;
+    const longhouses = s.buildings.filter((b) => b.type === "longhouse").length;
     $("panel-body").innerHTML = `
-      <p class="muted">${s.villagers.length} villagers · ${s.buildings.filter((b) => b.type === "hut").length} huts · ${s.buildQueue.length} build(s) queued</p>
+      <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p>Market: fund <b>${s.fund}</b> coins · ${s.stats.trades || 0} trades · prices: ${Object.keys(PRICES).map((g) => g + " " + PRICES[g]).join(" · ")} — villagers trade personal goods at the town center; a broke villager still eats from the stockpile.</p>
+      <p>Births: <b>${rates.birthRate.toFixed(1)}%/day</b> · Deaths: <b>${rates.deathRate.toFixed(1)}%/day</b> (${rates.birthsPerDay.toFixed(1)} births, ${rates.deathsPerDay.toFixed(1)} deaths per day, last ${s.rateHistory.length || 0} dawns · ${s.stats.births} born, ${s.stats.deaths} died all time)</p>
+      <p>Builders need: <b>${demands.length ? demands[0].type + " — " + demands[0].reason : "nothing pressing"}</b></p>
       <p>Leader: <b>${l ? l.name : "none"}</b> — delegates: ${JOBS.map((j) => j + " " + (assigned[j] || 0)).join(" · ")}</p>
       <p class="muted">Buildings: ${s.buildings.map((b) => b.type).join(", ")}. Town center, granary, roads, and markers are all raised by villagers, never by the god. Huts build themselves when crowded, farms spread when food is short.</p>
       <p>Jobs: ${JOBS.map((j) => j + " " + (counts[j] || 0)).join(" · ")}</p>

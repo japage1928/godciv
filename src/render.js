@@ -222,6 +222,37 @@ export class Renderer {
       door.position.set(0, 0.35, 0.88); g.add(door);
       const roof = new THREE.Mesh(new THREE.ConeGeometry(1.45, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0xa52a2a }));
       roof.position.y = 1.45; roof.rotation.y = Math.PI / 4; g.add(roof);
+    } else if (type === "longhouse") {
+      add(new THREE.BoxGeometry(2.6, 1.1, 1.8), wood, 0.55);
+      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
+      door.position.set(0, 0.35, 0.93); g.add(door);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(2.0, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0x6d1a1a }));
+      roof.position.y = 1.55; roof.rotation.y = Math.PI / 4; roof.scale.z = 0.75; g.add(roof);
+    } else if (type === "well") {
+      const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.7, 8), stone);
+      ring.position.y = 0.35; g.add(ring);
+      const water = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.1, 8), new THREE.MeshLambertMaterial({ color: 0x29b6f6 }));
+      water.position.y = 0.65; g.add(water);
+      for (const sx of [-0.5, 0.5]) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12), wood);
+        post.position.set(sx, 0.55, 0); g.add(post);
+      }
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(0.85, 0.5, 4), new THREE.MeshLambertMaterial({ color: 0x5d4037 }));
+      roof.position.y = 1.35; roof.rotation.y = Math.PI / 4; g.add(roof);
+    } else if (type === "workshop") {
+      add(new THREE.BoxGeometry(2.0, 1.1, 1.6), wood, 0.55);
+      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.0, 0.4), stone);
+      chimney.position.set(0.7, 1.5, -0.4); g.add(chimney);
+      const anvil = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.35, 0.3), new THREE.MeshLambertMaterial({ color: 0x37474f }));
+      anvil.position.set(-0.6, 0.18, 0.95); g.add(anvil);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.6, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0x455a64 }));
+      roof.position.y = 1.5; roof.rotation.y = Math.PI / 4; g.add(roof);
+    } else if (type === "shrine") {
+      add(new THREE.BoxGeometry(1.3, 0.3, 1.3), stone, 0.15);
+      add(new THREE.BoxGeometry(0.45, 1.3, 0.45), new THREE.MeshLambertMaterial({ color: 0xefebe9 }), 0.95);
+      add(new THREE.BoxGeometry(0.7, 0.2, 0.7), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x664d00 }), 1.7);
+      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.35, 6), new THREE.MeshBasicMaterial({ color: 0xfff176 }));
+      flame.position.y = 2.0; g.add(flame);
     }
     return g;
   }
