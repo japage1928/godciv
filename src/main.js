@@ -6,7 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v3";
+const APP_VERSION = "v4";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -94,6 +94,7 @@ function renderPanel() {
     for (const o of s.villagers) counts[o.job] = (counts[o.job] || 0) + 1;
     $("panel-body").innerHTML = `
       <p class="muted">${s.villagers.length} villagers · ${s.buildings.filter((b) => b.type === "hut").length} huts · ${s.buildQueue.length} hut(s) queued</p>
+      <p class="muted">Huts build themselves when the village gets crowded, and farms spread when food is short. You never have to order building.</p>
       <p>Jobs: ${JOBS.map((j) => j + " " + (counts[j] || 0)).join(" · ")}</p>
       <label for="directive-select">Leader directive (a nudge, villagers can disobey)</label>
       <select id="directive-select">

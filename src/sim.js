@@ -113,7 +113,7 @@ export function newWorld(seed) {
   const state = {
     version: 1, seed, day: 1, time: 0.3, speed: 1, paused: false,
     stockpile: { food: 24, wood: 24, stone: 12, ore: 0, fish: 0, meat: 0 },
-    faith: 55, populationCap: 12,
+    faith: 55, populationCap: 12, expandAt: 10,
     directive: null, // { focusJob } — a nudge, not an order
     buildQueue: [], // {x,z,progress,needWood,needStone}
     buildings: [
@@ -338,9 +338,45 @@ function doWork(state, grid, v, dt) {
   if (v.carry && v.carry.amt >= v.carryCap) { v.state = "haul"; setTarget(state, grid, v, state._cx, state._cz); }
 }
 
+// Autonomous expansion: the village grows on demand, with no god order
+// needed. Crowding starts a hut; a persistent food shortage clears new
+// farm ground. The god's Order Hut is only ever an extra, faster hut.
+export function expandVillage(state, grid) {
+  const s = state.stockpile;
+  const edible = s.food + s.fish + s.meat;
+  if (state.villagers.length >= state.populationCap - 2 && state.buildQueue.length < 2 && s.wood >= 12 && s.stone >= 6) {
+    const spot = findHutSpot(state, grid);
+    if (spot) {
+      state.buildQueue.push({ x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6 });
+      log(state, "Crowded, the builders start a new hut on their own.");
+    }
+  }
+  if (edible < 20 && state._farmCells.length < 30) {
+    const cx = state._cx, cz = state._cz;
+    let spot = null;
+    outer: for (const [fx, fz] of state._farmCells) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = fx + dx, z = fz + dz;
+        if (!inBounds(x, z)) continue;
+        const c = grid[x][z];
+        if (c.water || c.blocked || c.tree || c.farm || c.building) continue;
+        if (Math.hypot(x - cx, z - cz) > 14) continue;
+        spot = [x, z]; break outer;
+      }
+    }
+    if (spot) {
+      const c = grid[spot[0]][spot[1]];
+      c.farm = true; c.crop = 0; c.cropGrow = 0;
+      state._farmCells.push(spot);
+      log(state, "The farmers clear new ground for crops.");
+    }
+  }
+}
+
 export function step(state, grid, dt) {
   if (state.paused) return;
   state.elapsed += dt;
+  if (state.elapsed >= state.expandAt) { state.expandAt = state.elapsed + 20; expandVillage(state, grid); }
   state.time += dt / DAY_LENGTH;
   if (state.time >= 1) {
     state.time -= 1; state.day += 1;
@@ -498,7 +534,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       log(state, "You order a hut. A builder will take it up, if they choose."); setCd(10); break;
     }
     case "villager":
-      if (state.villagers.length >= state.populationCap) return { ok: false, reason: "The village is full. Build a hut first." };
+      if (state.villagers.length >= state.populationCap) return { ok: false, reason: "The village is full. Builders raise a hut on their own once they have wood and stone." };
       if (state.faith < 20) return { ok: false, reason: "Faith too low. The people will not follow a stranger in." };
       state.villagers.push(makeVillager(state, state._cx + 1, state._cz + 1));
       state.faith = clamp(state.faith - 10, 0, 100);
@@ -555,6 +591,10 @@ export function deserialize(json) {
   Object.assign(state, data);
   state._rng = mulberry32((data.seed ^ 0x9e3779b9) + Math.floor(state.elapsed * 1000));
   for (const [x, z, crop, grow] of savedCrops) { grid[x][z].crop = crop; grid[x][z].cropGrow = grow; }
+  // Rebuild the farm list from the grid so farms cleared by expansion
+  // before the save keep growing after load.
+  state._farmCells = [];
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) state._farmCells.push([x, z]);
   for (const [x, z, stone, ore, blocked] of savedStones) { grid[x][z].stone = stone; grid[x][z].ore = ore; grid[x][z].blocked = !!blocked; }
   for (const [x, z, type] of savedBuildings) grid[x][z].building = type;
   state._fire = savedFire || null; state._quake = savedQuake || null;

@@ -1,6 +1,6 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
@@ -37,5 +37,19 @@ assert.equal(loaded.state.villagers.length, state.villagers.length, "population 
 assert.equal(loaded.state.stockpile.food, state.stockpile.food, "stockpile survives round-trip");
 for (let i = 0; i < 400; i++) step(loaded.state, loaded.grid, 0.25);
 assert.ok(loaded.state.elapsed > state.elapsed, "loaded world keeps running");
+
+// Autonomous expansion: a crowded village with resources starts a hut
+// with no god order, and a hungry village clears new farm ground.
+{
+  const w2 = newWorld(777);
+  const s2 = w2.state;
+  s2.stockpile.wood = 50; s2.stockpile.stone = 50; s2.stockpile.food = 0; s2.stockpile.fish = 0; s2.stockpile.meat = 0;
+  while (s2.villagers.length < 11) s2.villagers.push(makeVillager(s2, 25, 25));
+  const farmsBefore = s2._farmCells.length;
+  for (let i = 0; i < 200; i++) step(s2, w2.grid, 0.25); // 50 sim-seconds, past two expansion checks
+  assert.ok(s2.buildQueue.length > 0 || s2.populationCap > 12, "crowding must start a hut on its own, queue=" + s2.buildQueue.length + " cap=" + s2.populationCap);
+  assert.ok(s2._farmCells.length > farmsBefore, "food shortage must clear new farm ground, before=" + farmsBefore + " after=" + s2._farmCells.length);
+  assert.ok(s2.log.some((e) => /on their own|new ground/.test(e.text)), "expansion must be logged for the god to see");
+}
 
 console.log("sim smoke test passed: day", state.day, "villagers", state.villagers.length, "log", state.log.length, "entries");

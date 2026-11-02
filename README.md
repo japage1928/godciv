@@ -33,6 +33,7 @@ The sim owns the truth (`src/sim.js`, no DOM, no Three.js — testable with node
 - **Traits:** devout, skeptic, brave, cautious, industrious, lazy, kind, greedy (two per villager). Skills 0–2 per job.
 - **Disobedience:** a directive is a nudge through the leader. Skeptics, low faith, and fear raise the chance a villager ignores it and keeps working.
 - **Population:** if edible food is in surplus at dawn and there is room, a new villager joins. Huts raise the cap by 4. Deaths cost faith.
+- **Autonomous expansion:** nobody waits for a god order to build. When the village is within 2 of its cap and the stockpile holds 12 wood and 6 stone, builders start a hut on their own. When edible food stays below 20, farmers clear new farm ground (up to 30 plots). The god's Order Hut button only adds an extra hut, faster.
 - **Pathfinding:** breadth-first search on the 48×48 grid, around water, trees, and buildings. (The Luanti v1 used steer-to-target; this port has real paths.)
 - **Day length:** 360 sim-seconds, same as the Luanti mod. Deer top up to 4.
 

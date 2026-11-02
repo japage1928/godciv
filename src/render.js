@@ -256,6 +256,19 @@ export class Renderer {
 
   update(state, grid, dt, elapsed) {
     this._syncBuildings(state);
+    // Farms can spread on their own (expandVillage), so the crop mesh
+    // must grow when new farm cells appear. Recheck about once a second.
+    if (!this._farmCheckAt || state.elapsed - this._farmCheckAt > 1) {
+      this._farmCheckAt = state.elapsed;
+      const cells = [];
+      for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) cells.push([x, z]);
+      if (cells.length !== this._farmCells.length) {
+        this._farmCells = cells;
+        if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.dispose?.(); }
+        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.4, 0.35), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length));
+        this.scene.add(this.cropMesh);
+      }
+    }
     // Stones + crops scale with remaining amount / growth stage.
     const m = new THREE.Matrix4();
     this._stoneCells.forEach(([x, z], idx) => {
