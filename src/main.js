@@ -240,6 +240,8 @@ function bindUI() {
   $("btn-panel").addEventListener("click", () => { selectedId = null; $("panel").classList.toggle("open"); renderPanel(); });
   $("btn-rotate-l").addEventListener("click", () => renderer.rotate(-1));
   $("btn-rotate-r").addEventListener("click", () => renderer.rotate(1));
+  $("btn-zoom-in").addEventListener("click", () => renderer.zoomIn());
+  $("btn-zoom-out").addEventListener("click", () => renderer.zoomOut());
   $("btn-save").addEventListener("click", () => saveGame(false));
   $("btn-settings").addEventListener("click", () => {
     $("set-enabled").checked = ollama.enabled;
