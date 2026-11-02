@@ -29,11 +29,13 @@ On iPhone: Safari → Share → Add to Home Screen. On Android: Chrome menu → 
 The sim owns the truth (`src/sim.js`, no DOM, no Three.js — testable with node).
 
 - **Utility brain:** every villager re-evaluates every few seconds. Urgent needs (eat, rest, flee) override jobs. Otherwise each job is scored from stockpile deficits, skills, traits, drought, build queue, and any directive — with stickiness so villagers don't churn jobs.
-- **Jobs:** farmer, miner, fisher, hunter, builder, hauler. Farmers plant/harvest farm plots, miners work stone/ore nodes, fishers work the lake shore, hunters chase deer, builders work the hut queue, haulers shuttle and fill up.
+- **Jobs:** farmer, woodcutter, miner, fisher, hunter, builder, hauler. Farmers plant/harvest farm plots, woodcutters fell trees for wood (trees regrow), miners work stone/ore nodes, fishers work the lake shore, hunters chase deer, builders work the build queue, haulers shuttle and fill up.
+- **Leader delegation:** every 15 sim-seconds the leader assesses needs and delegates a job to each villager, matching skills to the scarcest work: more farmers and hunters/fishers when food is short, woodcutters and miners when wood/stone or a build queue needs them, builders when something is queued. Delegation is a strong nudge, not an order: skeptics and fearful villagers sometimes ignore it and take their next-best work, and the log says so.
 - **Traits:** devout, skeptic, brave, cautious, industrious, lazy, kind, greedy (two per villager). Skills 0–2 per job.
 - **Disobedience:** a directive is a nudge through the leader. Skeptics, low faith, and fear raise the chance a villager ignores it and keeps working.
 - **Population:** if edible food is in surplus at dawn and there is room, a new villager joins. Huts raise the cap by 4. Deaths cost faith.
 - **Autonomous expansion:** nobody waits for a god order to build. When the village is within 2 of its cap and the stockpile holds 12 wood and 6 stone, builders start a hut on their own. When edible food stays below 20, farmers clear new farm ground (up to 30 plots). The god's Order Hut button only adds an extra hut, faster.
+- **Buildings, all villager-built:** the town center (stockpile and heart of the village, built at founding), huts (+4 population each), a granary (started when edible food reaches 35 and resources allow; doubles kept food from 60 to 120 and lowers the dawn birth need from 18 to 12), boundary markers (4 posts at the village corners once population reaches 8), and dirt roads (laid toward the huts, and faster to walk on). No god button builds any of these except the optional extra hut.
 - **Pathfinding:** breadth-first search on the 48×48 grid, around water, trees, and buildings. (The Luanti v1 used steer-to-target; this port has real paths.)
 - **Day length:** 360 sim-seconds, same as the Luanti mod. Deer top up to 4.
 

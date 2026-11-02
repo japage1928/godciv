@@ -1,6 +1,6 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
@@ -53,3 +53,33 @@ assert.ok(loaded.state.elapsed > state.elapsed, "loaded world keeps running");
 }
 
 console.log("sim smoke test passed: day", state.day, "villagers", state.villagers.length, "log", state.log.length, "entries");
+
+// Leader delegation: every villager gets an assignment, matched to needs.
+{
+  const w3 = newWorld(123);
+  delegateRoles(w3.state);
+  assert.ok(w3.state.villagers.every((v) => v.assignedJob), "every villager must be delegated a job");
+  assert.ok(w3.state.villagers.some((v) => v.assignedJob === "farmer"), "delegation must include at least one farmer");
+  assert.ok(w3.state.buildings.some((b) => b.type === "towncenter"), "village must start with a town center");
+}
+
+// Autonomous buildings: granary queued on surplus food, roads laid to a
+// second hut, all with no god order.
+{
+  const w4 = newWorld(999);
+  const s4 = w4.state, g4 = w4.grid;
+  s4.stockpile.food = 50; s4.stockpile.wood = 50; s4.stockpile.stone = 50;
+  s4.buildings.push({ type: "hut", x: s4._cx + 4, z: s4._cz, done: true });
+  g4[s4._cx + 4][s4._cz].building = "hut";
+  for (let i = 0; i < 120; i++) step(s4, g4, 0.25); // 30 sim-seconds
+  assert.ok(s4.buildQueue.some((q) => q.type === "granary") || s4.buildings.some((b) => b.type === "granary"), "surplus food must start a granary on its own");
+  let roads = 0;
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (g4[x][z].road) roads++;
+  assert.ok(roads > 0, "roads must be laid toward the second hut, found " + roads);
+  // Save/load keeps roads and the town center.
+  const loaded = deserialize(serialize(s4, g4));
+  assert.ok(loaded.state.buildings.some((b) => b.type === "towncenter"), "town center must survive save/load");
+  let roads2 = 0;
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (loaded.grid[x][z].road) roads2++;
+  assert.ok(roads2 > 0, "roads must survive save/load");
+}

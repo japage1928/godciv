@@ -3,7 +3,7 @@
 import * as THREE from "../vendor/three.module.js";
 import { SIZE } from "./sim.js";
 
-const JOB_COLORS = { farmer: 0x4caf50, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63 };
+const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63 };
 const CELL = 1;
 
 // Pure pan math, exported so tests can prove all four drag directions
@@ -186,7 +186,27 @@ export class Renderer {
     };
     const wood = new THREE.MeshLambertMaterial({ color: 0x8d6e63 });
     const stone = new THREE.MeshLambertMaterial({ color: 0x9e9e9e });
-    if (type === "stockpile") {
+    if (type === "towncenter") {
+      add(new THREE.BoxGeometry(2.3, 0.3, 2.3), stone, 0.15);
+      add(new THREE.BoxGeometry(1.7, 1.1, 1.7), wood, 0.85);
+      add(new THREE.BoxGeometry(0.6, 1.9, 0.6), stone, 1.25).position.set(0.7, 1.25, -0.7);
+      const banner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
+      banner.position.set(0, 1.0, 0.88); g.add(banner);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0x5d4037 }));
+      roof.position.y = 1.8; roof.rotation.y = Math.PI / 4; g.add(roof);
+    } else if (type === "granary") {
+      add(new THREE.BoxGeometry(1.9, 1.1, 1.5), wood, 0.55);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0xd7a94e }));
+      roof.position.y = 1.5; roof.rotation.y = Math.PI / 4; g.add(roof);
+      const silo = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.4, 8), stone);
+      silo.position.set(1.1, 0.7, 0); g.add(silo);
+      add(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }), 0.35).position.z = 0.78;
+    } else if (type === "marker") {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 1.3, 6), wood);
+      post.position.y = 0.65; g.add(post);
+      const flag = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.32, 0.04), new THREE.MeshLambertMaterial({ color: 0xffd700 }));
+      flag.position.set(0.32, 1.15, 0); g.add(flag);
+    } else if (type === "stockpile") {
       add(new THREE.BoxGeometry(1.6, 0.25, 1.6), wood, 0.12);
       add(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ color: 0xa1887f }), 0.5, 1, 1, 1).position.x = -0.4;
       add(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ color: 0xd7a94e }), 0.5).position.x = 0.4;
@@ -213,7 +233,7 @@ export class Renderer {
     while (this.buildingsGroup.children.length) this.buildingsGroup.remove(this.buildingsGroup.children[0]);
     for (const b of state.buildings) this.buildingsGroup.add(this._buildingMesh(b.type, b.x, b.z));
     for (const q of state.buildQueue) {
-      const frame = this._buildingMesh("hut", q.x, q.z);
+      const frame = this._buildingMesh(q.type || "hut", q.x, q.z);
       frame.scale.setScalar(0.6); frame.traverse((o) => { if (o.material) o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; });
       this.buildingsGroup.add(frame);
     }
@@ -261,12 +281,21 @@ export class Renderer {
     if (!this._farmCheckAt || state.elapsed - this._farmCheckAt > 1) {
       this._farmCheckAt = state.elapsed;
       const cells = [];
-      for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) cells.push([x, z]);
+      const roadCells = [];
+      for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) { if (grid[x][z].farm) cells.push([x, z]); if (grid[x][z].road) roadCells.push([x, z]); }
       if (cells.length !== this._farmCells.length) {
         this._farmCells = cells;
         if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.dispose?.(); }
         this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.4, 0.35), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length));
         this.scene.add(this.cropMesh);
+      }
+      if (roadCells.length !== (this._roadCells || []).length) {
+        this._roadCells = roadCells;
+        if (this.roadMesh) { this.scene.remove(this.roadMesh); this.roadMesh.dispose?.(); }
+        this.roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.07, 0.95), new THREE.MeshLambertMaterial({ color: 0xa1887f }), Math.max(1, roadCells.length));
+        const rm = new THREE.Matrix4();
+        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this.roadMesh.setMatrixAt(idx, rm); });
+        this.scene.add(this.roadMesh);
       }
     }
     // Stones + crops scale with remaining amount / growth stage.

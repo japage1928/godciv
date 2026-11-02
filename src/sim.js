@@ -6,7 +6,7 @@
 
 export const SIZE = 48;
 export const DAY_LENGTH = 360; // sim seconds per day, same as the Luanti mod
-export const JOBS = ["farmer", "miner", "fisher", "hunter", "builder", "hauler"];
+export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler"];
 export const TRAITS = ["devout", "skeptic", "brave", "cautious", "industrious", "lazy", "kind", "greedy"];
 export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "Hob", "Ilsa", "Jory", "Kessa", "Lorn", "Mira", "Nils", "Odessa", "Perrin", "Quill", "Rosa", "Soren", "Tilda", "Ulric", "Vera", "Wren", "Yannick"];
 
@@ -78,7 +78,7 @@ export function newWorld(seed) {
       const dCenter = Math.hypot(x - cx, z - cz);
       const water = dLake < lake.r && h < 0.62;
       grid[x].push({
-        h, water, blocked: water,
+        h, water, blocked: water, road: false,
         tree: false, stone: 0, ore: 0, crop: -1, cropGrow: 0,
         building: null, farm: false,
       });
@@ -113,11 +113,11 @@ export function newWorld(seed) {
   const state = {
     version: 1, seed, day: 1, time: 0.3, speed: 1, paused: false,
     stockpile: { food: 24, wood: 24, stone: 12, ore: 0, fish: 0, meat: 0 },
-    faith: 55, populationCap: 12, expandAt: 10,
+    faith: 55, populationCap: 12, expandAt: 10, delegateAt: 5,
     directive: null, // { focusJob } — a nudge, not an order
-    buildQueue: [], // {x,z,progress,needWood,needStone}
+    buildQueue: [], // {type,x,z,progress,needWood,needStone}
     buildings: [
-      { type: "stockpile", x: cx, z: cz },
+      { type: "towncenter", x: cx, z: cz },
       { type: "altar", x: cx + 2, z: cz },
       { type: "hut", x: cx - 2, z: cz - 3, done: true },
     ],
@@ -136,6 +136,7 @@ export function newWorld(seed) {
   const spawnSpots = [[cx + 1, cz + 1], [cx - 1, cz + 1], [cx + 1, cz - 1], [cx - 1, cz - 1], [cx, cz + 2], [cx + 2, cz + 2]];
   for (let i = 0; i < 6; i++) state.villagers.push(makeVillager(state, spawnSpots[i][0], spawnSpots[i][1], i === 0));
   for (let i = 0; i < 4; i++) state.deer.push(makeDeer(state, cx + 8 + i * 2, cz + 8));
+  delegateRoles(state);
   log(state, "The village wakes. Six villagers look to the sky, waiting for a sign.");
   return { state, grid };
 }
@@ -154,6 +155,7 @@ export function makeVillager(state, x, z, leader = false) {
     hunger: 15 + rng() * 20, energy: 75 + rng() * 20, health: 100, fear: 0,
     carry: null, carryCap: 5, state: "idle", workTimer: 0, target: null,
     sick: false, rethinkAt: 0, stuckAt: 0, lastX: x, lastZ: z, personalFocus: null,
+    assignedJob: null, delegated: false,
   };
 }
 
@@ -181,6 +183,68 @@ function refusesDirective(state, v, job) {
   return state._rng() < clamp(p, 0, 0.6);
 }
 
+function refusesAssignment(state, v) {
+  let p = 0.08;
+  if (v.traits.includes("skeptic")) p += 0.18;
+  if (v.traits.includes("devout")) p -= 0.03;
+  if (v.traits.includes("greedy")) p += 0.06;
+  if (state.faith < 40) p += 0.12;
+  if (v.fear > 40) p += 0.08;
+  return state._rng() < clamp(p, 0, 0.5);
+}
+
+// Leader delegation: the leader looks at what the village needs and
+// assigns a job to each villager. Delegation is a strong nudge, not an
+// order — a villager can still refuse it (see think()). The god never
+// assigns jobs; only the leader does, and only the leader is advised by
+// the council/Ollama layer.
+export function delegateRoles(state) {
+  const villagers = state.villagers;
+  if (!villagers.length) return;
+  const s = state.stockpile;
+  const edible = s.food + s.fish + s.meat;
+  const pop = villagers.length;
+  const desired = {
+    farmer: clamp(Math.ceil(pop / 3), 1, 4),
+    fisher: edible < 25 ? 1 : 0,
+    hunter: edible < 25 ? 1 : 0,
+    woodcutter: (s.wood < 25 || state.buildQueue.length) ? 2 : 1,
+    miner: (s.stone < 20 || s.ore < 4 || state.buildQueue.length) ? 2 : 1,
+    builder: state.buildQueue.length ? Math.min(2, pop) : 0,
+    hauler: pop >= 8 ? 1 : 0,
+  };
+  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler"];
+  let total = order.reduce((a, j) => a + desired[j], 0);
+  while (total > pop) {
+    for (let i = order.length - 1; i >= 0; i--) {
+      if (desired[order[i]] > 0) { desired[order[i]]--; total--; break; }
+    }
+  }
+  while (total < pop) { desired.farmer++; total++; }
+  const unassigned = [...villagers];
+  const assignment = new Map();
+  for (const job of order) {
+    for (let i = 0; i < desired[job]; i++) {
+      if (!unassigned.length) break;
+      let bestIdx = 0;
+      for (let k = 1; k < unassigned.length; k++) if (unassigned[k].skills[job] > unassigned[bestIdx].skills[job]) bestIdx = k;
+      assignment.set(unassigned[bestIdx].id, job);
+      unassigned.splice(bestIdx, 1);
+    }
+  }
+  for (const v of unassigned) assignment.set(v.id, "hauler");
+  const changes = [];
+  for (const v of villagers) {
+    const next = assignment.get(v.id);
+    if (v.assignedJob && v.assignedJob !== next) changes.push(v.name + " to " + next);
+    v.assignedJob = next;
+  }
+  if (changes.length) {
+    const l = leader(state);
+    log(state, (l ? l.name + " delegates: " : "Delegation: ") + changes.slice(0, 3).join(", ") + (changes.length > 3 ? " and " + (changes.length - 3) + " more." : "."));
+  }
+}
+
 function scoreJob(state, v, job) {
   const s = state.stockpile;
   const deficit = (have, want) => Math.max(0, want - have);
@@ -188,11 +252,13 @@ function scoreJob(state, v, job) {
   if (v.traits.includes("industrious")) score += 1.5;
   if (v.traits.includes("lazy")) score -= 2;
   if (job === "farmer") { score += deficit(s.food + s.fish + s.meat, 40) * 0.35; if (state.elapsed < state.effects.droughtUntil) score -= 8; }
+  if (job === "woodcutter") score += deficit(s.wood, 30) * 0.4 + (state.buildQueue.length ? 2 : 0);
   if (job === "fisher") score += deficit(s.food + s.fish + s.meat, 40) * 0.25;
   if (job === "hunter") score += deficit(s.food + s.fish + s.meat, 40) * 0.22;
-  if (job === "miner") score += deficit(s.wood, 30) * 0.1 + deficit(s.stone, 24) * 0.4 + deficit(s.ore, 6) * 0.3;
+  if (job === "miner") score += deficit(s.stone, 24) * 0.4 + deficit(s.ore, 6) * 0.3;
   if (job === "builder") score += state.buildQueue.length ? 8 : -4;
   if (job === "hauler") score += v.carry ? 7 : 1.5;
+  if (v.assignedJob === job) score += 7; // leader delegation: strong nudge, still refuseable
   if (state.directive && state.directive.focusJob === job) score += refusesDirective(state, v, job) ? -6 : 6;
   if (v.personalFocus === job) score += 4;
   if (v.job === job) score += 1; // stickiness: don't churn jobs every tick
@@ -252,19 +318,32 @@ function think(state, grid, v) {
   if (v.energy <= 18 || v.sick) { v.state = "rest"; setTarget(state, grid, v, cx - 2, cz - 3); return; }
   if (v.carry && v.carry.amt >= v.carryCap) { v.state = "haul"; setTarget(state, grid, v, cx, cz); return; }
 
-  const job = bestJob(state, v);
-  if (job !== v.job) {
-    if (state.directive && state.directive.focusJob === job && refusesDirective(state, v, job)) {
-      if (state._rng() < 0.25) log(state, v.name + " ignores the directive and keeps working.");
+  let job = bestJob(state, v);
+  // Delegation refusal: the leader's assignment wins the scoring, but a
+  // villager can still ignore it and take their next-best work.
+  v.delegated = job === v.assignedJob;
+  if (v.assignedJob && job === v.assignedJob && refusesAssignment(state, v)) {
+    let second = null, secondScore = -Infinity;
+    for (const j of JOBS) {
+      if (j === v.assignedJob) continue;
+      const sc = scoreJob(state, v, j);
+      if (sc > secondScore) { secondScore = sc; second = j; }
     }
-    v.job = job;
+    if (second) {
+      job = second; v.delegated = false;
+      if (state._rng() < 0.2) log(state, v.name + " ignores the leader's delegation and works as a " + job + " instead.");
+    }
   }
+  v.job = job;
   v.state = "work";
   if (job === "farmer") {
     const ripe = nearestCell(grid, v.x, v.z, (c) => c.farm && c.crop === 3);
     const empty = nearestCell(grid, v.x, v.z, (c) => c.farm && c.crop < 3);
     const plot = ripe || empty;
     if (plot) setTarget(state, grid, v, plot[0], plot[1]); else v.state = "idle";
+  } else if (job === "woodcutter") {
+    const tree = nearestCell(grid, v.x, v.z, (c) => c.tree);
+    if (tree) setTarget(state, grid, v, tree[0], tree[1]); else v.state = "idle";
   } else if (job === "miner") {
     const node = nearestCell(grid, v.x, v.z, (c) => c.stone > 0 || c.ore > 0);
     if (node) setTarget(state, grid, v, node[0], node[1]); else v.state = "idle";
@@ -302,6 +381,8 @@ function doWork(state, grid, v, dt) {
   if (v.job === "farmer" && cell && cell.farm) {
     if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2); }
     else if (state.elapsed >= state.effects.droughtUntil) { cell.crop = Math.min(3, cell.crop + 1); }
+  } else if (v.job === "woodcutter" && cell && cell.tree) {
+    cell.tree = false; cell.blocked = false; addCarry("wood", 2);
   } else if ((v.job === "miner" || v.job === "hauler") && cell && (cell.stone > 0 || cell.ore > 0)) {
     if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); }
     else if (cell.stone > 0) { cell.stone--; addCarry("stone"); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
@@ -320,16 +401,27 @@ function doWork(state, grid, v, dt) {
     const q = state.buildQueue[0];
     if (q) {
       q.progress += 1;
-      if (q.progress >= 6) {
+      const needProgress = q.type === "granary" ? 8 : q.type === "marker" ? 3 : 6;
+      if (q.progress >= needProgress) {
         state.buildQueue.shift();
         if (state.stockpile.wood >= q.needWood && state.stockpile.stone >= q.needStone) {
           state.stockpile.wood -= q.needWood; state.stockpile.stone -= q.needStone;
-          state.buildings.push({ type: "hut", x: q.x, z: q.z, done: true });
-          grid[q.x][q.z].building = "hut"; grid[q.x][q.z].blocked = true;
-          state.populationCap += 4;
-          log(state, "A new hut rises. The village can hold " + state.populationCap + " souls.");
+          const type = q.type || "hut";
+          state.buildings.push({ type, x: q.x, z: q.z, done: true });
+          grid[q.x][q.z].building = type;
+          if (type === "hut") {
+            grid[q.x][q.z].blocked = true;
+            state.populationCap += 4;
+            log(state, "A new hut rises. The village can hold " + state.populationCap + " souls.");
+          } else if (type === "granary") {
+            grid[q.x][q.z].blocked = true;
+            log(state, "A granary stands. Stored food will keep far longer now.");
+          } else if (type === "marker") {
+            state.faith = clamp(state.faith + 2, 0, 100);
+            log(state, "A boundary marker is raised. The village knows its ground.");
+          }
         } else {
-          log(state, "The hut frame stands unfinished: not enough wood and stone in the stockpile.");
+          log(state, "The " + (q.type || "hut") + " frame stands unfinished: not enough wood and stone in the stockpile.");
           grid[q.x][q.z].building = null; grid[q.x][q.z].blocked = false;
         }
       }
@@ -339,18 +431,74 @@ function doWork(state, grid, v, dt) {
 }
 
 // Autonomous expansion: the village grows on demand, with no god order
-// needed. Crowding starts a hut; a persistent food shortage clears new
-// farm ground. The god's Order Hut is only ever an extra, faster hut.
+// needed. Crowding starts a hut; surplus food starts a granary; the
+// village marks its boundary; roads are laid toward the huts; a
+// persistent food shortage clears new farm ground. The god's Order Hut
+// is only ever an extra, faster hut.
+function findBuildSpot(state, grid, minR, maxR) {
+  const cx = state._cx, cz = state._cz;
+  for (let r = minR; r <= maxR; r++) for (let a = 0; a < 8; a++) {
+    const x = Math.round(cx + Math.cos(a * Math.PI / 4) * r), z = Math.round(cz + Math.sin(a * Math.PI / 4) * r);
+    if (inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree) return [x, z];
+  }
+  return null;
+}
+
+function paveRoads(state, grid) {
+  const huts = state.buildings.filter((b) => b.type === "hut");
+  if (huts.length < 2) return;
+  const cx = state._cx, cz = state._cz;
+  // Pave toward the hut whose path has the fewest road cells yet.
+  let bestPath = null, bestRoads = Infinity;
+  for (const hut of huts) {
+    const path = findPath(grid, cx, cz, hut.x, hut.z);
+    if (!path) continue;
+    const roads = path.filter(([x, z]) => grid[x][z].road).length;
+    if (roads < bestRoads) { bestRoads = roads; bestPath = path; }
+  }
+  if (!bestPath) return;
+  let paved = 0;
+  for (const [x, z] of bestPath) {
+    if (paved >= 4) break;
+    const c = grid[x][z];
+    if (c.road || c.building || c.water || c.farm) continue;
+    c.road = true;
+    if (c.tree) { c.tree = false; c.blocked = false; }
+    paved++;
+  }
+  if (paved) log(state, "Villagers lay a dirt road toward the huts.");
+}
+
 export function expandVillage(state, grid) {
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
+  const hasGranary = state.buildings.some((b) => b.type === "granary");
+  const granaryQueued = state.buildQueue.some((q) => q.type === "granary");
+  const markers = state.buildings.filter((b) => b.type === "marker").length + state.buildQueue.filter((q) => q.type === "marker").length;
   if (state.villagers.length >= state.populationCap - 2 && state.buildQueue.length < 2 && s.wood >= 12 && s.stone >= 6) {
     const spot = findHutSpot(state, grid);
     if (spot) {
-      state.buildQueue.push({ x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6 });
+      state.buildQueue.push({ type: "hut", x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6 });
       log(state, "Crowded, the builders start a new hut on their own.");
     }
   }
+  if (!hasGranary && !granaryQueued && edible >= 35 && state.buildQueue.length < 2 && s.wood >= 20 && s.stone >= 10) {
+    const spot = findBuildSpot(state, grid, 3, 7);
+    if (spot) {
+      state.buildQueue.push({ type: "granary", x: spot[0], z: spot[1], progress: 0, needWood: 20, needStone: 10 });
+      log(state, "With food to spare, the builders start a granary.");
+    }
+  }
+  if (state.villagers.length >= 8 && markers < 4 && state.buildQueue.length < 2 && s.wood >= 2) {
+    const cx = state._cx, cz = state._cz;
+    const corners = [[cx - 6, cz - 6], [cx + 6, cz - 6], [cx - 6, cz + 6], [cx + 6, cz + 6]];
+    const spot = corners.find(([x, z]) => inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree);
+    if (spot) {
+      state.buildQueue.push({ type: "marker", x: spot[0], z: spot[1], progress: 0, needWood: 2, needStone: 0 });
+      log(state, "The villagers raise a boundary marker.");
+    }
+  }
+  paveRoads(state, grid);
   if (edible < 20 && state._farmCells.length < 30) {
     const cx = state._cx, cz = state._cz;
     let spot = null;
@@ -377,12 +525,33 @@ export function step(state, grid, dt) {
   if (state.paused) return;
   state.elapsed += dt;
   if (state.elapsed >= state.expandAt) { state.expandAt = state.elapsed + 20; expandVillage(state, grid); }
+  if (state.elapsed >= state.delegateAt) { state.delegateAt = state.elapsed + 15; delegateRoles(state); }
+  if (state.elapsed >= (state.treeAt || 60)) {
+    state.treeAt = state.elapsed + 30;
+    for (let i = 0; i < 3; i++) {
+      const x = Math.floor(state._rng() * SIZE), z = Math.floor(state._rng() * SIZE);
+      const c = grid[x][z];
+      if (!c.water && !c.blocked && !c.tree && !c.farm && !c.building && c.stone <= 0 && Math.hypot(x - state._cx, z - state._cz) > 8) { c.tree = true; c.blocked = true; }
+    }
+  }
   state.time += dt / DAY_LENGTH;
   if (state.time >= 1) {
     state.time -= 1; state.day += 1;
-    // Dawn: population growth if there is surplus food and room.
-    const edible = state.stockpile.food + state.stockpile.fish + state.stockpile.meat;
-    if (edible >= 18 && state.villagers.length < state.populationCap) {
+    // Dawn: surplus food spoils in the open air unless a granary holds it.
+    // A granary doubles the kept surplus and lowers the birth threshold.
+    const hasGranary = state.buildings.some((b) => b.type === "granary");
+    const keepCap = hasGranary ? 120 : 60;
+    const birthNeed = hasGranary ? 12 : 18;
+    const s = state.stockpile;
+    let edible = s.food + s.fish + s.meat;
+    if (edible > keepCap) {
+      let over = edible - keepCap;
+      for (const k of ["food", "fish", "meat"]) { const take = Math.min(s[k], over); s[k] -= take; over -= take; if (!over) break; }
+      if (!hasGranary && edible - keepCap >= 5) log(state, "Surplus food spoils in the open air. A granary would keep it.");
+      edible = keepCap;
+    }
+    // Population growth if there is surplus food and room.
+    if (edible >= birthNeed && state.villagers.length < state.populationCap) {
       const v = makeVillager(state, state._cx + 1, state._cz + 1);
       state.villagers.push(v); state.stats.births++;
       log(state, v.name + " joins the village. The people endure.");
@@ -431,9 +600,14 @@ export function step(state, grid, dt) {
     if (state.elapsed >= state.effects.plagueUntil && v.sick) v.sick = false;
     v.fear = clamp(v.fear - dt * 3, 0, 100);
     if (v.health <= 0) {
+      const wasLeader = v.leader;
       state.villagers = state.villagers.filter((o) => o !== v);
       state.faith = clamp(state.faith - 3, 0, 100); state.stats.deaths++;
       log(state, v.name + " dies. Faith falls.");
+      if (wasLeader && state.villagers.length) {
+        state.villagers[0].leader = true;
+        log(state, state.villagers[0].name + " takes up the leader's staff.");
+      }
       continue;
     }
     if (state.elapsed >= v.rethinkAt) { v.rethinkAt = state.elapsed + 4 + state._rng() * 3; think(state, grid, v); }
@@ -448,7 +622,7 @@ export function step(state, grid, dt) {
       const [px, pz] = v.path[0];
       const dx = px + 0.5 - v.x, dz = pz + 0.5 - v.z, dist = Math.hypot(dx, dz);
       if (dist < 0.25) v.path.shift();
-      else { const sp = (v.state === "flee" ? 3.4 : 2.2) * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
+      else { const onRoad = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)].road; const sp = (v.state === "flee" ? 3.4 : 2.2) * (onRoad ? 1.35 : 1) * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
     } else if (v.target) {
       const dx = v.target[0] + 0.5 - v.x, dz = v.target[1] + 0.5 - v.z, dist = Math.hypot(dx, dz);
       if (dist > 0.4) {
@@ -530,7 +704,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       const spot = findHutSpot(state, grid);
       if (!spot) return { ok: false, reason: "No clear ground near the village for a hut." };
       if (state.stockpile.wood < 12 || state.stockpile.stone < 6) return { ok: false, reason: "Need 12 wood and 6 stone in the stockpile first." };
-      state.buildQueue.push({ x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6 });
+      state.buildQueue.push({ type: "hut", x: spot[0], z: spot[1], progress: 0, needWood: 12, needStone: 6 });
       log(state, "You order a hut. A builder will take it up, if they choose."); setCd(10); break;
     }
     case "villager":
@@ -569,16 +743,17 @@ export function leader(state) {
 // --- save / load: only plain data, grid is rebuilt from the seed ---
 
 export function serialize(state, grid) {
-  const crops = [], stones = [], buildings = [];
+  const crops = [], stones = [], buildings = [], roads = [];
   for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
     const c = grid[x][z];
     if (c.crop >= 0) crops.push([x, z, c.crop, c.cropGrow]);
     if (c.stone > 0 || c.ore > 0) stones.push([x, z, c.stone, c.ore, c.blocked ? 1 : 0]);
     if (c.building) buildings.push([x, z, c.building]);
+    if (c.road) roads.push([x, z]);
   }
   const { _rng, _farmCells, _stoneSpots, _fire, _quake, ...rest } = state;
   void _rng; void _farmCells; void _stoneSpots;
-  return JSON.stringify({ ...rest, crops, stones, buildings, fire: _fire || null, quake: _quake || null });
+  return JSON.stringify({ ...rest, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
 }
 
 export function deserialize(json) {
@@ -586,11 +761,12 @@ export function deserialize(json) {
   const { state, grid } = newWorld(data.seed);
   // Overlay saved dynamic state, keeping the regenerated grid's statics.
   const savedCrops = data.crops, savedStones = data.stones, savedBuildings = data.buildings;
-  const savedFire = data.fire, savedQuake = data.quake;
-  delete data.crops; delete data.stones; delete data.buildings; delete data.fire; delete data.quake;
+  const savedFire = data.fire, savedQuake = data.quake, savedRoads = data.roads || [];
+  delete data.crops; delete data.stones; delete data.buildings; delete data.fire; delete data.quake; delete data.roads;
   Object.assign(state, data);
   state._rng = mulberry32((data.seed ^ 0x9e3779b9) + Math.floor(state.elapsed * 1000));
-  for (const [x, z, crop, grow] of savedCrops) { grid[x][z].crop = crop; grid[x][z].cropGrow = grow; }
+  for (const [x, z, crop, grow] of savedCrops) { grid[x][z].farm = true; grid[x][z].crop = crop; grid[x][z].cropGrow = grow; }
+  for (const [x, z] of savedRoads) grid[x][z].road = true;
   // Rebuild the farm list from the grid so farms cleared by expansion
   // before the save keep growing after load.
   state._farmCells = [];

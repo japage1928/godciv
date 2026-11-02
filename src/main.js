@@ -6,7 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v4";
+const APP_VERSION = "v5";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -63,6 +63,7 @@ function villagerCard(v) {
   const carry = v.carry ? v.carry.amt + " " + v.carry.type : "empty hands";
   return `<h3>${v.name}${v.leader ? " · Leader" : ""}</h3>
     <p class="muted">${v.job} · ${v.state} · ${carry}</p>
+    <p>Delegated by the leader: <b>${v.assignedJob || "none yet"}</b>${v.delegated ? " · following it" : v.assignedJob ? " · chose own work" : ""}</p>
     <p>Traits: ${v.traits.join(", ")}</p>
     <div class="bars">
       <label>Hunger <span>${Math.round(v.hunger)}</span></label><div class="bar"><i style="width:${v.hunger}%"></i></div>
@@ -92,9 +93,13 @@ function renderPanel() {
     $("panel-title").textContent = "Village";
     const counts = {};
     for (const o of s.villagers) counts[o.job] = (counts[o.job] || 0) + 1;
+    const assigned = {};
+    for (const o of s.villagers) if (o.assignedJob) assigned[o.assignedJob] = (assigned[o.assignedJob] || 0) + 1;
+    const l = s.villagers.find((o) => o.leader);
     $("panel-body").innerHTML = `
-      <p class="muted">${s.villagers.length} villagers · ${s.buildings.filter((b) => b.type === "hut").length} huts · ${s.buildQueue.length} hut(s) queued</p>
-      <p class="muted">Huts build themselves when the village gets crowded, and farms spread when food is short. You never have to order building.</p>
+      <p class="muted">${s.villagers.length} villagers · ${s.buildings.filter((b) => b.type === "hut").length} huts · ${s.buildQueue.length} build(s) queued</p>
+      <p>Leader: <b>${l ? l.name : "none"}</b> — delegates: ${JOBS.map((j) => j + " " + (assigned[j] || 0)).join(" · ")}</p>
+      <p class="muted">Buildings: ${s.buildings.map((b) => b.type).join(", ")}. Town center, granary, roads, and markers are all raised by villagers, never by the god. Huts build themselves when crowded, farms spread when food is short.</p>
       <p>Jobs: ${JOBS.map((j) => j + " " + (counts[j] || 0)).join(" · ")}</p>
       <label for="directive-select">Leader directive (a nudge, villagers can disobey)</label>
       <select id="directive-select">
