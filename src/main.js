@@ -6,7 +6,7 @@ import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, 
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v5";
+const APP_VERSION = "v6";
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -243,7 +243,7 @@ function bindUI() {
     $("btn-pause").textContent = world.state.paused ? "▶ Resume" : "⏸ Pause";
   });
   $("btn-speed").addEventListener("click", () => {
-    world.state.speed = world.state.speed >= 4 ? 1 : world.state.speed * 2;
+    world.state.speed = world.state.speed >= 8 ? 1 : world.state.speed * 2;
     $("btn-speed").textContent = world.state.speed + "×";
   });
   $("btn-panel").addEventListener("click", () => { selectedId = null; $("panel").classList.toggle("open"); renderPanel(); });

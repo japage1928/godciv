@@ -54,6 +54,18 @@ assert.ok(loaded.state.elapsed > state.elapsed, "loaded world keeps running");
 
 console.log("sim smoke test passed: day", state.day, "villagers", state.villagers.length, "log", state.log.length, "entries");
 
+// Pacing regression (seed 7, Nov 2): a village must grow over 4 days —
+// births, a second hut, roads — with no starvation deaths from the
+// setTarget freeze that used to strand villagers on unreachable targets.
+{
+  const w5 = newWorld(7);
+  for (let i = 0; i < 2880; i++) step(w5.state, w5.grid, 0.25);
+  assert.ok(w5.state.stats.births >= 3, "4 days must bring births, got " + w5.state.stats.births);
+  assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 4 days, deaths=" + w5.state.stats.deaths);
+  assert.ok(w5.state.villagers.length > 6, "population must grow past the founding 6, got " + w5.state.villagers.length);
+  assert.ok(w5.state.buildings.some((b) => b.type === "hut" && b.x !== w5.state._cx - 2), "a second hut must be built");
+}
+
 // Leader delegation: every villager gets an assignment, matched to needs.
 {
   const w3 = newWorld(123);

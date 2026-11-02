@@ -1,6 +1,6 @@
 /* GodCiv service worker: cache-first app shell so the game works offline
    after the first load. Version the cache name when the shell changes. */
-const CACHE = "godciv-v5";
+const CACHE = "godciv-v6";
 const PRECACHE = [
   "./",
   "./index.html",
