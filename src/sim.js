@@ -4,9 +4,9 @@
 // villager, the god never directly controls a villager, a local model only
 // ever advises the leader. The model never writes state directly.
 
-// Save format version. v10 wrote version 2; v11 writes 3.
+// Save format version. v10 wrote version 2; v11 writes 3; v12 writes 4.
 // See migrateSave in deserialize() for the migration pattern.
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 export const SIZE = 48;
 export const DAY_LENGTH = 180; // sim seconds per day: 45 real seconds at 4x, 22.5 at 8x
 export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher"];
@@ -29,7 +29,9 @@ export const BUILD_COSTS = {
   greathall: { wood: 30, stone: 15 },
   farmhouse: { wood: 15, stone: 6 },
   school: { wood: 18, stone: 12 },
-  healer: { wood: 14, stone: 10 },
+  healer: { wood: 16, stone: 8 },
+  wall: { wood: 6, stone: 4 },
+  tower: { wood: 10, stone: 14, ore: 2 },
 };
 export const CHILD_DAYS = 3; // a newborn works after 3 dawns
 export const ELDER_DAYS = 45; // old-age death rolls start here
@@ -54,14 +56,29 @@ export const WEATHER_BY_SEASON = {
   autumn: { clear: 0.45, rain: 0.30, storm: 0.15, heat: 0.05, snow: 0.05 },
   winter: { clear: 0.40, rain: 0.10, storm: 0.10, heat: 0, snow: 0.40 },
 };
-export const TOOL_NAMES = ["crude", "sturdy", "fine"];
-export const TOOL_COSTS = [null, { coins: 6, ore: 1 }, { coins: 12, ore: 2 }];
+export const TOOL_NAMES = ["crude", "sturdy", "fine", "steel"];
+export const TOOL_COSTS = [null, { coins: 6, ore: 1 }, { coins: 12, ore: 2 }, { coins: 20, ore: 4 }];
+// Tech tiers are the long arc: hamlet to modern city. Each tier is an
+// era step with a concrete unlock, not just paint. Thresholds rise so
+// a 30-day run reaches the first one or two tiers and the modern city
+// stays a long-term goal. Population gates the later tiers: a city
+// needs citizens, not just clever ones.
 export const TECH_TIERS = [
-  { name: "Stone tools", blurb: "Crude tools and open fires." },
-  { name: "Bronze craft", blurb: "Better harvests, steadier workshop work." },
-  { name: "Iron craft", blurb: "Fine tools, a healer's hut, richer harvests." },
+  { name: "Stone tools", era: "Hamlet", blurb: "Crude tools and open fires." },
+  { name: "Bronze craft", era: "Hamlet", blurb: "Better harvests, steadier workshop work." },
+  { name: "Iron craft", era: "Village", blurb: "Fine tools, a healer's hut, richer harvests." },
+  { name: "Steel works", era: "Town", blurb: "Steel tools, stouter walls, richer harvests." },
+  { name: "Steam and brick", era: "Town", blurb: "Builders work twice as fast, mills grind more grain." },
+  { name: "Electric age", era: "City", blurb: "Lamps light the streets, work runs faster." },
+  { name: "Modern city", era: "Modern city", blurb: "Glass towers, fast work, room for many more souls." },
 ];
-export const TECH_THRESHOLD = 80; // progress points per tier
+export const TECH_THRESHOLD = 80; // progress points for the first tier; later tiers cost more
+export function techThresholdFor(level) { return [80, 120, 200, 300, 420, 560][level] ?? 560; }
+export const ERA_POP_GATE = [0, 0, 0, 14, 20, 26, 32]; // population needed to enter each tier
+// Visual era stage the renderer reads: 0 timber/thatch, 1 stone/tile,
+// 2 brick/paved, 3 concrete/glass. The village visibly grows up.
+export function eraStageOf(level) { return level <= 1 ? 0 : level === 2 ? 1 : level <= 4 ? 2 : 3; }
+export const ERA_STAGE_NAMES = ["Timber hamlet", "Stone village", "Brick town", "Modern city"];
 
 export function seasonOf(day) { return SEASONS[Math.floor((day - 1) / SEASON_DAYS) % 4]; }
 export function yearOf(day) { return Math.floor((day - 1) / YEAR_DAYS) + 1; }
@@ -216,8 +233,13 @@ export function newWorld(seed) {
       { type: "hut", x: cx - 2, z: cz - 3, done: true, builtDay: 1 },
     ],
     villagers: [], deer: [], log: [],
+    // Raiders are transient: they live only in a running world, never
+    // in a save. raidActive persists so a load mid-raid can log that
+    // the raid scattered; the raiders themselves do not survive it.
+    raiders: [], raidActive: false, raidPendingDay: 0, lastRaidDay: -1e9, raidUntil: -1,
+    nextRaiderId: 1,
     effects: { droughtUntil: -1, floodUntil: -1, plagueUntil: -1 },
-    cooldowns: {}, stats: { births: 0, deaths: 0, blessings: 0, trades: 0, leaves: 0, celebrations: 0 },
+    cooldowns: {}, stats: { births: 0, deaths: 0, blessings: 0, trades: 0, leaves: 0, celebrations: 0, plagues: 0 },
     fund: 20, marketAt: 30, rateHistory: [], spoiled: 0,
     nextVillagerId: 1, nextDeerId: 1, elapsed: 0,
   };
@@ -517,14 +539,17 @@ export function runMarket(state) {
   // One log line per market round, so trades don't crowd births,
   // deaths, and building news out of the god log.
   // Tool buying: one upgrade per market round at most. A sturdy tool
-  // needs a workshop; a fine tool needs a workshop and Bronze craft.
+  // needs a workshop; a fine tool needs a workshop and Bronze craft;
+  // a steel tool needs a workshop and Steel works.
   // Coins go to the village fund, ore comes out of the stockpile.
   const hasWorkshop = state.buildings.some((b) => b.type === "workshop");
   if (hasWorkshop) {
+    const toolGate = (next) =>
+      (next === 1) || (next === 2 && state.tech && state.tech.level >= 1) || (next === 3 && state.tech && state.tech.level >= 3);
     const buyer = state.villagers.find((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v)
-      && (v.tool || 0) < 2 && v.coins >= (TOOL_COSTS[(v.tool || 0) + 1].coins)
+      && (v.tool || 0) < 3 && v.coins >= (TOOL_COSTS[(v.tool || 0) + 1].coins)
       && state.stockpile.ore >= TOOL_COSTS[(v.tool || 0) + 1].ore
-      && ((v.tool || 0) + 1 < 2 || (state.tech && state.tech.level >= 1)));
+      && toolGate((v.tool || 0) + 1));
     if (buyer) {
       const next = (buyer.tool || 0) + 1;
       const cost = TOOL_COSTS[next];
@@ -577,9 +602,12 @@ export function dawnDemographics(state, birthNeed) {
   for (const v of [...state.villagers]) {
     v.ageDays = (v.ageDays ?? 25) + 1;
     let p = v.ageDays < CHILD_DAYS ? 0.003 : v.ageDays >= ELDER_DAYS ? 0.02 + (v.ageDays - ELDER_DAYS) * 0.004 : 0.002;
-    if (v.sick) p += 0.05;
+    // Plague kills only the already weak: the sick with low health,
+    // the old, or the starving. A healthy villager rides it out.
+    const weak = v.sick && (v.health < 50 || v.ageDays >= ELDER_DAYS || v.hunger >= 70);
+    if (weak) p += 0.05;
     if (state._rng() < p) {
-      const cause = v.ageDays >= ELDER_DAYS ? "old age" : v.sick ? "sickness" : "a sudden illness";
+      const cause = v.ageDays >= ELDER_DAYS ? "old age" : weak ? "sickness" : "a sudden illness";
       removeVillager(state, v, cause); deaths++;
     }
   }
@@ -633,9 +661,17 @@ export function dawnDemographics(state, birthNeed) {
       else if ((v.education || 0) >= 3) gain += 2;
     }
     state.tech.progress += Math.min(12, gain);
-    if (state.tech.progress >= TECH_THRESHOLD) {
+    // Later tiers cost more and need a bigger village: progress holds
+    // at the threshold until the population gate is met.
+    const need = techThresholdFor(state.tech.level);
+    const popGate = ERA_POP_GATE[state.tech.level + 1] || 0;
+    if (state.tech.progress >= need && state.villagers.length >= popGate) {
       state.tech.level++;
       state.tech.progress = 0;
+      if (state.tech.level === TECH_TIERS.length - 1) {
+        state.populationCap += 10;
+        log(state, "The modern city rises. Room for " + state.populationCap + " souls now.");
+      }
       log(state, "The village learns " + TECH_TIERS[state.tech.level].name + ". " + TECH_TIERS[state.tech.level].blurb);
     }
   }
@@ -656,6 +692,7 @@ export function demographicRates(state) {
 
 export function canAfford(state, type) {
   const c = BUILD_COSTS[type];
+  if (!c) return false; // an unpriced type is never affordable: it must not crash the sim
   return state.stockpile.wood >= c.wood && state.stockpile.stone >= c.stone && (state.stockpile.ore || 0) >= (c.ore || 0);
 }
 
@@ -726,6 +763,19 @@ export function computeDemands(state, grid) {
   if (state.tech && state.tech.level >= 2 && !built("healer") && !queued("healer") && pop >= 10) {
     demands.push({ type: "healer", score: 4, reason: "Iron craft brings medicine: the village needs a healer's hut." });
   }
+  // Defenses: a wall ring once the village knows iron craft and has
+  // the hands to hold it; towers once a wall line exists to anchor.
+  // Walls are capped so the ring never paves the whole map.
+  const wallCount = state.buildings.filter((b) => b.type === "wall").length
+    + state.buildQueue.filter((q) => q.type === "wall").length;
+  const towerCount = state.buildings.filter((b) => b.type === "tower").length
+    + state.buildQueue.filter((q) => q.type === "tower").length;
+  if (state.tech && state.tech.level >= 2 && pop >= 12 && wallCount < 40 && !queued("wall")) {
+    demands.push({ type: "wall", score: 3.5, reason: "Iron craft brings wariness: the village needs a wall ring." });
+  }
+  if (state.tech && state.tech.level >= 2 && pop >= 14 && wallCount >= 6 && towerCount < 4 && !queued("tower")) {
+    demands.push({ type: "tower", score: 4, reason: "The wall needs towers to watch the gates." });
+  }
   demands.sort((a, b) => b.score - a.score);
   return demands;
 }
@@ -735,8 +785,19 @@ export function computeDemands(state, grid) {
 function think(state, grid, v) {
   const cx = state._cx, cz = state._cz;
   // Urgent needs override jobs, exactly as in the Luanti brain.
-  if (v.fear >= 50 || (state.elapsed < state.effects.floodUntil && Math.hypot(v.x - cx, v.z - cz) < 14)) {
-    v.state = "flee"; setTarget(state, grid, v, cx + (v.x > cx ? 6 : -6), cz + (v.z > cz ? 6 : -6)); return;
+  // Raiders send villagers running away from the threat, never
+  // toward the center where the raiders are headed.
+  const raiderNear = nearestRaider(state, v.x, v.z, 8);
+  if (v.fear >= 50 || raiderNear || (state.elapsed < state.effects.floodUntil && Math.hypot(v.x - cx, v.z - cz) < 14)) {
+    v.state = "flee";
+    if (raiderNear) {
+      const dx = v.x - raiderNear.x, dz = v.z - raiderNear.z;
+      const d = Math.hypot(dx, dz) || 1;
+      setTarget(state, grid, v, clamp(Math.round(v.x + (dx / d) * 6), 1, SIZE - 2), clamp(Math.round(v.z + (dz / d) * 6), 1, SIZE - 2));
+    } else {
+      setTarget(state, grid, v, cx + (v.x > cx ? 6 : -6), cz + (v.z > cz ? 6 : -6));
+    }
+    return;
   }
   if (v.health <= 0) return;
   if (v.hunger >= 75) {
@@ -844,6 +905,8 @@ function workNeed(state, v, base) {
   if (v.job === "fisher" && state.weather && state.weather.kind === "rain") n = 6.5;
   const moraleEff = 0.85 + ((state.morale ?? 60) / 100) * 0.3;
   n /= moraleEff * (1 + 0.25 * (v.tool || 0));
+  // Electric light and modern methods speed every job a little.
+  if (state.tech && state.tech.level >= 5) n *= 0.9;
   if (state.weather) {
     if (state.weather.kind === "storm") n *= 1.25;
     if (state.weather.kind === "snow") n *= 1.5;
@@ -861,6 +924,7 @@ function doWork(state, grid, v, dt) {
   v.workTimer = 0;
   const tech = state.tech || { level: 0, progress: 0 };
   const fineBonus = (v.tool || 0) >= 2 ? 1 : 0;
+  const steelBonus = (v.tool || 0) >= 3 ? 1 : 0;
   const addCarry = (type, amt = 1) => {
     if (!v.carry) v.carry = { type, amt: 0 };
     if (v.carry.type !== type) return;
@@ -872,31 +936,32 @@ function doWork(state, grid, v, dt) {
     // Lessons land at dawn (see dawnDemographics). The teacher just
     // needs to be at the school, visible to the village.
   } else if (v.job === "farmer" && cell && cell.farm) {
-    if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2 + (tech.level >= 1 ? 1 : 0) + (tech.level >= 2 ? 1 : 0) + fineBonus); }
+    if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2 + (tech.level >= 1 ? 1 : 0) + (tech.level >= 2 ? 1 : 0) + fineBonus + steelBonus); }
     else if (state.elapsed >= state.effects.droughtUntil) { cell.crop = Math.min(3, cell.crop + 1); }
   } else if (v.job === "woodcutter" && cell && cell.tree) {
-    cell.tree = false; cell.blocked = false; addCarry("wood", 2 + fineBonus);
+    cell.tree = false; cell.blocked = false; addCarry("wood", 2 + fineBonus + steelBonus);
     if (hasWorkshop) { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("wood", 1); }
   } else if ((v.job === "miner" || v.job === "hauler") && cell && (cell.stone > 0 || cell.ore > 0)) {
     if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); }
-    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
+    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus + steelBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
     else addCarry("wood"); // hauler fallback at a spent node: gather firewood nearby
     if (v.job === "hauler" && !cell.stone && !cell.ore) addCarry("wood");
     if (hasWorkshop && v.job === "miner") { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("stone", 1); }
   } else if (v.job === "fisher") {
-    addCarry("fish", 1 + fineBonus);
+    addCarry("fish", 1 + fineBonus + steelBonus);
   } else if (v.job === "hunter") {
     const deer = state.deer.find((d) => Math.hypot(d.x - v.x, d.z - v.z) < 2.2);
     if (deer) {
       state.deer = state.deer.filter((d) => d !== deer);
-      addCarry("meat", 3 + fineBonus);
+      addCarry("meat", 3 + fineBonus + steelBonus);
       log(state, v.name + " brings down a deer.");
     }
   } else if (v.job === "builder") {
     const q = state.buildQueue[0];
     if (q) {
-      q.progress += 1;
-      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7, school: 8, healer: 6 }[q.type] || 6;
+      // Steam and brick doubles building speed: mills and cranes.
+      q.progress += tech.level >= 4 ? 2 : 1;
+      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7, school: 8, healer: 6, wall: 4, tower: 8 }[q.type] || 6;
       if (q.progress >= needProgress) {
         state.buildQueue.shift();
         const cost = BUILD_COSTS[q.type] || { wood: 0, stone: 0, ore: 0 };
@@ -946,6 +1011,12 @@ function doWork(state, grid, v, dt) {
             } else if (type === "healer") {
               grid[q.x][q.z].blocked = true;
               log(state, "A healer's hut opens. The sick will mend faster near it.");
+            } else if (type === "wall") {
+              grid[q.x][q.z].blocked = true;
+              log(state, "A stretch of wall rises on the wall ring.");
+            } else if (type === "tower") {
+              grid[q.x][q.z].blocked = true;
+              log(state, "A watch tower rises. Its guard watches the gates.");
             }
           }
           assignHomes(state);
@@ -1052,6 +1123,68 @@ export function findPlannedSpot(state, grid, type, minR = 3, maxR = 14) {
   return bestScore > -Infinity ? best : null;
 }
 
+// --- walls and towers: a ring with gates, not a sprawl ---
+// The wall ring sits 9 cells out from the town center. The four axis
+// cells stay open as gates: villagers, and raiders, funnel through
+// them, and towers watch them. Farm beds, water, roads, and trees
+// break the ring elsewhere, so a finished ring still has gaps: a
+// wall slows raiders and channels them, it never seals the village
+// in. Walls block movement through the grid blocked mechanism, so
+// villagers path through the gates like everyone else.
+export const WALL_RING_R = 9;
+
+function ringCellFree(state, grid, x, z) {
+  if (!inBounds(x, z)) return false;
+  const c = grid[x][z];
+  return !c.blocked && !c.water && !c.farm && !c.building && !c.tree && c.stone <= 0 && c.ore <= 0 && !c.road;
+}
+
+export function findWallSpot(state, grid) {
+  const cx = state._cx, cz = state._cz, R = WALL_RING_R;
+  let best = null, bestScore = -Infinity;
+  for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== R) continue;
+    if (dx === 0 || dz === 0) continue; // gate cells stay open
+    const x = cx + dx, z = cz + dz;
+    if (!ringCellFree(state, grid, x, z)) continue;
+    if (state.buildQueue.some((q) => q.x === x && q.z === z)) continue;
+    let score = 0;
+    for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const n = inBounds(x + ax, z + az) ? grid[x + ax][z + az] : null;
+      if (n && n.building === "wall") score += 3;
+      if (n && n.building === "tower") score += 1;
+    }
+    // Grow out from the gates first, so the ring reads as one wall.
+    score -= Math.min(Math.abs(dx), Math.abs(dz)) * 0.1;
+    if (score > bestScore) { bestScore = score; best = [x, z]; }
+  }
+  return best;
+}
+
+export function findTowerSpot(state, grid) {
+  // Towers sit on the ring beside a gate, spaced from other towers.
+  const cx = state._cx, cz = state._cz, R = WALL_RING_R;
+  let best = null, bestScore = -Infinity;
+  for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== R) continue;
+    if (dx === 0 || dz === 0) continue; // never block a gate
+    const x = cx + dx, z = cz + dz;
+    if (!ringCellFree(state, grid, x, z)) continue;
+    if (state.buildQueue.some((q) => q.x === x && q.z === z)) continue;
+    const nearGate = (Math.abs(dx) === 1 && Math.abs(dz) === R) || (Math.abs(dx) === R && Math.abs(dz) === 1);
+    let score = nearGate ? 5 : 0;
+    for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = inBounds(x + ax, z + az) ? grid[x + ax][z + az] : null;
+      if (n && n.building === "wall") score += 2;
+    }
+    for (const b of state.buildings) {
+      if (b.type === "tower" && Math.hypot(b.x - x, b.z - z) < 5) score -= 8;
+    }
+    if (score > bestScore) { bestScore = score; best = [x, z]; }
+  }
+  return best;
+}
+
 // The village square: a road ring two cells out from the town
 // center, plus a straight farm road west to the fields. Laid at
 // founding so the village has visible structure from day one, and
@@ -1122,7 +1255,9 @@ export function expandVillage(state, grid) {
       } else if (top.type === "greathall") {
         const lh = [...state.buildings].filter((b) => b.type === "longhouse").sort((a, b) => (a.builtDay || 1) - (b.builtDay || 1))[0];
         if (lh) spot = [lh.x, lh.z];
-      } else if (top.type === "hut") spot = findHutSpot(state, grid);
+      } else if (top.type === "wall") spot = findWallSpot(state, grid);
+      else if (top.type === "tower") spot = findTowerSpot(state, grid);
+      else if (top.type === "hut") spot = findHutSpot(state, grid);
       else spot = findPlannedSpot(state, grid, top.type, 2, 14);
       if (spot) {
         // Never queue two builds on the same cell: the grid is only
@@ -1234,6 +1369,207 @@ function updateWeather(state) {
   }
 }
 
+// --- raiders: periodic hostile arrivals, gated until established ---
+// A raid is telegraphed a dawn ahead, capped small, and always ends:
+// raiders leave hurt, full, or out of time. Villagers flee, never
+// fight unarmed; towers shoot; walls channel and delay. A prepared
+// village comes through with minor losses; an unprepared one loses
+// some food and, at worst, a villager or two. Never a wipe.
+export const RAID_MIN_DAY = 12;
+export const RAID_MIN_POP = 12;
+export const RAID_MIN_TECH = 2;
+export const RAID_GAP_DAYS = 8;
+const BUILDING_HP = { wall: 30, tower: 60 };
+function buildingHp(b) { return BUILDING_HP[b.type] || 25; }
+
+export function nearestRaider(state, x, z, maxD) {
+  let best = null, bestD = maxD;
+  for (const r of state.raiders || []) {
+    const d = Math.hypot(r.x - x, r.z - z);
+    if (d < bestD) { bestD = d; best = r; }
+  }
+  return best;
+}
+
+export function makeRaider(state, x, z) {
+  const hp = 10 + eraStageOf(state.tech ? state.tech.level : 0) * 2;
+  return {
+    id: state.nextRaiderId++, x, z, path: null, direct: null,
+    hp, maxHp: hp, loot: 0, state: "approach",
+    retargetAt: 0, stealAt: 0, leaveAt: state.elapsed + 120,
+    homeEdge: [Math.round(x), Math.round(z)],
+  };
+}
+
+export function spawnRaid(state, grid, size = null) {
+  const pop = state.villagers.length;
+  const n = size ?? Math.min(6, 2 + Math.floor(pop / 12));
+  const dirs = ["north", "south", "east", "west"];
+  const dir = dirs[Math.floor(state._rng() * 4)];
+  const spawned = [];
+  for (let i = 0; i < n; i++) {
+    let x, z;
+    if (dir === "north") { x = 2 + Math.floor(state._rng() * (SIZE - 4)); z = 1; }
+    else if (dir === "south") { x = 2 + Math.floor(state._rng() * (SIZE - 4)); z = SIZE - 2; }
+    else if (dir === "west") { x = 1; z = 2 + Math.floor(state._rng() * (SIZE - 4)); }
+    else { x = SIZE - 2; z = 2 + Math.floor(state._rng() * (SIZE - 4)); }
+    let tries = 0;
+    while (grid[x][z].water && tries < 10) { x = clamp(x + 1, 1, SIZE - 2); z = clamp(z + 1, 1, SIZE - 2); tries++; }
+    const r = makeRaider(state, x + 0.5, z + 0.5);
+    r.homeEdge = [x, z];
+    state.raiders.push(r);
+    spawned.push(r);
+  }
+  state.raidActive = true;
+  state.raidUntil = state.elapsed + 120;
+  state._raidStats = { deaths: 0, stolen: 0, killed: 0 };
+  log(state, "Raiders attack! " + n + " raiders come from the " + dir + ". The villagers flee.");
+  return spawned;
+}
+
+function nearestWallCell(grid, r) {
+  let best = null, bestD = Infinity;
+  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+    if (grid[x][z].building !== "wall" && grid[x][z].building !== "tower") continue;
+    const d = Math.hypot(x - r.x, z - r.z);
+    if (d < bestD) { bestD = d; best = [x, z]; }
+  }
+  return best;
+}
+
+function moveRaider(state, grid, r, tx, tz, dt) {
+  if (state.elapsed >= r.retargetAt || (!r.path && !r.direct)) {
+    r.retargetAt = state.elapsed + 3;
+    const path = findPath(grid, Math.round(r.x), Math.round(r.z), clamp(Math.round(tx), 0, SIZE - 1), clamp(Math.round(tz), 0, SIZE - 1), 4000);
+    if (path && path.length) { r.path = path; r.direct = null; }
+    else { r.path = null; r.direct = nearestWallCell(grid, r); }
+  }
+  let dest = null;
+  if (r.path && r.path.length) dest = r.path[0];
+  else if (r.direct) dest = r.direct;
+  if (!dest) return;
+  const dx = dest[0] + 0.5 - r.x, dz = dest[1] + 0.5 - r.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.3) {
+    if (r.path && r.path.length) r.path.shift();
+    return;
+  }
+  const sp = 2.0 * dt; // slower than a fleeing villager: flight works
+  r.x += (dx / dist) * Math.min(sp, dist);
+  r.z += (dz / dist) * Math.min(sp, dist);
+}
+
+function destructibleNear(state, grid, r) {
+  // A building in an adjacent cell, excluding the town center and
+  // altar: raiders sack and break, they do not raze the heart.
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [0, 0]]) {
+    const x = Math.round(r.x) + dx, z = Math.round(r.z) + dz;
+    if (!inBounds(x, z)) continue;
+    const t = grid[x][z].building;
+    if (!t || t === "towncenter" || t === "altar") continue;
+    const b = state.buildings.find((o) => o.x === x && o.z === z);
+    if (b) return b;
+  }
+  return null;
+}
+
+function resolveRaid(state) {
+  state.raidActive = false;
+  state.lastRaidDay = state.day;
+  const st = state._raidStats || { deaths: 0, stolen: 0, killed: 0 };
+  if (st.deaths === 0 && st.stolen === 0) {
+    state.morale = clamp((state.morale ?? 60) + 8, 0, 100);
+    state.faith = clamp(state.faith + 5, 0, 100);
+    log(state, "The village drives off the raiders without loss. Morale soars.");
+  } else {
+    state.morale = clamp((state.morale ?? 60) - 8, 0, 100);
+    state.faith = clamp(state.faith - 3, 0, 100);
+    log(state, "The raid ends. " + st.deaths + " slain, " + st.stolen + " food stolen, " + st.killed + " raiders felled.");
+  }
+  state._raidStats = null;
+}
+
+function stepRaiders(state, grid, dt) {
+  if (!state.raiders.length) {
+    if (state.raidActive) resolveRaid(state);
+    return;
+  }
+  const cx = state._cx, cz = state._cz;
+  // Towers shoot: one volley per second per tower, range 7.
+  if (state.elapsed >= (state.towerAt || 0)) {
+    state.towerAt = state.elapsed + 1;
+    for (const t of state.buildings.filter((b) => b.type === "tower")) {
+      let best = null, bestD = 7;
+      for (const r of state.raiders) {
+        const d = Math.hypot(r.x - (t.x + 0.5), r.z - (t.z + 0.5));
+        if (d < bestD) { bestD = d; best = r; }
+      }
+      if (best) {
+        best.hp -= 2 + eraStageOf(state.tech ? state.tech.level : 0);
+        if (best.hp <= 0) {
+          state.raiders = state.raiders.filter((o) => o !== best);
+          if (state._raidStats) state._raidStats.killed++;
+          log(state, "A tower fells a raider.");
+        }
+      }
+    }
+  }
+  for (const r of [...state.raiders]) {
+    if (r.hp <= r.maxHp * 0.35 || r.loot >= 8 || state.elapsed >= state.raidUntil) r.state = "leave";
+    if (r.state === "leave") {
+      if (Math.hypot(r.x - r.homeEdge[0], r.z - r.homeEdge[1]) < 2 || state.elapsed >= state.raidUntil + 40) {
+        state.raiders = state.raiders.filter((o) => o !== r);
+        continue;
+      }
+      moveRaider(state, grid, r, r.homeEdge[0], r.homeEdge[1], dt);
+      continue;
+    }
+    // A villager in reach is attacked. Villagers flee, so contact is
+    // usually brief; a cornered or sleeping villager can be slain.
+    const victim = state.villagers.find((v) => Math.hypot(v.x - r.x, v.z - r.z) < 1.3);
+    if (victim) {
+      victim.health = clamp(victim.health - 10 * dt, 0, 100);
+      victim.fear = 85;
+      if (victim.health <= 0) {
+        removeVillager(state, victim, "slain by raiders");
+        if (state._raidStats) state._raidStats.deaths++;
+      }
+      continue;
+    }
+    // Break through: batter an adjacent wall, tower, or building.
+    const target = destructibleNear(state, grid, r);
+    if (target) {
+      target.damage = (target.damage || 0) + 6 * dt;
+      if (target.damage >= buildingHp(target)) {
+        state.buildings = state.buildings.filter((o) => o !== target);
+        grid[target.x][target.z].building = null;
+        grid[target.x][target.z].blocked = false;
+        log(state, target.type === "wall" ? "Raiders break through the wall!"
+          : target.type === "tower" ? "Raiders topple a tower!"
+          : "Raiders sack the " + target.type + "!");
+        assignHomes(state);
+      }
+      continue;
+    }
+    // Steal at the center: food, then leave with it.
+    if (Math.hypot(r.x - (cx + 0.5), r.z - (cz + 0.5)) < 3) {
+      if (state.elapsed >= r.stealAt) {
+        r.stealAt = state.elapsed + 2;
+        const s = state.stockpile;
+        const kind = s.food > 0 ? "food" : s.fish > 0 ? "fish" : s.meat > 0 ? "meat" : null;
+        if (kind) {
+          s[kind] = Math.max(0, s[kind] - 2);
+          r.loot += 2;
+          if (state._raidStats) state._raidStats.stolen += 2;
+        } else r.state = "leave";
+      }
+      continue;
+    }
+    moveRaider(state, grid, r, cx, cz, dt);
+  }
+  if (state.raidActive && !state.raiders.length) resolveRaid(state);
+}
+
 export function step(state, grid, dt) {
   if (state.paused) return;
   state.elapsed += dt;
@@ -1310,6 +1646,21 @@ export function step(state, grid, dt) {
         state.lowMoraleDawns = 0;
       }
     } else state.lowMoraleDawns = 0;
+    // Raiders: gated until the village is established, telegraphed a
+    // dawn ahead, and never more than one raid per gap of days.
+    if (!state.raidActive && !state.raiders.length) {
+      if (state.raidPendingDay && state.day >= state.raidPendingDay) {
+        state.raidPendingDay = 0;
+        spawnRaid(state, grid);
+      } else if (!state.raidPendingDay && state.day >= RAID_MIN_DAY
+        && state.villagers.length >= RAID_MIN_POP
+        && state.tech && state.tech.level >= RAID_MIN_TECH
+        && state.day - (state.lastRaidDay || -1e9) >= RAID_GAP_DAYS
+        && state._rng() < 0.14) {
+        state.raidPendingDay = state.day + 1;
+        log(state, "Scouts report raiders in the hills. They come at dawn.");
+      }
+    }
     // Deer top-up, as in world.lua. Winter herds are thinner.
     const deerCap = state.season === "winter" ? 2 : 4;
     while (state.deer.length < deerCap) state.deer.push(makeDeer(state, state._cx + 8, state._cz + 8));
@@ -1322,7 +1673,8 @@ export function step(state, grid, dt) {
   // fields; snow stops growth; the season sets the pace.
   if (state.elapsed >= state.effects.droughtUntil && state.weather.kind !== "snow") {
     const farmhouses = state.buildings.filter((b) => b.type === "farmhouse");
-    const growth = SEASON_GROWTH[state.season] * (state.weather.kind === "rain" ? 1.5 : 1);
+    const eraGrowth = (state.tech && state.tech.level >= 4 ? 1.25 : 1) * (state.tech && state.tech.level >= 5 ? 1.15 : 1);
+    const growth = SEASON_GROWTH[state.season] * (state.weather.kind === "rain" ? 1.5 : 1) * eraGrowth;
     for (const [x, z] of state._farmCells) {
       const c = grid[x][z];
       const nearHouse = farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5);
@@ -1372,6 +1724,7 @@ export function step(state, grid, dt) {
   const healer = state.buildings.find((b) => b.type === "healer");
   const phase = phaseOf(state.time);
   const wkind = state.weather ? state.weather.kind : "clear";
+  let plagueCleared = 0;
   for (const v of [...state.villagers]) {
     // Hunger rises faster in winter cold and summer heat; water from a
     // well and rain both take the edge off. Snow and storms slow feet.
@@ -1389,9 +1742,14 @@ export function step(state, grid, dt) {
       v.health = clamp(v.health - dt * (nearHealer ? 0.2 : 0.8) + (nearHealer ? dt * 1.5 : 0), 0, 100);
     }
     if (v.hunger >= 100) v.health = clamp(v.health - dt * 1.2, 0, 100);
-    if (state.elapsed >= state.effects.plagueUntil && v.sick) v.sick = false;
+    if (state.elapsed >= state.effects.plagueUntil && v.sick) { v.sick = false; plagueCleared++; }
     v.fear = clamp(v.fear - dt * 3, 0, 100);
     if (wkind === "storm") v.fear = clamp(v.fear + dt * 0.5, 0, 100);
+    // A raider close by sends a villager running now, not at the
+    // next rethink: villagers never seek combat unarmed.
+    if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
+      v.state = "flee"; v.rethinkAt = state.elapsed;
+    }
     if (v.health <= 0) {
       removeVillager(state, v, "hunger and hardship");
       continue;
@@ -1470,6 +1828,9 @@ export function step(state, grid, dt) {
     v.lastX = v.x; v.lastZ = v.z;
     if (v.stuckAt > 6) { v.rethinkAt = state.elapsed; v.stuckAt = 0; }
   }
+  if (plagueCleared > 0) log(state, "The sickness passes. The village breathes again.");
+  // Raiders move, fight, steal, and leave on their own schedule.
+  stepRaiders(state, grid, dt);
 }
 
 // --- god actions: nudges and catastrophes. Never direct control. ---
@@ -1504,6 +1865,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       state.effects.plagueUntil = state.elapsed + 45;
       for (const v of state.villagers) if (state._rng() < 0.4) v.sick = true;
       state.faith = clamp(state.faith - 8, 0, 100);
+      state.stats.plagues = (state.stats.plagues || 0) + 1;
       log(state, "Plague spreads through the village."); setCd(60); break;
     case "quake": {
       if (x == null) return { ok: false, reason: "Tap the ground for the quake's center." };
@@ -1559,8 +1921,8 @@ export function serialize(state, grid) {
     if (c.building) buildings.push([x, z, c.building]);
     if (c.road) roads.push([x, z]);
   }
-  const { _rng, _farmCells, _stoneSpots, _oreSpots, _fire, _quake, ...rest } = state;
-  void _rng; void _farmCells; void _stoneSpots; void _oreSpots;
+  const { _rng, _farmCells, _stoneSpots, _oreSpots, _fire, _quake, raiders, _raidStats, ...rest } = state;
+  void _rng; void _farmCells; void _stoneSpots; void _oreSpots; void raiders; void _raidStats;
   // The save version is stamped here, not trusted to state, so every
   // file on disk carries the version its writer used.
   return JSON.stringify({ ...rest, version: SAVE_VERSION, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
@@ -1586,7 +1948,7 @@ export function deserialize(json) {
   if (state.stats && state.stats.trades == null) state.stats.trades = 0;
   if (state.stats && state.stats.celebrations == null) state.stats.celebrations = 0;
   if (state.spoiled == null) state.spoiled = 0;
-  // MIGRATION PATTERN. Read this before v12. Updates must never
+  // MIGRATION PATTERN. Read this before v13. Updates must never
   // restart the world: serialize() stamps SAVE_VERSION, and
   // deserialize() migrates older saves forward in place, one step
   // per release, oldest first. Every new field gets a sensible
@@ -1609,6 +1971,21 @@ export function deserialize(json) {
     state.lastLeaveAt = -1e9;
     state.stormAt = -1e9;
   }
+  // v12 (fromVersion < 4): raids, walls, eras, plague counts. Raiders
+  // never persist: a save taken mid-raid loads with an empty field,
+  // and the raid is logged as scattered below.
+  if (fromVersion < 4) {
+    if (state.stats && state.stats.plagues == null) state.stats.plagues = 0;
+    if (state.nextRaiderId == null) state.nextRaiderId = 1;
+    if (state.raidActive == null) state.raidActive = false;
+    if (state.raidPendingDay == null) state.raidPendingDay = 0;
+    if (state.lastRaidDay == null) state.lastRaidDay = -1e9;
+    if (state.raidUntil == null) state.raidUntil = -1;
+  }
+  if (state.raidActive) log(state, "The raid scatters as the world is remade.");
+  state.raidActive = false;
+  state.raiders = [];
+  state._raidStats = null;
   state.version = SAVE_VERSION;
   for (const v of state.villagers) {
     for (const j of JOBS) if (v.skills[j] == null) v.skills[j] = 1;

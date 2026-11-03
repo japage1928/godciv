@@ -1,7 +1,14 @@
 // Three.js rendering for GodCiv PWA. Rendering only: it never changes
 // sim state. The sim owns truth; this file draws it.
+//
+// The look follows John's mockups: timber-frame houses with red
+// pitched roofs, stone chimneys with smoke, warm windows at night,
+// cobblestone plaza and paths, crop rows, torches, and a village that
+// visibly grows from timber hamlet to modern city as tech eras pass.
+// Buildings are merged vertex-colored geometry: one draw call per
+// building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, phaseOf } from "./sim.js";
+import { SIZE, phaseOf, eraStageOf, WALL_RING_R } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
@@ -10,7 +17,7 @@ const SEASON_GRASS = {
   spring: new THREE.Color(0x7da05c),
   summer: new THREE.Color(0x9aa860),
   autumn: new THREE.Color(0xa8793f),
-  winter: new THREE.Color(0x9aa88f),
+  winter: new THREE.Color(0xb8c4b0),
 };
 const SEASON_CANOPY = {
   spring: new THREE.Color(0x2e6b2e),
@@ -24,6 +31,15 @@ const SEASON_CANOPY_TOP = {
   autumn: new THREE.Color(0xd98a35),
   winter: new THREE.Color(0x7d8c70),
 };
+// Era palettes: the whole village changes dress as tech eras pass.
+// Timber and red tile, then stone, then brick, then concrete and glass.
+const ERA_PALETTE = [
+  { wall: 0xeadfc8, timber: 0x5d4037, roof: 0xa52a2a, trim: 0x6d4c41, road: 0xb09a6d, wallMat: 0x8d6e63 },
+  { wall: 0xd7ccc8, timber: 0x4e342e, roof: 0x9e3a2a, trim: 0x5d4037, road: 0x9a8f7a, wallMat: 0x8a8a8a },
+  { wall: 0xb5654a, timber: 0x3e2723, roof: 0x4a3b32, trim: 0x2d1f1a, road: 0x8d8d8d, wallMat: 0x9a6a52 },
+  { wall: 0xcfd8dc, timber: 0x37474f, roof: 0x607d8b, trim: 0x263238, road: 0x707070, wallMat: 0x90a4ae },
+];
+const CROP_COLORS = [0x7cb342, 0x8bc34a, 0x9ccc65, 0xe6c619];
 
 // Pure pan math, exported so tests can prove all four drag directions
 // move the view and that opposite drags cancel. Screen-right on the ground
@@ -51,6 +67,178 @@ function makeSpeckleTexture(base, speckles, size = 128) {
   return tex;
 }
 
+function makeCobbleTexture() {
+  const size = 128;
+  const c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#6e6257"; ctx.fillRect(0, 0, size, size);
+  let seed = 11;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+    const g = 130 + Math.floor(rnd() * 50);
+    ctx.fillStyle = "rgb(" + g + "," + (g - 6) + "," + (g - 18) + ")";
+    const off = (y % 2) * 16;
+    ctx.fillRect(x * 32 + off - 16 + 2, y * 32 + 2, 28, 28);
+  }
+  for (let i = 0; i < 120; i++) {
+    ctx.fillStyle = rnd() < 0.5 ? "#7d7469" : "#5d5348";
+    ctx.fillRect(rnd() * size, rnd() * size, 2, 2);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeSmokeTexture() {
+  const size = 64;
+  const c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, "rgba(255,255,255,0.85)");
+  grad.addColorStop(0.5, "rgba(255,255,255,0.35)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// --- merged geometry: many small parts, one mesh, one material ---
+// Each part carries its own color; the merged mesh uses a single
+// vertex-colored material. Parts are built fresh (never cached) so
+// the merge can take ownership of their geometry.
+function partBox(list, w, h, d, x, y, z, color, rx = 0, ry = 0, rz = 0) {
+  list.push({ geo: new THREE.BoxGeometry(w, h, d), x, y, z, rx, ry, rz, color });
+  return list;
+}
+function partCyl(list, rTop, rBot, h, seg, x, y, z, color, rx = 0, ry = 0, rz = 0) {
+  list.push({ geo: new THREE.CylinderGeometry(rTop, rBot, h, seg), x, y, z, rx, ry, rz, color });
+  return list;
+}
+function prismGeometry(w, h, d) {
+  // Triangular prism, ridge along z, apex centered in x. Flat shaded.
+  const hw = w / 2, hd = d / 2;
+  const A = [-hw, 0, -hd], B = [hw, 0, -hd], C = [hw, 0, hd], D = [-hw, 0, hd], E = [0, h, -hd], F = [0, h, hd];
+  const tris = [[A, D, F], [A, F, E], [B, E, F], [B, F, C], [A, E, B], [D, C, F]];
+  const pos = new Float32Array(tris.flatMap((t) => t.flat()));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+function partPrism(list, w, h, d, x, y, z, color, ry = 0) {
+  list.push({ geo: prismGeometry(w, h, d), x, y, z, rx: 0, ry, rz: 0, color });
+  return list;
+}
+const _mergeMatrix = new THREE.Matrix4();
+const _mergeQuat = new THREE.Quaternion();
+const _mergeEuler = new THREE.Euler();
+const _mergePos = new THREE.Vector3();
+const _mergeScale = new THREE.Vector3(1, 1, 1);
+const _mergeColor = new THREE.Color();
+function mergeParts(list) {
+  const geos = [];
+  let total = 0;
+  for (const p of list) {
+    _mergeEuler.set(p.rx || 0, p.ry || 0, p.rz || 0);
+    _mergeQuat.setFromEuler(_mergeEuler);
+    _mergePos.set(p.x, p.y, p.z);
+    _mergeMatrix.compose(_mergePos, _mergeQuat, _mergeScale);
+    p.geo.applyMatrix4(_mergeMatrix);
+    const g = p.geo.index ? p.geo.toNonIndexed() : p.geo;
+    const n = g.attributes.position.count;
+    const colors = new Float32Array(n * 3);
+    _mergeColor.setHex(p.color);
+    for (let i = 0; i < n; i++) { colors[i * 3] = _mergeColor.r; colors[i * 3 + 1] = _mergeColor.g; colors[i * 3 + 2] = _mergeColor.b; }
+    g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geos.push(g);
+    total += n;
+    if (g !== p.geo) p.geo.dispose();
+  }
+  const pos = new Float32Array(total * 3);
+  const nor = new Float32Array(total * 3);
+  const col = new Float32Array(total * 3);
+  let o = 0;
+  for (const g of geos) {
+    pos.set(g.attributes.position.array, o * 3);
+    nor.set(g.attributes.normal.array, o * 3);
+    col.set(g.attributes.color.array, o * 3);
+    o += g.attributes.position.count;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  out.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+  out.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  return out;
+}
+
+const MAT_BODY = new THREE.MeshLambertMaterial({ vertexColors: true });
+const MAT_WINDOW = new THREE.MeshBasicMaterial({ color: 0xffca28 });
+const MAT_SNOW = new THREE.MeshLambertMaterial({ color: 0xf2f6f2 });
+const MAT_FLAME = new THREE.MeshBasicMaterial({ color: 0xff9800 });
+const MAT_LAMP = new THREE.MeshBasicMaterial({ color: 0xfff9c4 });
+
+// One timber house, parameterized: walls, timber frame, pitched or
+// flat roof, chimney, door, windows, shutters and flower boxes at
+// higher eras. Returns { body, win, snow, chimneyTop } part lists.
+function timberHouse(o) {
+  const body = [], win = [], snow = [];
+  const hw = o.w / 2, hd = o.d / 2;
+  const pal = o.pal;
+  partBox(body, o.w + 0.3, 0.18, o.d + 0.3, 0, 0.09, 0, 0x8d8d8d);
+  if (o.era >= 1) partBox(body, o.w + 0.1, 0.3, o.d + 0.1, 0, 0.15, 0, 0x7a7a7a);
+  partBox(body, o.w, o.wallH, o.d, 0, o.wallH / 2 + 0.18, 0, pal.wall);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    partBox(body, 0.12, o.wallH, 0.12, sx * (hw - 0.06), o.wallH / 2 + 0.18, sz * (hd - 0.06), pal.timber);
+  }
+  for (const sz of [-1, 1]) {
+    partBox(body, o.w, 0.12, 0.1, 0, 0.18 + o.wallH - 0.06, sz * (hd + 0.01), pal.timber);
+    partBox(body, o.w, 0.12, 0.1, 0, 0.24, sz * (hd + 0.01), pal.timber);
+  }
+  partBox(body, 0.5, 0.75, 0.08, 0, 0.55, hd + 0.02, o.doorColor || 0xb71c1c);
+  const wallTop = 0.18 + o.wallH;
+  let chimneyTop = null;
+  if (o.flat) {
+    partBox(body, o.w + 0.2, 0.15, o.d + 0.2, 0, wallTop + 0.07, 0, pal.roof);
+    for (const sz of [-1, 1]) partBox(body, o.w + 0.2, 0.22, 0.08, 0, wallTop + 0.2, sz * (hd + 0.06), pal.trim);
+    for (const sx of [-1, 1]) partBox(body, 0.08, 0.22, o.d + 0.2, sx * (hw + 0.06), wallTop + 0.2, 0, pal.trim);
+    partBox(win, o.w * 0.7, 0.3, 0.06, 0, wallTop - 0.2, hd + 0.03, 0xffffff);
+    partBox(snow, o.w + 0.1, 0.08, o.d + 0.1, 0, wallTop + 0.18, 0, 0xffffff);
+  } else {
+    partPrism(body, o.w + 0.3, o.roofH, o.d + 0.3, 0, wallTop, 0, pal.roof);
+    partBox(body, 0.12, 0.1, o.d + 0.34, 0, wallTop + o.roofH + 0.02, 0, pal.timber);
+    // Snow slabs lying on the two roof slopes, winter only.
+    const hw2 = (o.w + 0.3) / 2;
+    const slopeLen = Math.hypot(hw2, o.roofH) + 0.1;
+    const a = Math.atan2(o.roofH, hw2);
+    const len = Math.hypot(hw2, o.roofH);
+    const nx = o.roofH / len, ny = hw2 / len;
+    partBox(snow, slopeLen, 0.06, o.d + 0.28, hw2 / 2 + nx * 0.05, wallTop + o.roofH / 2 + ny * 0.05, 0, 0xffffff, 0, 0, Math.PI - a);
+    partBox(snow, slopeLen, 0.06, o.d + 0.28, -hw2 / 2 - nx * 0.05, wallTop + o.roofH / 2 + ny * 0.05, 0, 0xffffff, 0, 0, a);
+  }
+  for (const w of o.windows || []) {
+    partBox(win, 0.32, 0.34, 0.06, w.x, w.y, hd + 0.03, 0xffffff);
+    if (o.era >= 1) {
+      partBox(body, 0.1, 0.4, 0.05, w.x - 0.24, w.y, hd + 0.03, pal.timber);
+      partBox(body, 0.1, 0.4, 0.05, w.x + 0.24, w.y, hd + 0.03, pal.timber);
+      partBox(body, 0.4, 0.12, 0.12, w.x, w.y - 0.26, hd + 0.06, 0x4caf50);
+      partBox(body, 0.4, 0.1, 0.1, w.x, w.y - 0.18, hd + 0.06, 0xc62828);
+    }
+  }
+  if (o.chimney) {
+    const chx = o.w * 0.28;
+    const chH = o.wallH + o.roofH * 0.9;
+    partBox(body, 0.34, chH, 0.34, chx, 0.18 + chH / 2, -o.d * 0.2, 0x8a8a8a);
+    partBox(body, 0.44, 0.12, 0.44, chx, 0.18 + chH + 0.06, -o.d * 0.2, 0x6e6e6e);
+    chimneyTop = [chx, 0.18 + chH + 0.15, -o.d * 0.2];
+  }
+  return { body, win, snow, chimneyTop };
+}
+
 export class Renderer {
   constructor(canvas, onTap) {
     this.canvas = canvas;
@@ -62,11 +250,15 @@ export class Renderer {
     this.scene.fog = new THREE.Fog(0x87ceeb, 55, 95);
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
     this.target = new THREE.Vector3(SIZE / 2, 0, SIZE / 2);
-    this.distance = 34;
-    this.zoomTarget = 34;
+    // Elevated three-quarter framing, as in the mockups.
+    this.distance = 30;
+    this.zoomTarget = 30;
     this.yaw = Math.PI / 4;
-    this.pitch = 0.9;
+    this.pitch = 1.0;
     this.shake = 0;
+    this._skyColor = new THREE.Color();
+    this._m = new THREE.Matrix4();
+    this._c = new THREE.Color();
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x4a7c4a, 0.95);
     this.scene.add(hemi);
@@ -74,21 +266,21 @@ export class Renderer {
     this.sun.position.set(30, 40, 10);
     this.scene.add(this.sun);
     this.hemi = hemi;
-    // Warm light over the town center: off by day, glowing at night
-    // so windows and torches read as lit.
     this.nightLight = new THREE.PointLight(0xffa040, 0, 20, 1.2);
     this.nightLight.position.set(SIZE / 2, 4, SIZE / 2);
     this.scene.add(this.nightLight);
-    this._glowMeshes = [];
+    this._nightMeshes = [];
     this._wasNight = null;
     this._season = null;
+    this._wetKind = null;
+    this._roadEra = -1;
 
     // Weather particles: one pre-allocated Points cloud, reused for
     // rain and snow. No per-frame allocation, toggled by weather.
     const P_COUNT = 420;
     this._pGeo = new THREE.BufferGeometry();
     this._pPos = new Float32Array(P_COUNT * 3);
-    this._pVel = new Float32Array(P_COUNT * 2); // fall speed, drift
+    this._pVel = new Float32Array(P_COUNT * 2);
     for (let i = 0; i < P_COUNT; i++) {
       this._pPos[i * 3] = Math.random() * SIZE;
       this._pPos[i * 3 + 1] = Math.random() * 16;
@@ -102,6 +294,29 @@ export class Renderer {
     this._particles.visible = false;
     this._particles.frustumCulled = false;
     this.scene.add(this._particles);
+
+    // Chimney smoke: one pre-allocated Points pool, recycled over the
+    // village chimneys. Positions update in place, nothing is created.
+    const S_COUNT = 150;
+    this._sGeo = new THREE.BufferGeometry();
+    this._sPos = new Float32Array(S_COUNT * 3);
+    this._sAge = new Float32Array(S_COUNT);
+    this._sLife = new Float32Array(S_COUNT);
+    this._sHome = new Int16Array(S_COUNT);
+    this._sSeed = new Float32Array(S_COUNT);
+    for (let i = 0; i < S_COUNT; i++) {
+      this._sPos[i * 3 + 1] = -5;
+      this._sAge[i] = Math.random() * 3;
+      this._sLife[i] = 1.6 + Math.random() * 1.4;
+      this._sHome[i] = -1;
+      this._sSeed[i] = Math.random() * 10;
+    }
+    this._sGeo.setAttribute("position", new THREE.BufferAttribute(this._sPos, 3));
+    this._sMat = new THREE.PointsMaterial({ color: 0xd8d8d8, size: 0.55, map: makeSmokeTexture(), transparent: true, opacity: 0.32, depthWrite: false });
+    this._smoke = new THREE.Points(this._sGeo, this._sMat);
+    this._smoke.frustumCulled = false;
+    this.scene.add(this._smoke);
+    this._chimneys = [];
 
     // Celebration dressing at the town center: banner poles and a
     // bonfire, built once, shown only while a festival runs.
@@ -122,6 +337,7 @@ export class Renderer {
     this.scene.add(this.celebrationGroup);
 
     this.villagerMeshes = new Map();
+    this.raiderMeshes = new Map();
     this.deerMeshes = new Map();
     this.selectedRing = new THREE.Mesh(
       new THREE.RingGeometry(0.55, 0.75, 24),
@@ -131,7 +347,16 @@ export class Renderer {
     this.selectedRing.visible = false;
     this.scene.add(this.selectedRing);
 
+    // Fire: five flames pre-allocated once, reused while a fire burns.
+    // The old code built new meshes every frame and leaked geometry.
     this.fireGroup = new THREE.Group();
+    this._fireFlames = [];
+    for (let i = 0; i < 5; i++) {
+      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.2, 6), new THREE.MeshBasicMaterial({ color: i % 2 ? 0xff5722 : 0xffc107 }));
+      flame.visible = false;
+      this.fireGroup.add(flame);
+      this._fireFlames.push(flame);
+    }
     this.scene.add(this.fireGroup);
     this.floodPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(SIZE, SIZE),
@@ -142,11 +367,11 @@ export class Renderer {
     this.scene.add(this.floodPlane);
 
     this.clouds = new THREE.Group();
-    const cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+    this._cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
     for (let i = 0; i < 5; i++) {
       const cloud = new THREE.Group();
       for (let j = 0; j < 3; j++) {
-        const puff = new THREE.Mesh(new THREE.BoxGeometry(3 + j, 0.5, 1.8), cloudMat);
+        const puff = new THREE.Mesh(new THREE.BoxGeometry(3 + j, 0.5, 1.8), this._cloudMat);
         puff.position.set(j * 1.6 - 1.6, j * 0.15, 0);
         cloud.add(puff);
       }
@@ -155,6 +380,7 @@ export class Renderer {
     }
     this.scene.add(this.clouds);
     this.groundTex = makeSpeckleTexture("#7da05c", ["#6b8f4e", "#8fb069", "#5d9e4a", "#a8b878"]);
+    this.cobbleTex = makeCobbleTexture();
 
     this._buildStatic = null;
     this._buildSignature = "";
@@ -181,8 +407,8 @@ export class Renderer {
     return base;
   }
 
-  // Recolors the ground and tree canopies when the season changes.
-  // Runs at most four times a year, never per frame.
+  // Recolors the ground and tree canopies when the season changes, and
+  // toggles roof snow. Runs at most four times a year, never per frame.
   _applySeasonTint(state, grid) {
     const season = state.season || "spring";
     if (season === this._season || !this.groundMesh) return;
@@ -204,6 +430,10 @@ export class Renderer {
       }
       if (this.canopyMesh.instanceColor) this.canopyMesh.instanceColor.needsUpdate = true;
       if (this.canopyTopMesh.instanceColor) this.canopyTopMesh.instanceColor.needsUpdate = true;
+    }
+    const snowy = season === "winter";
+    if (this.buildingsGroup) {
+      this.buildingsGroup.traverse((o) => { if (o.userData.isSnow) o.visible = snowy; });
     }
   }
 
@@ -230,9 +460,8 @@ export class Renderer {
     if (ground.instanceColor) ground.instanceColor.needsUpdate = true;
     this.scene.add(ground); group.push(ground);
     this.groundMesh = ground;
-    this._season = null; // first update() re-tints to the true season
+    this._season = null;
 
-    // Water surface: translucent blue tiles just above the ground, shimmering.
     const waterCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].water) waterCells.push([x, z]);
     if (waterCells.length) {
@@ -244,18 +473,19 @@ export class Renderer {
       this.scene.add(this.waterMesh); group.push(this.waterMesh);
     }
 
-    // Trees: trunk + canopy, instanced.
+    // Trees: trunk + canopy, instanced, slight size variance per tree.
     const treeCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].tree) treeCells.push([x, z]);
     this._treeCells = treeCells;
     if (treeCells.length) {
-      const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.13, 0.18, 0.8, 6), new THREE.MeshLambertMaterial({ color: 0x6b4423, map: this.groundTex }), treeCells.length);
+      const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.13, 0.18, 0.8, 6), new THREE.MeshLambertMaterial({ color: 0x6b4423 }), treeCells.length);
       const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.85, 0), new THREE.MeshLambertMaterial({ color: 0x2e6b2e }), treeCells.length);
       const canopyTop = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshLambertMaterial({ color: 0x3d8a3d }), treeCells.length);
       treeCells.forEach(([x, z], idx) => {
-        m.makeTranslation(x + 0.5, 0.65, z + 0.5); trunk.setMatrixAt(idx, m);
-        m.makeTranslation(x + 0.5, 1.7, z + 0.5); canopy.setMatrixAt(idx, m);
-        m.makeTranslation(x + 0.5, 2.35, z + 0.5); canopyTop.setMatrixAt(idx, m);
+        const s = 0.85 + (((x * 7 + z * 13) % 10) / 10) * 0.3;
+        m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.65 * s, z + 0.5); trunk.setMatrixAt(idx, m);
+        m.makeScale(s, s, s); m.setPosition(x + 0.5, 1.7 * s, z + 0.5); canopy.setMatrixAt(idx, m);
+        m.makeScale(s, s, s); m.setPosition(x + 0.5, 2.35 * s, z + 0.5); canopyTop.setMatrixAt(idx, m);
       });
       this.scene.add(trunk, canopy, canopyTop); group.push(trunk, canopy, canopyTop);
       this.canopyMesh = canopy; this.canopyTopMesh = canopyTop;
@@ -264,180 +494,307 @@ export class Renderer {
     this._stoneCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].stone > 0 || grid[x][z].ore > 0) this._stoneCells.push([x, z]);
     this.stoneMesh = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0x9a9a9a }), Math.max(1, this._stoneCells.length));
+    this._stoneCells.forEach(([x, z], idx) => {
+      this.stoneMesh.setColorAt(idx, grid[x][z].ore > 0 ? this._c.setHex(0x7f9fb5) : this._c.setHex(0x9a9a9a));
+    });
+    if (this.stoneMesh.instanceColor) this.stoneMesh.instanceColor.needsUpdate = true;
     this.scene.add(this.stoneMesh);
-    // Crops, one instance per farm cell.
+    // Crops: three plants per farm cell, in a row, so fields read as
+    // rows rather than single blocks.
     this._farmCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) this._farmCells.push([x, z]);
-    this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.4, 0.35), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length));
+    this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length * 3));
     this.scene.add(this.cropMesh);
     this.buildingsGroup = new THREE.Group();
     this.scene.add(this.buildingsGroup);
+    this.dressingGroup = new THREE.Group();
+    this.scene.add(this.dressingGroup);
+    this._roadMesh = null;
+    this._roadCells = [];
   }
 
-  _buildingMesh(type, x, z, techLevel = 0) {
+  _clearGroup(group) {
+    group.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+    group.clear();
+  }
+
+  // One building: merged body, merged windows (night glow), merged
+  // snow caps (winter only), plus round parts as shared-geometry
+  // meshes where a box will not do. Era stage picks the palette and
+  // the roof shape; tech level adds workshop detail.
+  _buildingMesh(type, x, z, techLevel = 0, era = 0) {
     const g = new THREE.Group();
-    g.position.set(x + 0.5, 0.25, z + 0.5);
-    const add = (geo, mat, y, sx = 1, sy = 1, sz = 1) => {
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.y = y; mesh.scale.set(sx, sy, sz); g.add(mesh); return mesh;
+    g.position.set(x + 0.5, 0.3, z + 0.5);
+    const pal = ERA_PALETTE[era] || ERA_PALETTE[0];
+    const flat = era >= 3;
+    let chimneyTop = null;
+    const finish = (body, win, snow, extra) => {
+      if (body.length) {
+        const mesh = new THREE.Mesh(mergeParts(body), MAT_BODY);
+        g.add(mesh);
+      }
+      if (win.length) {
+        const wmesh = new THREE.Mesh(mergeParts(win), MAT_WINDOW);
+        wmesh.userData.glow = true;
+        g.add(wmesh);
+        this._nightMeshes.push(wmesh);
+      }
+      if (snow.length) {
+        const smesh = new THREE.Mesh(mergeParts(snow), MAT_SNOW);
+        smesh.userData.isSnow = true;
+        smesh.visible = this._season === "winter";
+        g.add(smesh);
+      }
+      if (extra) for (const e of extra) g.add(e);
+      if (chimneyTop) this._chimneys.push([x + 0.5 + chimneyTop[0], 0.3 + chimneyTop[1], z + 0.5 + chimneyTop[2]]);
+      return g;
     };
-    const wood = new THREE.MeshLambertMaterial({ color: 0x8d6e63 });
-    const stone = new THREE.MeshLambertMaterial({ color: 0x9e9e9e });
-    // A lit window: warm at night, hidden by day (see update()).
-    const windowMat = new THREE.MeshBasicMaterial({ color: 0xffca28 });
-    const windowAt = (wx, wy, wz) => {
-      const w = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.06), windowMat);
-      w.position.set(wx, wy, wz); w.userData.glow = true; g.add(w); return w;
+    const house = (o) => {
+      const r = timberHouse({ ...o, pal, era, flat: o.flat ?? flat });
+      chimneyTop = r.chimneyTop;
+      return finish(r.body, r.win, r.snow, o.extra);
     };
+
     if (type === "towncenter") {
-      add(new THREE.BoxGeometry(2.3, 0.3, 2.3), stone, 0.15);
-      add(new THREE.BoxGeometry(1.7, 1.1, 1.7), wood, 0.85);
-      add(new THREE.BoxGeometry(0.6, 1.9, 0.6), stone, 1.25).position.set(0.7, 1.25, -0.7);
+      const r = timberHouse({ w: 2.4, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -0.7, y: 0.85 }, { x: 0.7, y: 0.85 }] });
+      chimneyTop = r.chimneyTop;
+      const body = r.body;
+      partBox(body, 0.6, 1.9, 0.6, 1.05, 1.1, -0.7, 0x8a8a8a);
+      partBox(body, 0.7, 0.9, 0.06, 0, 1.0, 1.03, 0xb71c1c);
+      const extra = [];
       const banner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
-      banner.position.set(0, 1.0, 0.88); g.add(banner);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0x5d4037 }));
-      roof.position.y = 1.8; roof.rotation.y = Math.PI / 4; g.add(roof);
+      banner.position.set(0, 1.0, 1.03); extra.push(banner);
+      return finish(body, r.win, r.snow, extra);
     } else if (type === "granary") {
-      add(new THREE.BoxGeometry(1.9, 1.1, 1.5), wood, 0.55);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0xd7a94e }));
-      roof.position.y = 1.5; roof.rotation.y = Math.PI / 4; g.add(roof);
-      const silo = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.4, 8), stone);
-      silo.position.set(1.1, 0.7, 0); g.add(silo);
-      add(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }), 0.35).position.z = 0.78;
+      const body = [], win = [], snow = [];
+      for (const sx of [-0.7, 0.7]) for (const sz of [-0.55, 0.55]) partBox(body, 0.16, 0.5, 0.16, sx, 0.25, sz, pal.timber);
+      partBox(body, 1.9, 1.1, 1.5, 0, 1.05, 0, pal.wall);
+      partBox(body, 1.9, 0.12, 1.5, 0, 1.66, 0, pal.timber);
+      partPrism(body, 2.2, 0.8, 1.8, 0, 1.72, 0, 0xd7a94e);
+      partBox(body, 0.5, 0.7, 0.06, 0, 0.85, 0.78, 0x3e2723);
+      return finish(body, win, snow);
     } else if (type === "marker") {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 1.3, 6), wood);
-      post.position.y = 0.65; g.add(post);
-      const flag = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.32, 0.04), new THREE.MeshLambertMaterial({ color: 0xffd700 }));
-      flag.position.set(0.32, 1.15, 0); g.add(flag);
+      const body = [];
+      partCyl(body, 0.09, 0.11, 1.3, 6, 0, 0.65, 0, pal.timber);
+      partBox(body, 0.55, 0.32, 0.04, 0.32, 1.15, 0, 0xffd700);
+      return finish(body, [], []);
     } else if (type === "stockpile") {
-      add(new THREE.BoxGeometry(1.6, 0.25, 1.6), wood, 0.12);
-      add(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ color: 0xa1887f }), 0.5, 1, 1, 1).position.x = -0.4;
-      add(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ color: 0xd7a94e }), 0.5).position.x = 0.4;
+      const body = [];
+      partBox(body, 1.6, 0.25, 1.6, 0, 0.12, 0, pal.timber);
+      partBox(body, 0.55, 0.55, 0.55, -0.4, 0.5, 0, 0xa1887f);
+      partBox(body, 0.55, 0.55, 0.55, 0.4, 0.5, 0, 0xd7a94e);
+      return finish(body, [], []);
     } else if (type === "altar") {
-      add(new THREE.BoxGeometry(1.2, 0.3, 1.2), stone, 0.15);
-      add(new THREE.BoxGeometry(0.4, 1.1, 0.4), stone, 0.8);
-      add(new THREE.BoxGeometry(0.7, 0.2, 0.7), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x664d00 }), 1.45);
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), new THREE.MeshBasicMaterial({ color: 0xff9800 }));
-      flame.position.y = 1.75; g.add(flame);
+      const body = [];
+      partBox(body, 1.2, 0.3, 1.2, 0, 0.15, 0, 0x9e9e9e);
+      partBox(body, 0.4, 1.1, 0.4, 0, 0.8, 0, 0x9e9e9e);
+      partBox(body, 0.7, 0.2, 0.7, 0, 1.45, 0, 0xffd700);
+      const extra = [];
+      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), MAT_FLAME);
+      flame.position.y = 1.75; extra.push(flame);
+      return finish(body, [], [], extra);
     } else if (type === "hut") {
-      add(new THREE.BoxGeometry(1.7, 1.0, 1.7), wood, 0.5);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.35, 0.88); g.add(door);
-      windowAt(0.55, 0.65, 0.88);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.45, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0xa52a2a }));
-      roof.position.y = 1.45; roof.rotation.y = Math.PI / 4; g.add(roof);
+      return house({ w: 1.7, d: 1.7, wallH: 1.0, roofH: 0.9, chimney: true, windows: [{ x: 0.55, y: 0.75 }] });
     } else if (type === "longhouse") {
-      add(new THREE.BoxGeometry(2.6, 1.1, 1.8), wood, 0.55);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.35, 0.93); g.add(door);
-      windowAt(-0.85, 0.65, 0.93); windowAt(0.85, 0.65, 0.93);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(2.0, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0x6d1a1a }));
-      roof.position.y = 1.55; roof.rotation.y = Math.PI / 4; roof.scale.z = 0.75; g.add(roof);
+      return house({ w: 2.6, d: 1.8, wallH: 1.1, roofH: 0.9, chimney: true, windows: [{ x: -0.85, y: 0.8 }, { x: 0.85, y: 0.8 }] });
     } else if (type === "well") {
-      const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.7, 8), stone);
-      ring.position.y = 0.35; g.add(ring);
-      const water = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.1, 8), new THREE.MeshLambertMaterial({ color: 0x29b6f6 }));
-      water.position.y = 0.65; g.add(water);
-      for (const sx of [-0.5, 0.5]) {
-        const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12), wood);
-        post.position.set(sx, 0.55, 0); g.add(post);
-      }
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(0.85, 0.5, 4), new THREE.MeshLambertMaterial({ color: 0x5d4037 }));
-      roof.position.y = 1.35; roof.rotation.y = Math.PI / 4; g.add(roof);
+      const body = [];
+      partCyl(body, 0.55, 0.6, 0.7, 8, 0, 0.35, 0, 0x9e9e9e);
+      partCyl(body, 0.42, 0.42, 0.1, 8, 0, 0.65, 0, 0x29b6f6);
+      for (const sx of [-0.5, 0.5]) partBox(body, 0.12, 1.1, 0.12, sx, 0.55, 0, pal.timber);
+      partPrism(body, 1.5, 0.5, 0.9, 0, 1.1, 0, pal.roof);
+      return finish(body, [], []);
     } else if (type === "workshop") {
-      add(new THREE.BoxGeometry(2.0, 1.1, 1.6), wood, 0.55);
-      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.0, 0.4), stone);
-      chimney.position.set(0.7, 1.5, -0.4); g.add(chimney);
-      // Bronze craft and beyond show in the yard: a second chimney,
-      // an ore pile, and at Iron craft a second anvil.
+      const r = timberHouse({ w: 2.0, d: 1.6, wallH: 1.1, roofH: 0.8, chimney: true, doorColor: 0x3e2723, windows: [{ x: -0.6, y: 0.8 }] });
+      chimneyTop = r.chimneyTop;
+      const body = r.body;
+      partBox(body, 0.7, 0.35, 0.3, -0.6, 0.18, 0.95, 0x37474f);
       if (techLevel >= 1) {
-        const chimney2 = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.8, 0.35), stone);
-        chimney2.position.set(-0.7, 1.4, -0.4); g.add(chimney2);
-        const ore = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.4), new THREE.MeshLambertMaterial({ color: 0x78909c }));
-        ore.position.set(0.6, 0.18, 0.95); g.add(ore);
+        partBox(body, 0.35, 0.8, 0.35, -0.7, 1.4, -0.4, 0x8a8a8a);
+        partBox(body, 0.5, 0.35, 0.4, 0.6, 0.18, 0.95, 0x78909c);
       }
-      const anvil = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.35, 0.3), new THREE.MeshLambertMaterial({ color: 0x37474f }));
-      anvil.position.set(-0.6, 0.18, 0.95); g.add(anvil);
-      if (techLevel >= 2) {
-        const anvil2 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.28), new THREE.MeshLambertMaterial({ color: 0x607d8b }));
-        anvil2.position.set(0.1, 0.15, 0.95); g.add(anvil2);
-      }
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.6, 0.8, 4), new THREE.MeshLambertMaterial({ color: techLevel >= 2 ? 0x37474f : 0x455a64 }));
-      roof.position.y = 1.5; roof.rotation.y = Math.PI / 4; g.add(roof);
+      if (techLevel >= 2) partBox(body, 0.6, 0.3, 0.28, 0.1, 0.15, 0.95, 0x607d8b);
+      return finish(body, r.win, r.snow);
     } else if (type === "shrine") {
-      add(new THREE.BoxGeometry(1.3, 0.3, 1.3), stone, 0.15);
-      add(new THREE.BoxGeometry(0.45, 1.3, 0.45), new THREE.MeshLambertMaterial({ color: 0xefebe9 }), 0.95);
-      add(new THREE.BoxGeometry(0.7, 0.2, 0.7), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x664d00 }), 1.7);
+      const body = [];
+      partBox(body, 1.3, 0.3, 1.3, 0, 0.15, 0, 0x9e9e9e);
+      partBox(body, 0.45, 1.3, 0.45, 0, 0.95, 0, 0xefebe9);
+      partBox(body, 0.7, 0.2, 0.7, 0, 1.7, 0, 0xffd700);
+      const extra = [];
       const flame = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.35, 6), new THREE.MeshBasicMaterial({ color: 0xfff176 }));
-      flame.position.y = 2.0; g.add(flame);
+      flame.position.y = 2.0; extra.push(flame);
+      return finish(body, [], [], extra);
     } else if (type === "greathall") {
-      add(new THREE.BoxGeometry(3.2, 1.3, 2.0), wood, 0.65);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.4, 1.03); g.add(door);
-      windowAt(-1.1, 0.8, 1.03); windowAt(1.1, 0.8, 1.03);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(2.4, 1.0, 4), new THREE.MeshLambertMaterial({ color: 0x4e342e }));
-      roof.position.y = 1.8; roof.rotation.y = Math.PI / 4; roof.scale.z = 0.65; g.add(roof);
-      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.6, 0.6), stone);
-      tower.position.set(1.4, 0.8, -0.7); g.add(tower);
-      const banner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
-      banner.position.set(0, 1.2, 1.05); g.add(banner);
+      const r = timberHouse({ w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }] });
+      chimneyTop = r.chimneyTop;
+      const body = r.body;
+      partBox(body, 0.6, 1.6, 0.6, 1.4, 0.8, -0.7, 0x8a8a8a);
+      partBox(body, 0.7, 0.9, 0.06, 0, 1.2, 1.05, 0xb71c1c);
+      return finish(body, r.win, r.snow);
     } else if (type === "farmhouse") {
-      add(new THREE.BoxGeometry(1.8, 1.0, 1.5), new THREE.MeshLambertMaterial({ color: 0xa1887f }), 0.5);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.35, 0.78); g.add(door);
-      windowAt(0.6, 0.6, 0.78);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), new THREE.MeshLambertMaterial({ color: 0x8d6e63 }));
-      roof.position.y = 1.4; roof.rotation.y = Math.PI / 4; g.add(roof);
-      const silo = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.3, 8), stone);
-      silo.position.set(1.05, 0.65, -0.4); g.add(silo);
+      const r = timberHouse({ w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }] });
+      const body = r.body;
+      partCyl(body, 0.3, 0.3, 1.3, 8, 1.05, 0.65, -0.4, 0x9e9e9e);
+      return finish(body, r.win, r.snow);
     } else if (type === "school") {
-      // Whitewashed walls, a blue roof, and a bell post: unmistakable.
-      add(new THREE.BoxGeometry(2.2, 1.2, 1.7), new THREE.MeshLambertMaterial({ color: 0xefebe9 }), 0.6);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.35, 0.88); g.add(door);
-      windowAt(-0.7, 0.7, 0.88); windowAt(0.7, 0.7, 0.88);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.8, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0x1565c0 }));
-      roof.position.y = 1.65; roof.rotation.y = Math.PI / 4; g.add(roof);
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.2, 0.14), wood);
-      post.position.set(1.25, 0.6, 0.6); g.add(post);
-      const bell = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x664d00 }));
-      bell.position.set(1.25, 1.35, 0.6); g.add(bell);
-      const sign = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.4, 0.05), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-      sign.position.set(0, 1.05, 0.88); g.add(sign);
+      const body = [], win = [], snow = [];
+      const wallCol = flat ? 0xe8e8e8 : 0xefebe9;
+      const roofCol = flat ? pal.roof : 0x1565c0;
+      partBox(body, 2.2, 1.2, 1.7, 0, 0.78, 0, wallCol);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) partBox(body, 0.12, 1.2, 0.12, sx * 1.04, 0.78, sz * 0.79, pal.timber);
+      partBox(body, 0.5, 0.7, 0.06, 0, 0.53, 0.88, 0x3e2723);
+      if (flat) {
+        partBox(body, 2.4, 0.15, 1.9, 0, 1.53, 0, roofCol);
+        partBox(win, 1.5, 0.3, 0.06, 0, 1.2, 0.88, 0xffffff);
+        partBox(snow, 2.3, 0.08, 1.8, 0, 1.64, 0, 0xffffff);
+      } else {
+        partPrism(body, 2.5, 0.9, 2.0, 0, 1.38, 0, roofCol);
+        partBox(body, 0.8, 0.4, 0.05, 0, 1.15, 0.88, 0xffffff);
+      }
+      partBox(body, 0.14, 1.2, 0.14, 1.25, 0.78, 0.6, pal.timber);
+      partBox(body, 0.3, 0.3, 0.3, 1.25, 1.53, 0.6, 0xffd700);
+      for (const w of [{ x: -0.7, y: 0.8 }, { x: 0.7, y: 0.8 }]) partBox(win, 0.32, 0.34, 0.06, w.x, w.y, 0.88, 0xffffff);
+      return finish(body, win, snow);
     } else if (type === "healer") {
-      // Green roof and a white sign with a red cross.
-      add(new THREE.BoxGeometry(1.7, 1.0, 1.6), new THREE.MeshLambertMaterial({ color: 0xd7ccc8 }), 0.5);
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.06), new THREE.MeshLambertMaterial({ color: 0x3e2723 }));
-      door.position.set(0, 0.35, 0.83); g.add(door);
-      windowAt(0.55, 0.6, 0.83);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.45, 0.9, 4), new THREE.MeshLambertMaterial({ color: 0x2e7d32 }));
-      roof.position.y = 1.45; roof.rotation.y = Math.PI / 4; g.add(roof);
-      const sign = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.05), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-      sign.position.set(0, 1.15, 0.83); g.add(sign);
-      const crossMat = new THREE.MeshBasicMaterial({ color: 0xc62828 });
-      const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.4, 0.02), crossMat);
-      crossV.position.set(0, 1.15, 0.87); g.add(crossV);
-      const crossH = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.02), crossMat);
-      crossH.position.set(0, 1.15, 0.87); g.add(crossH);
+      const r = timberHouse({ w: 1.7, d: 1.6, wallH: 1.0, roofH: 0.9, chimney: false, windows: [{ x: 0.55, y: 0.7 }] });
+      const body = r.body;
+      if (!flat) {
+        // Green roof replaces the red one: rebuild is wasteful, so the
+        // prism is added here only when the house helper used the era
+        // roof; instead recolor by adding a green prism slightly proud.
+        partPrism(body, 2.02, 0.92, 1.92, 0, 1.18, 0, 0x2e7d32);
+      }
+      partBox(body, 0.55, 0.55, 0.05, 0, 1.25, 0.83, 0xffffff);
+      partBox(body, 0.12, 0.4, 0.02, 0, 1.25, 0.87, 0xc62828);
+      partBox(body, 0.4, 0.12, 0.02, 0, 1.25, 0.87, 0xc62828);
+      return finish(body, r.win, r.snow);
+    } else if (type === "wall") {
+      const body = [];
+      if (era === 0) {
+        for (let i = 0; i < 5; i++) partBox(body, 0.16, 1.15 + (i % 2) * 0.12, 0.16, -0.4 + i * 0.2, 0.62, 0, 0x7a5230);
+        partBox(body, 1.05, 0.1, 0.1, 0, 0.5, 0.1, 0x5d4037);
+        partBox(body, 1.05, 0.1, 0.1, 0, 0.95, 0.1, 0x5d4037);
+      } else {
+        partBox(body, 1.0, 0.9, 0.5, 0, 0.45, 0, pal.wallMat);
+        partBox(body, 1.0, 0.12, 0.56, 0, 0.96, 0, era >= 2 ? 0x6e6e6e : 0x7a7a7a);
+        for (let i = 0; i < 4; i++) partBox(body, 0.16, 0.22, 0.56, -0.38 + i * 0.25, 1.08, 0, pal.wallMat);
+        if (era >= 3) partBox(body, 1.0, 0.06, 0.1, 0, 1.2, 0.28, 0xfff9c4);
+      }
+      return finish(body, [], []);
+    } else if (type === "tower") {
+      const body = [];
+      if (era === 0) {
+        for (const sx of [-0.4, 0.4]) for (const sz of [-0.4, 0.4]) partBox(body, 0.14, 1.6, 0.14, sx, 0.8, sz, pal.timber);
+        partBox(body, 1.1, 0.14, 1.1, 0, 1.65, 0, pal.timber);
+        partBox(body, 1.1, 0.3, 0.08, 0, 1.85, 0.51, pal.timber);
+        partBox(body, 1.1, 0.3, 0.08, 0, 1.85, -0.51, pal.timber);
+        partPrism(body, 1.4, 0.7, 1.4, 0, 2.0, 0, pal.roof);
+        partCyl(body, 0.05, 0.05, 0.8, 5, 0, 2.9, 0, pal.timber);
+        partBox(body, 0.45, 0.28, 0.04, 0.25, 2.85, 0, 0xb71c1c);
+      } else {
+        partBox(body, 0.9, 2.4, 0.9, 0, 1.2, 0, pal.wallMat);
+        partBox(body, 1.1, 0.16, 1.1, 0, 2.48, 0, era >= 2 ? 0x6e6e6e : 0x7a7a7a);
+        for (let i = 0; i < 4; i++) partBox(body, 0.2, 0.3, 0.2, -0.4 + (i % 2) * 0.8, 2.65, -0.4 + Math.floor(i / 2) * 0.8, pal.wallMat);
+        partBox(win, 0.24, 0.3, 0.06, 0, 2.0, 0.48, 0xffffff);
+        partCyl(body, 0.05, 0.05, 0.9, 5, 0, 3.0, 0, pal.timber);
+        partBox(body, 0.45, 0.28, 0.04, 0.25, 2.95, 0, 0xb71c1c);
+        if (era >= 3) partBox(body, 0.2, 0.2, 0.2, 0, 2.85, 0, 0xfff9c4);
+      }
+      return finish(body, [], []);
     }
-    return g;
+    // Unknown type: a plain timber block, so a new building never
+    // renders invisible.
+    const body = [];
+    partBox(body, 1.4, 1.0, 1.4, 0, 0.5, 0, pal.wall);
+    return finish(body, [], []);
   }
 
-  _syncBuildings(state) {
+  _syncBuildings(state, grid) {
     const techLevel = state.tech ? state.tech.level : 0;
-    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#" + state.buildQueue.length + "#t" + techLevel;
+    const era = eraStageOf(techLevel);
+    const popBucket = Math.floor(state.villagers.length / 5);
+    const hasWalls = state.buildings.some((b) => b.type === "wall" || b.type === "tower");
+    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
     if (sig === this._buildSignature) return;
     this._buildSignature = sig;
-    while (this.buildingsGroup.children.length) this.buildingsGroup.remove(this.buildingsGroup.children[0]);
-    for (const b of state.buildings) this.buildingsGroup.add(this._buildingMesh(b.type, b.x, b.z, techLevel));
+    this._clearGroup(this.buildingsGroup);
+    this._clearGroup(this.dressingGroup);
+    this._nightMeshes = [];
+    this._chimneys = [];
+    for (const b of state.buildings) this.buildingsGroup.add(this._buildingMesh(b.type, b.x, b.z, techLevel, era));
     for (const q of state.buildQueue) {
-      const frame = this._buildingMesh(q.type || "hut", q.x, q.z, techLevel);
-      frame.scale.setScalar(0.6); frame.traverse((o) => { if (o.material) o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; });
+      const frame = this._buildingMesh(q.type || "hut", q.x, q.z, techLevel, era);
+      frame.scale.setScalar(0.6);
+      frame.traverse((o) => { if (o.material && o.material !== MAT_BODY && o.material !== MAT_WINDOW && o.material !== MAT_SNOW) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; } });
       this.buildingsGroup.add(frame);
     }
-    this._glowMeshes = [];
-    this.buildingsGroup.traverse((o) => { if (o.userData.glow) this._glowMeshes.push(o); });
-    this._wasNight = null; // re-evaluate window glow after a rebuild
+    // Gates: posts and beam on the open axis cells of the wall ring,
+    // drawn only once a wall exists. Torches and market stalls dress
+    // the plaza as the village grows.
+    const pal = ERA_PALETTE[era];
+    const cx = state._cx ?? SIZE / 2, cz = state._cz ?? SIZE / 2;
+    if (hasWalls) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const gx = cx + dx * WALL_RING_R, gz = cz + dz * WALL_RING_R;
+        if (gx < 0 || gz < 0 || gx >= SIZE || gz >= SIZE) continue;
+        if (grid[gx][gz].building) continue;
+        const parts = [];
+        const along = dx !== 0;
+        for (const s of [-0.7, 0.7]) {
+          if (along) partBox(parts, 0.16, 1.7, 0.16, 0, 0.85, s, pal.timber);
+          else partBox(parts, 0.16, 1.7, 0.16, s, 0.85, 0, pal.timber);
+        }
+        if (along) partBox(parts, 0.14, 0.14, 1.7, 0, 1.75, 0, pal.timber);
+        else partBox(parts, 1.7, 0.14, 0.14, 0, 1.75, 0, pal.timber);
+        partBox(parts, 0.6, 0.5, 0.05, 0, 1.35, along ? 0.1 : 0, 0xb71c1c);
+        const gate = new THREE.Mesh(mergeParts(parts), MAT_BODY);
+        gate.position.set(gx + 0.5, 0.3, gz + 0.5);
+        this.dressingGroup.add(gate);
+      }
+    }
+    // Torches on the plaza ring corners, lamps from the brick era on.
+    const torchSpots = [[-2, -2], [2, -2], [-2, 2], [2, 2]];
+    for (const [dx, dz] of torchSpots) {
+      const tx = cx + dx, tz = cz + dz;
+      const parts = [];
+      partCyl(parts, 0.07, 0.09, 1.1, 6, 0, 0.55, 0, pal.timber);
+      const torch = new THREE.Mesh(mergeParts(parts), MAT_BODY);
+      torch.position.set(tx + 0.5, 0.3, tz + 0.5);
+      this.dressingGroup.add(torch);
+      let flame;
+      if (era >= 2) {
+        flame = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.3, 0.22), MAT_LAMP);
+        flame.position.set(tx + 0.5, 1.55, tz + 0.5);
+      } else {
+        flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), MAT_FLAME);
+        flame.position.set(tx + 0.5, 1.4, tz + 0.5);
+      }
+      flame.userData.glow = true;
+      this.dressingGroup.add(flame);
+      this._nightMeshes.push(flame);
+    }
+    // Market stalls once the village is a real town: striped canopies
+    // and crates just outside the plaza ring.
+    if (state.villagers.length >= 10) {
+      for (const [dx, dz] of [[3, 0], [0, 3], [-3, 0]]) {
+        const sx = cx + dx, sz = cz + dz;
+        if (sx < 0 || sz < 0 || sx >= SIZE || sz >= SIZE) continue;
+        const cell = grid[sx][sz];
+        if (cell.building || cell.water || cell.farm) continue;
+        const parts = [];
+        for (const px of [-0.6, 0.6]) for (const pz of [-0.5, 0.5]) partBox(parts, 0.09, 1.2, 0.09, px, 0.6, pz, pal.timber);
+        partBox(parts, 1.5, 0.08, 0.5, 0, 1.25, -0.35, 0xb71c1c, 0.35);
+        partBox(parts, 1.5, 0.08, 0.5, 0, 1.25, 0.35, 0xefebe9, -0.35);
+        partBox(parts, 1.3, 0.5, 0.6, 0, 0.55, 0, 0x8d6e63);
+        partBox(parts, 0.4, 0.4, 0.4, -0.8, 0.2, 0.5, 0xa1887f);
+        partBox(parts, 0.4, 0.4, 0.4, 0.8, 0.2, -0.5, 0xd7a94e);
+        const stall = new THREE.Mesh(mergeParts(parts), MAT_BODY);
+        stall.position.set(sx + 0.5, 0.3, sz + 0.5);
+        this.dressingGroup.add(stall);
+      }
+    }
+    if (this._chimneys.length > 24) this._chimneys.length = 24;
+    this._wasNight = null;
   }
 
   _villagerGroup(v) {
@@ -447,19 +804,15 @@ export class Renderer {
     body.position.y = 0.62; body.name = "body"; g.add(body);
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.38, 0.38), new THREE.MeshLambertMaterial({ color: 0xffd9b3 }));
     head.position.y = 1.12; g.add(head);
-    // Eyes on the facing side (+z, the group rotates to face its target).
     const eyeMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
     for (const sx of [-0.09, 0.09]) {
       const eye = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.02), eyeMat);
       eye.position.set(sx, 1.14, 0.2); g.add(eye);
     }
-    // Straw hat for farmers, cloth cap for everyone else.
     const hat = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.1, 0.48), new THREE.MeshLambertMaterial({ color: v.job === "farmer" ? 0xd7a94e : 0x5d4037 }));
     hat.position.y = 1.36; g.add(hat);
-    // A scholar's quill: educated villagers wear a white feather.
     const quill = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.05), new THREE.MeshBasicMaterial({ color: 0xffffff }));
     quill.position.set(0.18, 1.5, 0); quill.rotation.z = -0.3; quill.visible = false; g.add(quill);
-    // A tool in the right hand: grey for sturdy, gold for fine.
     const toolMesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.5, 0.1), new THREE.MeshLambertMaterial({ color: 0x9e9e9e }));
     toolMesh.position.set(0.36, 0.55, 0.15); toolMesh.visible = false; g.add(toolMesh);
     const legMat = new THREE.MeshLambertMaterial({ color: 0x4e342e });
@@ -472,7 +825,6 @@ export class Renderer {
       arm.position.set(sx * 2.4, 0.86, 0); arm.geometry.translate(0, -0.21, 0); arm.position.y = 0.86;
       g.add(arm); arms.push(arm);
     }
-    // Soft blob shadow so villagers read against the ground.
     const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.42, 16), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22 }));
     shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.03; g.add(shadow);
     const hit = new THREE.Mesh(new THREE.BoxGeometry(1, 1.6, 1), new THREE.MeshBasicMaterial({ visible: false }));
@@ -480,6 +832,35 @@ export class Renderer {
     g.userData.hit = hit; g.userData.legs = legs; g.userData.arms = arms;
     g.userData.body = body; g.userData.head = head; g.userData.hat = hat;
     g.userData.quill = quill; g.userData.toolMesh = toolMesh;
+    return g;
+  }
+
+  _raiderGroup(r) {
+    const g = new THREE.Group();
+    const tunic = new THREE.MeshLambertMaterial({ color: 0x7f1d1d });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.66, 0.38), tunic);
+    body.position.y = 0.64; g.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0xd9a066 }));
+    head.position.y = 1.16; g.add(head);
+    const helm = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.18, 0.46), new THREE.MeshLambertMaterial({ color: 0x37474f }));
+    helm.position.y = 1.4; g.add(helm);
+    for (const sx of [-0.26, 0.26]) {
+      const horn = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.08, 0.08), new THREE.MeshLambertMaterial({ color: 0xefebe9 }));
+      horn.position.set(sx, 1.46, 0); horn.rotation.z = sx < 0 ? 0.5 : -0.5; g.add(horn);
+    }
+    const spear = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.1, 0.07), new THREE.MeshLambertMaterial({ color: 0x6b4423 }));
+    spear.position.set(0.38, 0.85, 0.15); g.add(spear);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x263238 });
+    const legs = [];
+    for (const sx of [-0.14, 0.14]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.36, 0.19), legMat);
+      leg.position.set(sx, 0.18, 0); leg.geometry.translate(0, -0.18, 0); leg.position.y = 0.36;
+      g.add(leg); legs.push(leg);
+    }
+    const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.44, 16), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22 }));
+    shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.03; g.add(shadow);
+    g.userData.legs = legs;
+    g.scale.setScalar(1.05);
     return g;
   }
 
@@ -510,12 +891,34 @@ export class Renderer {
     this._pGeo.attributes.position.needsUpdate = true;
   }
 
+  // Chimney smoke rises and drifts, recycled over the chimney list.
+  _updateSmoke(dt) {
+    const pos = this._sPos;
+    const homes = this._chimneys;
+    for (let i = 0; i < this._sAge.length; i++) {
+      this._sAge[i] += dt;
+      if (this._sAge[i] > this._sLife[i] || this._sHome[i] < 0 || this._sHome[i] >= homes.length) {
+        this._sAge[i] = 0;
+        this._sLife[i] = 1.6 + Math.random() * 1.4;
+        this._sHome[i] = homes.length ? Math.floor(Math.random() * homes.length) : -1;
+      }
+      if (this._sHome[i] < 0) { pos[i * 3 + 1] = -5; continue; }
+      const h = homes[this._sHome[i]];
+      const age = this._sAge[i];
+      pos[i * 3] = h[0] + Math.sin(age * 1.3 + this._sSeed[i]) * 0.25 * age;
+      pos[i * 3 + 1] = h[1] + age * 0.9;
+      pos[i * 3 + 2] = h[2] + Math.cos(age * 1.1 + this._sSeed[i]) * 0.2 * age;
+    }
+    this._sGeo.attributes.position.needsUpdate = true;
+  }
+
   update(state, grid, dt, elapsed) {
-    this._syncBuildings(state);
+    this._syncBuildings(state, grid);
     this._applySeasonTint(state, grid);
     this._updateParticles(state, dt);
-    // Farms can spread on their own (expandVillage), so the crop mesh
-    // must grow when new farm cells appear. Recheck about once a second.
+    this._updateSmoke(dt);
+    // Farms and roads grow on their own, so their meshes must grow
+    // when new cells appear. Recheck about once a second.
     if (!this._farmCheckAt || state.elapsed - this._farmCheckAt > 1) {
       this._farmCheckAt = state.elapsed;
       const cells = [];
@@ -523,21 +926,37 @@ export class Renderer {
       for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) { if (grid[x][z].farm) cells.push([x, z]); if (grid[x][z].road) roadCells.push([x, z]); }
       if (cells.length !== this._farmCells.length) {
         this._farmCells = cells;
-        if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.dispose?.(); }
-        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.4, 0.35), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length));
+        if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.geometry.dispose(); }
+        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length * 3));
         this.scene.add(this.cropMesh);
       }
-      if (roadCells.length !== (this._roadCells || []).length) {
+      if (roadCells.length !== this._roadCells.length) {
         this._roadCells = roadCells;
-        if (this.roadMesh) { this.scene.remove(this.roadMesh); this.roadMesh.dispose?.(); }
-        this.roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ color: 0xd7b98a }), Math.max(1, roadCells.length));
+        if (this._roadMesh) { this.scene.remove(this._roadMesh); this._roadMesh.geometry.dispose(); }
+        this._roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xb09a6d }), Math.max(1, roadCells.length));
         const rm = new THREE.Matrix4();
-        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this.roadMesh.setMatrixAt(idx, rm); });
-        this.scene.add(this.roadMesh);
+        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this._roadMesh.setMatrixAt(idx, rm); });
+        this.scene.add(this._roadMesh);
+        this._roadEra = -1; // re-tint for the current era
       }
     }
+    // Era dressing for the roads: dirt, then cobble, then paved.
+    const era = eraStageOf(state.tech ? state.tech.level : 0);
+    if (this._roadMesh && era !== this._roadEra) {
+      this._roadEra = era;
+      this._roadMesh.material.color.setHex(ERA_PALETTE[era].road);
+    }
+    // Wet ground in rain: darker, colder ground tint. Weather changes
+    // are slow, so this runs only on a change.
+    const wkind = state.weather ? state.weather.kind : "clear";
+    if (wkind !== this._wetKind) {
+      this._wetKind = wkind;
+      const wet = wkind === "rain" || wkind === "storm";
+      if (this.groundMesh) this.groundMesh.material.color.setHex(wet ? 0x9fb2c8 : 0xffffff);
+      this._cloudMat.color.setHex(wkind === "storm" ? 0x5d6d7e : wkind === "snow" ? 0xe8e8e8 : 0xffffff);
+    }
     // Stones + crops scale with remaining amount / growth stage.
-    const m = new THREE.Matrix4();
+    const m = this._m;
     this._stoneCells.forEach(([x, z], idx) => {
       const cell = grid[x][z];
       const amt = cell.stone + cell.ore;
@@ -546,13 +965,20 @@ export class Renderer {
       this.stoneMesh.setMatrixAt(idx, m);
     });
     this.stoneMesh.instanceMatrix.needsUpdate = true;
+    const winterCrops = state.season === "winter";
     this._farmCells.forEach(([x, z], idx) => {
       const cell = grid[x][z];
-      const s = cell.crop < 0 ? 0.001 : 0.25 + cell.crop * 0.25;
-      m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.35, z + 0.5);
-      this.cropMesh.setMatrixAt(idx, m);
+      const stage = cell.crop < 0 ? 0 : cell.crop;
+      const hScale = 0.3 + stage * 0.28;
+      for (let j = 0; j < 3; j++) {
+        const px = x + 0.5 + (j - 1) * 0.28;
+        m.makeScale(1, hScale, 1); m.setPosition(px, 0.05 + 0.25 * hScale, z + 0.5);
+        this.cropMesh.setMatrixAt(idx * 3 + j, m);
+        this.cropMesh.setColorAt(idx * 3 + j, this._c.setHex(winterCrops ? 0x8d6e63 : CROP_COLORS[stage]));
+      }
     });
     this.cropMesh.instanceMatrix.needsUpdate = true;
+    if (this.cropMesh.instanceColor) this.cropMesh.instanceColor.needsUpdate = true;
 
     // Villagers.
     const seen = new Set();
@@ -566,8 +992,6 @@ export class Renderer {
       const u = g.userData;
       u.body.material.color.setHex(JOB_COLORS[v.job] || 0x777777);
       u.head.material.color.setHex(v.sick ? 0xa8d8a8 : 0xffd9b3);
-      // Children are small, students smaller than adults, and hats mark
-      // roles: straw for farmers, purple for teachers, none for the young.
       const isChild = (v.ageDays ?? 25) < 3;
       const isStudent = v.job === "student";
       g.scale.setScalar(isChild ? 0.7 : isStudent ? 0.85 : 1);
@@ -575,7 +999,8 @@ export class Renderer {
       u.hat.material.color.setHex(v.job === "farmer" ? 0xd7a94e : v.job === "teacher" ? 0x7e57c2 : 0x5d4037);
       u.quill.visible = (v.education || 0) >= 5;
       u.toolMesh.visible = (v.tool || 0) > 0;
-      if ((v.tool || 0) >= 2) u.toolMesh.material.color.setHex(0xffd700);
+      if ((v.tool || 0) >= 3) u.toolMesh.material.color.setHex(0xe8e8e8);
+      else if ((v.tool || 0) >= 2) u.toolMesh.material.color.setHex(0xffd700);
       else u.toolMesh.material.color.setHex(0x9e9e9e);
       const bob = v._moving ? Math.abs(Math.sin(elapsed * 8 + v.id)) * 0.06 : 0;
       g.position.y = bob;
@@ -592,6 +1017,25 @@ export class Renderer {
       }
     }
     for (const [id, g] of this.villagerMeshes) if (!seen.has(id)) { this.scene.remove(g); this.villagerMeshes.delete(id); }
+
+    // Raiders: dark, horned, and visibly not villagers.
+    const seenRaiders = new Set();
+    for (const r of state.raiders || []) {
+      seenRaiders.add(r.id);
+      let g = this.raiderMeshes.get(r.id);
+      if (!g) { g = this._raiderGroup(r); g.position.set(r.x + 0.5, 0, r.z + 0.5); this.scene.add(g); this.raiderMeshes.set(r.id, g); }
+      g.position.x += (r.x + 0.5 - g.position.x) * Math.min(1, dt * 8);
+      g.position.z += (r.z + 0.5 - g.position.z) * Math.min(1, dt * 8);
+      const bob = Math.abs(Math.sin(elapsed * 8 + r.id)) * 0.05;
+      g.position.y = bob;
+      const swing = Math.sin(elapsed * 9 + r.id) * 0.5;
+      if (g.userData.legs) { g.userData.legs[0].rotation.x = swing; g.userData.legs[1].rotation.x = -swing; }
+      if (r.path && r.path.length) {
+        const dx = r.path[0][0] + 0.5 - r.x, dz = r.path[0][1] + 0.5 - r.z;
+        if (Math.hypot(dx, dz) > 0.1) g.rotation.y = Math.atan2(dx, dz);
+      }
+    }
+    for (const [id, g] of this.raiderMeshes) if (!seenRaiders.has(id)) { this.scene.remove(g); this.raiderMeshes.delete(id); }
 
     // Deer.
     const seenDeer = new Set();
@@ -611,16 +1055,16 @@ export class Renderer {
     }
     for (const [id, g] of this.deerMeshes) if (!seenDeer.has(id)) { this.scene.remove(g); this.deerMeshes.delete(id); }
 
-    // Fire effect.
+    // Fire effect: pre-allocated flames jitter in place, no new meshes.
     const fire = state._fire;
-    this.fireGroup.clear();
-    if (fire && state.elapsed < fire.until) {
-      for (let i = 0; i < 5; i++) {
-        const flame = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1 + Math.random() * 0.6, 6), new THREE.MeshBasicMaterial({ color: i % 2 ? 0xff5722 : 0xffc107 }));
+    const burning = !!(fire && state.elapsed < fire.until);
+    this._fireFlames.forEach((flame, i) => {
+      flame.visible = burning;
+      if (burning) {
         flame.position.set(fire.x + 0.5 + (Math.random() - 0.5), 0.7, fire.z + 0.5 + (Math.random() - 0.5));
-        this.fireGroup.add(flame);
+        flame.scale.set(1, 0.8 + Math.random() * 0.6, 1);
       }
-    }
+    });
     const flooding = state.elapsed < state.effects.floodUntil;
     this.floodPlane.material.opacity = flooding ? 0.35 : 0;
     if (this.waterMesh) this.waterMesh.material.opacity = 0.66 + Math.sin(elapsed * 1.4) * 0.08;
@@ -629,38 +1073,40 @@ export class Renderer {
       if (cloud.position.x > SIZE + 4) cloud.position.x = -4;
     }
 
-    // Day / night, with weather on top. Night is dark, with warm
-    // window light; storms dim and grey the sky; snow pales it.
-    const t = state.time; // 0..1, 0.3 = morning start
+    // Day / night, with weather on top. Dawn and dusk glow orange,
+    // night is deep blue with warm window light, storms dim and grey
+    // the sky, snow pales it.
+    const t = state.time;
     const phase = phaseOf(t);
     const isNight = phase === "night";
     const dayFactor = Math.sin(t * Math.PI * 2 - Math.PI / 2) * 0.5 + 0.5;
-    const wkind = state.weather ? state.weather.kind : "clear";
     let sunI = 0.18 + dayFactor * 1.25;
     let hemiI = 0.22 + dayFactor * 0.7;
     let skyL = 0.14 + dayFactor * 0.5;
     let skyS = 0.6;
     let skyH = 0.58;
+    if (phase === "dawn" || phase === "dusk") { skyH = 0.07; skyS = 0.7; skyL = 0.42; }
+    if (isNight) { skyH = 0.62; skyS = 0.45; skyL = 0.07; }
     if (wkind === "storm") { sunI *= 0.4; hemiI *= 0.65; skyL -= 0.12; skyS = 0.35; }
     else if (wkind === "rain") { sunI *= 0.65; hemiI *= 0.85; skyL -= 0.06; skyS = 0.4; }
     else if (wkind === "snow") { skyL += 0.08; skyS = 0.3; }
     else if (wkind === "heat") { skyH = 0.52; skyL += 0.04; }
     this.sun.intensity = Math.max(0.05, sunI);
-    this.sun.color.setHex(dayFactor > 0.75 ? 0xfff2cc : 0xff9a5c);
-    // The sun arcs overhead: low and orange at dawn and dusk.
+    this.sun.color.setHex(isNight ? 0x8fa8d8 : (phase === "dawn" || phase === "dusk") ? 0xff8a3c : dayFactor > 0.75 ? 0xfff2cc : 0xff9a5c);
     const sunAngle = t * Math.PI * 2;
     this.sun.position.set(Math.cos(sunAngle) * 40, Math.sin(sunAngle) * 35 + 6, 10);
     this.hemi.intensity = Math.max(0.12, hemiI);
-    const sky = new THREE.Color().setHSL(skyH, skyS, Math.max(0.08, Math.min(0.68, skyL)));
-    this.scene.background = sky;
-    this.scene.fog.color.copy(sky);
-    // Window glow and the town-center light follow nightfall.
+    this._skyColor.setHSL(skyH, skyS, Math.max(0.05, Math.min(0.68, skyL)));
+    this.scene.background = this._skyColor;
+    this.scene.fog.color.copy(this._skyColor);
+    if (wkind === "storm") { this.scene.fog.near = 30; this.scene.fog.far = 60; }
+    else if (wkind === "rain" || wkind === "snow") { this.scene.fog.near = 40; this.scene.fog.far = 75; }
+    else { this.scene.fog.near = 55; this.scene.fog.far = 95; }
     if (isNight !== this._wasNight) {
       this._wasNight = isNight;
       this.nightLight.intensity = isNight ? 1.4 : 0;
-      for (const m of this._glowMeshes) m.visible = isNight;
+      for (const mesh of this._nightMeshes) mesh.visible = isNight;
     }
-    // Festival dressing shows while the village celebrates.
     const celebrating = !!(state.celebration && state.elapsed < state.celebration.until);
     this.celebrationGroup.visible = celebrating;
     if (celebrating) this.celebrationGroup.position.set((state._cx || SIZE / 2) + 0.5, 0, (state._cz || SIZE / 2) + 0.5);
@@ -711,10 +1157,9 @@ export class Renderer {
   _initInput() {
     const pointers = new Map();
     let downPos = null, downTime = 0, moved = 0, everPinched = false;
-    let pinch = null; // {startDist, startZoom, midX, midY}
+    let pinch = null;
     const el = this.canvas;
     el.style.touchAction = "none";
-    // Safari: stop the page-level pinch gesture from stealing two fingers.
     el.addEventListener("touchstart", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
     el.addEventListener("contextmenu", (e) => e.preventDefault());
     const midOf = () => { const [a, b] = [...pointers.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
@@ -740,10 +1185,7 @@ export class Renderer {
       } else if (pointers.size === 2 && pinch) {
         const [a, b] = [...pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
-        // Absolute pinch: zoom is anchored to the distance when the second
-        // finger landed, so it cannot drift or jump on each move event.
         if (pinch.startDist > 20 && d > 20) this.zoomTarget = Math.max(12, Math.min(60, pinch.startZoom * (pinch.startDist / d)));
-        // Two-finger drag pans from the midpoint.
         const mid = midOf();
         this._panBy(mid.x - pinch.midX, mid.y - pinch.midY);
         pinch.midX = mid.x; pinch.midY = mid.y;
@@ -753,7 +1195,6 @@ export class Renderer {
       const wasTap = pointers.size === 1 && !everPinched && moved < 10 && performance.now() - downTime < 400 && downPos;
       pointers.delete(e.pointerId);
       if (pointers.size === 1) {
-        // One finger left after a pinch: re-anchor it so the view does not jump.
         const [only] = [...pointers.values()];
         pointers.set([...pointers.keys()][0], { x: only.x, y: only.y });
         downPos = { x: only.x, y: only.y }; downTime = performance.now(); moved = 0;

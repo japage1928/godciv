@@ -1,12 +1,12 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, TECH_THRESHOLD, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v11";
+const APP_VERSION = "v12";
 const PAGES_ORIGIN = "https://japage1928.github.io";
 // The always-on village lives on the same origin as this page when the
 // page is served by the server. Any other origin (GitHub Pages, a local
@@ -34,6 +34,12 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
+// Clock: sim time 0..1 is one 24-hour day starting at midnight.
+// Dawn runs about 05:17 to 07:40, day to 17:17, dusk to 20:10, then
+// night. The mockup clock reads the same way: 22:52 is night.
+// Clock: sim time 0-1 is one 24h day starting at midnight (00:00).
+// Dawn runs 05:17-07:40, day to 17:17, dusk to 20:10, then night.
+// See phaseOf in sim.js for the exact boundaries.
 function fmtTime(state) {
   const mins = Math.floor(state.time * 24 * 60);
   return String(Math.floor(mins / 60)).padStart(2, "0") + ":" + String(mins % 60).padStart(2, "0");
@@ -44,8 +50,9 @@ const SEASON_EMOJI = { spring: "🌱", summer: "☀️", autumn: "🍂", winter:
 
 function renderHUD() {
   const s = world.state;
-  const edible = s.stockpile.food + s.stockpile.fish + s.stockpile.meat;
-  $("stat-food").textContent = edible;
+  $("stat-food").textContent = s.stockpile.food;
+  $("stat-fish").textContent = s.stockpile.fish;
+  $("stat-meat").textContent = s.stockpile.meat;
   $("stat-wood").textContent = s.stockpile.wood;
   $("stat-stone").textContent = s.stockpile.stone;
   $("stat-ore").textContent = s.stockpile.ore;
@@ -56,7 +63,15 @@ function renderHUD() {
   $("stat-season").textContent = SEASON_EMOJI[s.season] + " " + SEASON_NAMES[s.season] + " Yr " + yearOf(s.day) + " · " + WEATHER_LABEL[s.weather ? s.weather.kind : "clear"];
   $("stat-morale").textContent = "💛 " + Math.round(s.morale ?? 60);
   $("stat-morale").title = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(", ") || "Morale";
-  $("stat-tech").textContent = "⚒️ " + TECH_TIERS[s.tech ? s.tech.level : 0].name;
+  $("stat-tech").textContent = "⚒️ " + TECH_TIERS[s.tech ? s.tech.level : 0].name + " · " + TECH_TIERS[s.tech ? s.tech.level : 0].era;
+  const raidEl = $("stat-raid");
+  if (s.raiders && s.raiders.length) {
+    raidEl.textContent = "⚔️ Raiders! " + s.raiders.length;
+    raidEl.style.display = "";
+  } else if (s.raidPendingDay && s.raidPendingDay > s.day) {
+    raidEl.textContent = "⚠️ Raiders at dawn";
+    raidEl.style.display = "";
+  } else raidEl.style.display = "none";
   const fest = nextFestival(s.day);
   const celebrating = s.celebration && s.elapsed < s.celebration.until;
   $("stat-festival").textContent = celebrating ? "🎉 " + s.celebration.name + "!" : "🎉 " + fest.name + " in " + fest.inDays + "d";
@@ -142,7 +157,9 @@ function renderPanel() {
       <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
       <p>${SEASON_EMOJI[s.season]} ${SEASON_NAMES[s.season]}, Year ${yearOf(s.day)} · ${WEATHER_LABEL[s.weather ? s.weather.kind : "clear"]} · ${phaseOf(s.time)}</p>
       <p>Morale: <b>${Math.round(s.morale ?? 60)}/100</b>${moraleLine ? ": " + moraleLine : ""}</p>
-      <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> (${tech.progress}/${TECH_THRESHOLD})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
+      <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> · ${TECH_TIERS[tech.level].era} (${tech.progress}/${techThresholdFor(tech.level)})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
+      ${s.raiders && s.raiders.length ? `<p>⚔️ <b>Raiders in the village!</b> ${s.raiders.length} raiders. Villagers flee; towers shoot; walls slow them.</p>` : s.raidPendingDay && s.raidPendingDay > s.day ? `<p>⚠️ <b>Raiders at dawn.</b> Scouts saw them in the hills. Walls and towers help, if the village has them.</p>` : ""}
+      ${s.buildings.some((b) => b.type === "wall") || s.buildings.some((b) => b.type === "tower") ? `<p>Defenses: <b>${s.buildings.filter((b) => b.type === "wall").length} wall</b> · <b>${s.buildings.filter((b) => b.type === "tower").length} tower</b> · gates stay open on the four axes.</p>` : ""}
       <p>${celebrating ? "🎉 <b>" + s.celebration.name + "!</b> The village feasts at the town center." : "🎉 Next festival: <b>" + fest.name + "</b> in " + fest.inDays + "d, needs " + FESTIVAL_MIN_EDIBLE + " food in store and faith " + FESTIVAL_MIN_FAITH + ". A feast costs 10 food and lifts morale."}</p>
       ${school ? `<p>School: <b>${students.length} student${students.length === 1 ? "" : "s"}</b>${teacher ? " · teacher " + teacher.name : " · no teacher yet"} · ${educated} educated adult${educated === 1 ? "" : "s"}</p>` : ""}
       ${healer ? `<p>A healer's hut stands. The sick mend faster near it.</p>` : ""}

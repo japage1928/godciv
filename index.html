@@ -20,22 +20,27 @@
   #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; touch-action: none; }
   #scene-wrap { position: relative; flex: 1; min-height: 0; touch-action: none; }
   #scene { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
-  #hud { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: calc(6px + env(safe-area-inset-top)) 8px 6px; background: var(--panel); font-size: 13px; z-index: 5; }
-  .chip { background: #243524; border: 1px solid #3a523a; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+  #hud { display: flex; flex-direction: column; gap: 6px; padding: calc(8px + env(safe-area-inset-top)) 8px 8px; background: #16240f; font-size: 14px; z-index: 5; }
+  .hud-row { display: flex; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
+  .hud-row::-webkit-scrollbar { display: none; }
+  .chip { background: #24351f; border: 1px solid #465e3a; border-radius: 999px; padding: 6px 12px; white-space: nowrap; }
   .chip b { color: #fff; }
   #faith-wrap { display: flex; align-items: center; gap: 6px; }
-  .bar { height: 8px; background: #333; border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar { height: 8px; background: #333; border-radius: 4px; overflow: hidden; min-width: 64px; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   #stat-effects { color: #ffab91; }
-  #top-actions { margin-left: auto; display: flex; gap: 6px; }
+  #stat-raid { color: #ffcc80; border-color: #8d5a1e; }
+  #top-actions { display: flex; gap: 6px; }
+  #top-actions button { min-width: 48px; min-height: 48px; font-size: 17px; padding: 8px 10px; border-radius: 12px; background: #24351f; border: 1px solid #465e3a; }
+  #btn-pause { font-size: 13px; }
   button, select, input { font: inherit; color: #eef5ee; background: #2a402a; border: 1px solid #4a6a4a; border-radius: 8px; padding: 8px 10px; }
   button:active { background: #3a553a; }
   button.cooling { opacity: .55; }
-  #godbar { display: flex; gap: 6px; overflow-x: auto; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); background: var(--panel); z-index: 5; scrollbar-width: none; }
+  #godbar { display: flex; gap: 6px; overflow-x: auto; padding: 8px 8px calc(10px + env(safe-area-inset-bottom)); background: #16240f; z-index: 5; scrollbar-width: none; }
   #godbar::-webkit-scrollbar { display: none; }
-  #godbar button { flex: 0 0 auto; font-size: 20px; padding: 10px 12px; position: relative; }
-  #godbar button small { display: block; font-size: 10px; color: #cfe3cf; }
-  #godbar button .cd { position: absolute; top: 2px; right: 4px; font-size: 10px; color: #ffb74d; }
+  #godbar button { flex: 0 0 auto; min-width: 84px; min-height: 64px; font-size: 24px; padding: 8px 10px 6px; position: relative; border-radius: 14px; background: #24351f; border: 1px solid #465e3a; }
+  #godbar button small { display: block; font-size: 12px; color: #cfe3cf; margin-top: 2px; }
+  #godbar button .cd { position: absolute; top: 2px; right: 6px; font-size: 10px; color: #ffb74d; }
   #panel { position: absolute; right: 8px; top: 8px; width: min(340px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 12px; z-index: 6; display: none; }
   #panel.open { display: block; }
   #panel h3, #panel h4 { margin: 8px 0 4px; }
@@ -47,9 +52,9 @@
   #log p { margin: 4px 0; font-size: 13px; }
   .council { background: #1d2b1d; border: 1px solid #4a6a4a; border-radius: 8px; padding: 8px; margin-top: 10px; }
   #arm-banner { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; background: #b71c1c; padding: 10px 14px; border-radius: 999px; z-index: 7; font-size: 14px; white-space: nowrap; max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; }
-  #toast { position: absolute; left: 50%; transform: translateX(-50%) translateY(8px); bottom: 118px; background: #111; border: 1px solid #555; padding: 10px 14px; border-radius: 10px; z-index: 8; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; max-width: calc(100% - 24px); text-align: center; }
+  #toast { position: absolute; left: 50%; transform: translateX(-50%) translateY(8px); bottom: 150px; background: #111; border: 1px solid #555; padding: 10px 14px; border-radius: 10px; z-index: 8; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; max-width: calc(100% - 24px); text-align: center; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  #whisper-box { position: absolute; left: 8px; right: 8px; bottom: 118px; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 10px; z-index: 8; display: none; }
+  #whisper-box { position: absolute; left: 8px; right: 8px; bottom: 150px; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 10px; z-index: 8; display: none; }
   #whisper-box input { width: 100%; margin-bottom: 8px; }
   #start-overlay { position: fixed; inset: 0; z-index: 20; background: rgba(8,14,8,.94); display: flex; align-items: center; justify-content: center; padding: 20px; }
   #start-card { max-width: 520px; width: 100%; background: #16241a; border: 1px solid #3a523a; border-radius: 16px; padding: 22px; }
@@ -64,8 +69,8 @@
   dialog input { width: 100%; }
   dialog .row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   @media (max-width: 560px) {
-    #hud { font-size: 12px; }
-    #panel { top: auto; bottom: 118px; right: 8px; left: 8px; width: auto; max-height: 46%; }
+    #hud { font-size: 13px; }
+    #panel { top: auto; bottom: 150px; right: 8px; left: 8px; width: auto; max-height: 46%; }
   }
 </style>
 <script type="importmap">
@@ -75,22 +80,33 @@
 <body>
 <div id="app">
   <div id="hud">
-    <span class="chip">🍞 <b id="stat-food">0</b></span>
-    <span class="chip">🪵 <b id="stat-wood">0</b></span>
-    <span class="chip">🪨 <b id="stat-stone">0</b></span>
-    <span class="chip">⛏️ <b id="stat-ore">0</b></span>
-    <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
-    <span class="chip" id="stat-day">Day 1</span>
-    <span class="chip" id="stat-season">🌱 Spring</span>
-    <span class="chip" id="stat-morale" title="Morale">💛 60</span>
-    <span class="chip" id="stat-tech">⚒️ Stone tools</span>
-    <span class="chip" id="stat-festival">🎉 Spring Bloom</span>
-    <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
-    <span class="chip" id="stat-view">View 24,24</span>
-    <span class="chip" id="stat-mode">This village</span>
-    <span class="chip" id="version-chip">v11</span>
-    <span class="chip" id="stat-effects" style="display:none"></span>
-    <span id="top-actions">
+    <div class="hud-row">
+      <span class="chip">🍞 <b id="stat-food">0</b></span>
+      <span class="chip">🐟 <b id="stat-fish">0</b></span>
+      <span class="chip">🍖 <b id="stat-meat">0</b></span>
+      <span class="chip">🪵 <b id="stat-wood">0</b></span>
+      <span class="chip">🪨 <b id="stat-stone">0</b></span>
+      <span class="chip">⛏️ <b id="stat-ore">0</b></span>
+      <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
+    </div>
+    <div class="hud-row">
+      <span class="chip" id="stat-day">Day 1</span>
+      <span class="chip" id="stat-season">🌱 Spring</span>
+      <span class="chip" id="stat-morale" title="Morale">💛 60</span>
+      <span class="chip" id="stat-raid" style="display:none">⚔️ Raiders!</span>
+      <span class="chip" id="stat-effects" style="display:none"></span>
+    </div>
+    <div class="hud-row">
+      <span class="chip" id="stat-tech">⚒️ Stone tools</span>
+      <span class="chip" id="stat-festival">🎉 Spring Bloom</span>
+      <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
+    </div>
+    <div class="hud-row">
+      <span class="chip" id="stat-view">View 24,24</span>
+      <span class="chip" id="stat-mode">This village</span>
+      <span class="chip" id="version-chip">v12</span>
+    </div>
+    <div class="hud-row" id="top-actions">
       <button id="btn-panel" title="Village panel">🏛️</button>
       <button id="btn-zoom-out" title="Zoom out">−</button>
       <button id="btn-zoom-in" title="Zoom in">+</button>
@@ -100,7 +116,7 @@
       <button id="btn-pause" title="Pause">⏸ Pause</button>
       <button id="btn-save" title="Save now">💾</button>
       <button id="btn-settings" title="Settings and Ollama">⚙️</button>
-    </span>
+    </div>
   </div>
 
   <div id="scene-wrap">
