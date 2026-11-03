@@ -1,0 +1,17 @@
+[Unit]
+Description=GodCiv always-on village sim
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/godciv-server
+ExecStart=/usr/bin/node server/server.js
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
