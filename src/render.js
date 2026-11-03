@@ -188,9 +188,15 @@ const MAT_LAMP = new THREE.MeshBasicMaterial({ color: 0xfff9c4 });
 function timberHouse(o) {
   const body = [], win = [], snow = [];
   const hw = o.w / 2, hd = o.d / 2;
-  const pal = o.pal;
+  // Defensive defaults: direct callers used to omit pal/era/flat, and
+  // timberHouse read pal.wall unguarded, which threw on the town
+  // center and blanked the whole village (v12 launch bug). Every
+  // caller now passes them AND the defaults hold if one forgets.
+  const era = o.era || 0;
+  const pal = o.pal || ERA_PALETTE[era] || ERA_PALETTE[0];
+  const flat = o.flat ?? era >= 3;
   partBox(body, o.w + 0.3, 0.18, o.d + 0.3, 0, 0.09, 0, 0x8d8d8d);
-  if (o.era >= 1) partBox(body, o.w + 0.1, 0.3, o.d + 0.1, 0, 0.15, 0, 0x7a7a7a);
+  if (era >= 1) partBox(body, o.w + 0.1, 0.3, o.d + 0.1, 0, 0.15, 0, 0x7a7a7a);
   partBox(body, o.w, o.wallH, o.d, 0, o.wallH / 2 + 0.18, 0, pal.wall);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     partBox(body, 0.12, o.wallH, 0.12, sx * (hw - 0.06), o.wallH / 2 + 0.18, sz * (hd - 0.06), pal.timber);
@@ -202,7 +208,7 @@ function timberHouse(o) {
   partBox(body, 0.5, 0.75, 0.08, 0, 0.55, hd + 0.02, o.doorColor || 0xb71c1c);
   const wallTop = 0.18 + o.wallH;
   let chimneyTop = null;
-  if (o.flat) {
+  if (flat) {
     partBox(body, o.w + 0.2, 0.15, o.d + 0.2, 0, wallTop + 0.07, 0, pal.roof);
     for (const sz of [-1, 1]) partBox(body, o.w + 0.2, 0.22, 0.08, 0, wallTop + 0.2, sz * (hd + 0.06), pal.trim);
     for (const sx of [-1, 1]) partBox(body, 0.08, 0.22, o.d + 0.2, sx * (hw + 0.06), wallTop + 0.2, 0, pal.trim);
@@ -222,7 +228,7 @@ function timberHouse(o) {
   }
   for (const w of o.windows || []) {
     partBox(win, 0.32, 0.34, 0.06, w.x, w.y, hd + 0.03, 0xffffff);
-    if (o.era >= 1) {
+    if (era >= 1) {
       partBox(body, 0.1, 0.4, 0.05, w.x - 0.24, w.y, hd + 0.03, pal.timber);
       partBox(body, 0.1, 0.4, 0.05, w.x + 0.24, w.y, hd + 0.03, pal.timber);
       partBox(body, 0.4, 0.12, 0.12, w.x, w.y - 0.26, hd + 0.06, 0x4caf50);
@@ -556,7 +562,7 @@ export class Renderer {
     };
 
     if (type === "towncenter") {
-      const r = timberHouse({ w: 2.4, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -0.7, y: 0.85 }, { x: 0.7, y: 0.85 }] });
+      const r = timberHouse({ pal, era, flat, w: 2.4, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -0.7, y: 0.85 }, { x: 0.7, y: 0.85 }] });
       chimneyTop = r.chimneyTop;
       const body = r.body;
       partBox(body, 0.6, 1.9, 0.6, 1.05, 1.1, -0.7, 0x8a8a8a);
@@ -605,7 +611,7 @@ export class Renderer {
       partPrism(body, 1.5, 0.5, 0.9, 0, 1.1, 0, pal.roof);
       return finish(body, [], []);
     } else if (type === "workshop") {
-      const r = timberHouse({ w: 2.0, d: 1.6, wallH: 1.1, roofH: 0.8, chimney: true, doorColor: 0x3e2723, windows: [{ x: -0.6, y: 0.8 }] });
+      const r = timberHouse({ pal, era, flat, w: 2.0, d: 1.6, wallH: 1.1, roofH: 0.8, chimney: true, doorColor: 0x3e2723, windows: [{ x: -0.6, y: 0.8 }] });
       chimneyTop = r.chimneyTop;
       const body = r.body;
       partBox(body, 0.7, 0.35, 0.3, -0.6, 0.18, 0.95, 0x37474f);
@@ -625,14 +631,14 @@ export class Renderer {
       flame.position.y = 2.0; extra.push(flame);
       return finish(body, [], [], extra);
     } else if (type === "greathall") {
-      const r = timberHouse({ w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }] });
+      const r = timberHouse({ pal, era, flat, w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }] });
       chimneyTop = r.chimneyTop;
       const body = r.body;
       partBox(body, 0.6, 1.6, 0.6, 1.4, 0.8, -0.7, 0x8a8a8a);
       partBox(body, 0.7, 0.9, 0.06, 0, 1.2, 1.05, 0xb71c1c);
       return finish(body, r.win, r.snow);
     } else if (type === "farmhouse") {
-      const r = timberHouse({ w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }] });
+      const r = timberHouse({ pal, era, flat, w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }] });
       const body = r.body;
       partCyl(body, 0.3, 0.3, 1.3, 8, 1.05, 0.65, -0.4, 0x9e9e9e);
       return finish(body, r.win, r.snow);
@@ -656,7 +662,7 @@ export class Renderer {
       for (const w of [{ x: -0.7, y: 0.8 }, { x: 0.7, y: 0.8 }]) partBox(win, 0.32, 0.34, 0.06, w.x, w.y, 0.88, 0xffffff);
       return finish(body, win, snow);
     } else if (type === "healer") {
-      const r = timberHouse({ w: 1.7, d: 1.6, wallH: 1.0, roofH: 0.9, chimney: false, windows: [{ x: 0.55, y: 0.7 }] });
+      const r = timberHouse({ pal, era, flat, w: 1.7, d: 1.6, wallH: 1.0, roofH: 0.9, chimney: false, windows: [{ x: 0.55, y: 0.7 }] });
       const body = r.body;
       if (!flat) {
         // Green roof replaces the red one: rebuild is wasteful, so the
@@ -682,7 +688,7 @@ export class Renderer {
       }
       return finish(body, [], []);
     } else if (type === "tower") {
-      const body = [];
+      const body = [], win = [];
       if (era === 0) {
         for (const sx of [-0.4, 0.4]) for (const sz of [-0.4, 0.4]) partBox(body, 0.14, 1.6, 0.14, sx, 0.8, sz, pal.timber);
         partBox(body, 1.1, 0.14, 1.1, 0, 1.65, 0, pal.timber);
@@ -700,7 +706,7 @@ export class Renderer {
         partBox(body, 0.45, 0.28, 0.04, 0.25, 2.95, 0, 0xb71c1c);
         if (era >= 3) partBox(body, 0.2, 0.2, 0.2, 0, 2.85, 0, 0xfff9c4);
       }
-      return finish(body, [], []);
+      return finish(body, win, []);
     }
     // Unknown type: a plain timber block, so a new building never
     // renders invisible.
@@ -716,18 +722,30 @@ export class Renderer {
     const hasWalls = state.buildings.some((b) => b.type === "wall" || b.type === "tower");
     const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
     if (sig === this._buildSignature) return;
-    this._buildSignature = sig;
-    this._clearGroup(this.buildingsGroup);
-    this._clearGroup(this.dressingGroup);
+    // Build every mesh BEFORE touching the live groups: a single bad
+    // building type must never blank the village (the v12 launch bug:
+    // the signature was recorded, the group cleared, then the first
+    // mesh threw, and nothing ever drew again). A failed type falls
+    // back to the plain-block mesh; the signature is recorded only
+    // after a full successful rebuild at the end of this method.
     this._nightMeshes = [];
     this._chimneys = [];
-    for (const b of state.buildings) this.buildingsGroup.add(this._buildingMesh(b.type, b.x, b.z, techLevel, era));
+    const safeMesh = (type, x, z) => {
+      try { return this._buildingMesh(type, x, z, techLevel, era); }
+      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era); } catch (e2) { return null; } }
+    };
+    const built = [];
+    for (const b of state.buildings) { const m = safeMesh(b.type, b.x, b.z); if (m) built.push(m); }
     for (const q of state.buildQueue) {
-      const frame = this._buildingMesh(q.type || "hut", q.x, q.z, techLevel, era);
+      const frame = safeMesh(q.type || "hut", q.x, q.z);
+      if (!frame) continue;
       frame.scale.setScalar(0.6);
       frame.traverse((o) => { if (o.material && o.material !== MAT_BODY && o.material !== MAT_WINDOW && o.material !== MAT_SNOW) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; } });
-      this.buildingsGroup.add(frame);
+      built.push(frame);
     }
+    this._clearGroup(this.buildingsGroup);
+    this._clearGroup(this.dressingGroup);
+    for (const m of built) this.buildingsGroup.add(m);
     // Gates: posts and beam on the open axis cells of the wall ring,
     // drawn only once a wall exists. Torches and market stalls dress
     // the plaza as the village grows.
@@ -795,6 +813,7 @@ export class Renderer {
     }
     if (this._chimneys.length > 24) this._chimneys.length = 24;
     this._wasNight = null;
+    this._buildSignature = sig;
   }
 
   _villagerGroup(v) {
