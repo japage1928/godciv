@@ -8,7 +8,7 @@
 // Buildings are merged vertex-colored geometry: one draw call per
 // building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, forEachGeneratedCell, generatedCellCount } from "./sim.js";
+import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
@@ -392,8 +392,8 @@ export class Renderer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb);
-    this.scene.fog = new THREE.Fog(0x87ceeb, 55, 95);
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
+    this.scene.fog = new THREE.Fog(0x87ceeb, 60, 140);
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 400);
     this.target = new THREE.Vector3(24, 0, 24); // the village center; SIZE/2 is map middle now
     // Elevated three-quarter framing, as in the mockups.
     this.distance = 30;
@@ -530,9 +530,18 @@ export class Renderer {
     this.groundTex = makeGrassTexture();
     this.groundTex.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     this.cobbleTex = makeCobbleTexture();
+    // One ground material shared by every chunk's ground mesh: the
+    // wet-weather tint sets it once instead of per chunk.
+    this._groundMat = new THREE.MeshLambertMaterial({ map: this.groundTex || null });
 
     this._buildStatic = null;
     this._buildSignature = "";
+    // Chunked streaming (section 4): one static group per generated
+    // chunk, rebuilt only when dirty, disposed past band 6.
+    this._chunkGroups = new Map();
+    this._rebuildQueue = [];
+    this._streamStats = { built: 0, disposed: 0, rebuilt: 0 };
+    this._pinnedChunks = new Set();
     this._initInput();
     this.resize();
   }
@@ -559,103 +568,195 @@ export class Renderer {
     return base;
   }
 
-  // Recolors the ground and tree canopies when the season changes, and
-  // toggles roof snow. Runs at most four times a year, never per frame.
-  _applySeasonTint(state, grid) {
-    const season = state.season || "spring";
-    if (season === this._season || !this.groundMesh) return;
-    this._season = season;
-    const col = new THREE.Color();
-    const order = this._groundCells || [];
-    for (let i = 0; i < order.length; i++) {
-      const [x, z] = order[i];
-      const cell = cellAt(grid, x, z);
-      if (!cell) continue;
-      col.copy(this._cellColor(cell, season, x, z));
-      if (cell.tree) col.multiplyScalar(0.85);
-      this.groundMesh.setColorAt(i, col);
+  // Distance bands, measured in chunks from the camera target
+  // (Chebyshev chunk distance). Full 0-1, Standard 2-3, Silhouette
+  // 4-6, Unloaded 7+. The band table in section 4 is the spec: at
+  // 4-6 chunks only ground, water, and building massing draw (the
+  // section-4 prose line about trees past 5 chunks reads against
+  // it, and the table wins: fewer draws, explicit silhouette).
+  // The home chunks pin at full detail while fighting is on, so a
+  // battle never loses its actors to a band change; neighbor pins
+  // (Phase F) hold activated villages at standard or better.
+  _chunkBand(cx, cz, state) {
+    const tcx = Math.floor(this.target.x / CHUNK), tcz = Math.floor(this.target.z / CHUNK);
+    const d = Math.max(Math.abs(cx - tcx), Math.abs(cz - tcz));
+    let band = d <= 1 ? "full" : d <= 3 ? "standard" : d <= 6 ? "silhouette" : "unloaded";
+    if (band !== "full" && state && (state.raidActive || (state.warParties && state.warParties.length) || (state.caravans && state.caravans.length))) {
+      // The 9 home chunks: center chunk (1,1) plus its ring.
+      if (Math.max(Math.abs(cx - 1), Math.abs(cz - 1)) <= 1) band = "full";
     }
-    if (this.groundMesh.instanceColor) this.groundMesh.instanceColor.needsUpdate = true;
-    if (this.canopyMesh) {
-      for (let k = 0; k < this._treeCells.length; k++) {
-        const j = this._treeJitter ? this._treeJitter[k] : 1;
-        this.canopyMesh.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(j));
-        this.canopyTopMesh.setColorAt(k, this._c.copy(SEASON_CANOPY_TOP[season]).multiplyScalar(j));
-      }
-      if (this.canopyMesh.instanceColor) this.canopyMesh.instanceColor.needsUpdate = true;
-      if (this.canopyTopMesh.instanceColor) this.canopyTopMesh.instanceColor.needsUpdate = true;
+    if ((band === "silhouette" || band === "unloaded") && this._pinnedChunks && this._pinnedChunks.has(cx + "," + cz)) band = "standard";
+    return band;
+  }
+
+  _actorVisible(x, z, state) {
+    const band = this._chunkBand(Math.floor(x / CHUNK), Math.floor(z / CHUNK), state);
+    return band === "full" || band === "standard";
+  }
+
+  _applyBandVisibility(rec) {
+    const p = rec.parts;
+    if (!p) return;
+    const dressing = rec.band === "full";
+    const leafy = rec.band === "full" || rec.band === "standard";
+    if (p.ground) p.ground.visible = true;
+    if (p.water) p.water.visible = true;
+    if (p.roads) p.roads.visible = true;
+    for (const k of ["trunk", "canopy", "canopyTop", "stones", "crops"]) if (p[k]) p[k].visible = leafy;
+    for (const k of ["tufts", "bushes"]) if (p[k]) p[k].visible = dressing;
+    if (p.flowers) p.flowers.visible = dressing && this._season !== "winter";
+  }
+
+  // Streaming sync, once per frame: discover generated chunks,
+  // apply distance bands (dispose past 7), queue dirty chunks,
+  // and rebuild at most one queued chunk. Reloads rebuild from
+  // the chunk's own cells, never the seed alone, so a chopped
+  // tree stays chopped.
+  syncChunks(state, grid) {
+    if (!this._chunkGroups) { this._chunkGroups = new Map(); this._rebuildQueue = []; }
+    if (!this._streamStats) this._streamStats = { built: 0, disposed: 0, rebuilt: 0 };
+    for (const ch of grid.chunks.values()) {
+      const k = chunkKey(ch.cx, ch.cz);
+      if (!this._chunkGroups.has(k) && !this._rebuildQueue.includes(k)) this._rebuildQueue.push(k);
     }
-    // Grass tufts follow the season; flowers and bushes hide in
-    // winter, bushes take the canopy color.
-    if (this.tuftMesh) {
-      for (let k = 0; k < this._tuftJitter.length; k++) {
-        this.tuftMesh.setColorAt(k, this._c.copy(SEASON_GRASS[season]).multiplyScalar(0.78 + this._tuftJitter[k] * 0.3));
-      }
-      if (this.tuftMesh.instanceColor) this.tuftMesh.instanceColor.needsUpdate = true;
+    for (const rec of [...this._chunkGroups.values()]) {
+      const band = this._chunkBand(rec.cx, rec.cz, state);
+      if (band === "unloaded") { this._disposeChunkGroup(rec); continue; }
+      if (band !== rec.band) { rec.band = band; this._applyBandVisibility(rec); }
+      const ch = peekChunk(grid, rec.cx, rec.cz);
+      if (ch && ch.dirty && !this._rebuildQueue.includes(rec.key)) this._rebuildQueue.push(rec.key);
     }
-    if (this.flowerMesh) this.flowerMesh.visible = season !== "winter";
-    if (this.bushMesh) {
-      for (let k = 0; k < this._bushJitter.length; k++) {
-        this.bushMesh.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(0.85 + this._bushJitter[k] * 0.25));
-      }
-      if (this.bushMesh.instanceColor) this.bushMesh.instanceColor.needsUpdate = true;
-    }
-    const snowy = season === "winter";
-    if (this.buildingsGroup) {
-      this.buildingsGroup.traverse((o) => { if (o.userData.isSnow) o.visible = snowy; });
+    let skips = 0;
+    while (this._rebuildQueue.length && skips < 8) {
+      const k = this._rebuildQueue.shift();
+      const [cx, cz] = k.split(",").map(Number);
+      if (this._chunkBand(cx, cz, state) === "unloaded" || !peekChunk(grid, cx, cz)) { skips++; continue; }
+      const old = this._chunkGroups.get(k);
+      if (old) this._disposeChunkGroup(old);
+      const rec = this._buildChunkGroup(grid, cx, cz);
+      if (!rec) continue;
+      rec.band = this._chunkBand(cx, cz, state);
+      this._applyBandVisibility(rec);
+      this._chunkGroups.set(k, rec);
+      this.scene.add(rec.group);
+      if (old) this._streamStats.rebuilt++;
+      else this._streamStats.built++;
+      if (this._season) this._tintChunk(rec, this._season, grid);
+      break;
     }
   }
 
-  buildStatic(grid) {
-    if (this._buildStatic) {
-      for (const o of this._buildStatic) { this.scene.remove(o); o.geometry?.dispose?.(); }
+  // Recolors one chunk's ground and canopies for the season, plus
+  // its tufts and bushes. Runs per chunk, only for chunks whose
+  // recorded season differs, never map-wide.
+  _tintChunk(rec, season, grid) {
+    const p = rec.parts;
+    if (!p) return;
+    if (p.ground) {
+      rec.groundCells.forEach(([x, z], i) => {
+        const cell = cellAt(grid, x, z);
+        if (!cell) return;
+        this._c.copy(this._cellColor(cell, season, x, z));
+        if (cell.tree) this._c.multiplyScalar(0.85);
+        p.ground.setColorAt(i, this._c);
+      });
+      if (p.ground.instanceColor) p.ground.instanceColor.needsUpdate = true;
     }
-    const group = [];
-    const groundGeo = new THREE.BoxGeometry(CELL, 0.5, CELL);
-    // Only generated chunks hold ground instances: the map is 320
-    // wide, but the ground that exists is the ground that is settled.
-    // Per-chunk groups arrive in Phase C; this pass keeps one mesh
-    // over generated cells, in a recorded order the season tint
-    // reuses, so no frame ever touches an ungenerated cell.
-    const groundCount = generatedCellCount(grid);
-    const ground = new THREE.InstancedMesh(groundGeo, new THREE.MeshLambertMaterial({ map: this.groundTex || null }), Math.max(1, groundCount));
-    const m = new THREE.Matrix4(); const col = new THREE.Color();
-    const order = [];
-    let i = 0;
-    forEachGeneratedCell(grid, (x, z, cell) => {
+    if (p.canopy) {
+      for (let k = 0; k < rec.treeCells.length; k++) {
+        const j = rec.treeJitter ? rec.treeJitter[k] : 1;
+        p.canopy.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(j));
+        p.canopyTop.setColorAt(k, this._c.copy(SEASON_CANOPY_TOP[season]).multiplyScalar(j));
+      }
+      if (p.canopy.instanceColor) p.canopy.instanceColor.needsUpdate = true;
+      if (p.canopyTop.instanceColor) p.canopyTop.instanceColor.needsUpdate = true;
+    }
+    if (p.tufts) {
+      for (let k = 0; k < rec.tuftJitter.length; k++) {
+        p.tufts.setColorAt(k, this._c.copy(SEASON_GRASS[season]).multiplyScalar(0.78 + rec.tuftJitter[k] * 0.3));
+      }
+      if (p.tufts.instanceColor) p.tufts.instanceColor.needsUpdate = true;
+    }
+    if (p.flowers) p.flowers.visible = season !== "winter" && rec.band === "full";
+    if (p.bushes) {
+      for (let k = 0; k < rec.bushJitter.length; k++) {
+        p.bushes.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(0.85 + rec.bushJitter[k] * 0.25));
+      }
+      if (p.bushes.instanceColor) p.bushes.instanceColor.needsUpdate = true;
+    }
+    rec.season = season;
+  }
+
+  // Season recolor, chunk by chunk: only chunks whose recorded
+  // season differs are touched. Roof snow toggles on the global
+  // building group when the season itself changes.
+  _applySeasonTint(state, grid) {
+    const season = state.season || "spring";
+    if (this._chunkGroups) {
+      for (const rec of this._chunkGroups.values()) {
+        if (!rec.group || rec.season === season) continue;
+        this._tintChunk(rec, season, grid);
+      }
+    }
+    if (season !== this._season) {
+      this._season = season;
+      const snowy = season === "winter";
+      if (this.buildingsGroup) {
+        this.buildingsGroup.traverse((o) => { if (o.userData.isSnow) o.visible = snowy; });
+      }
+    }
+  }
+
+  // One chunk's static meshes: ground, water, trees, dressing,
+  // stones, crops, roads. Formulas are the old map-wide ones, scoped
+  // to the chunk's 256 cells, so the home village draws exactly as
+  // before. A fresh group starts untinted (season null): the tint
+  // pass colors it on the next update. Building the group clears
+  // the chunk's sim dirty flag: the sim marks it on every mutation,
+  // and the renderer rebuilds only flagged chunks.
+  _buildChunkGroup(grid, cx, cz) {
+    const ch = peekChunk(grid, cx, cz);
+    if (!ch) return null;
+    const group = new THREE.Group();
+    const m = new THREE.Matrix4();
+    const col = new THREE.Color();
+    const groundCells = [], waterCells = [], treeCells = [], freeCells = [];
+    const stoneCells = [], farmCells = [], roadCells = [];
+    for (let lx = 0; lx < CHUNK; lx++) for (let lz = 0; lz < CHUNK; lz++) {
+      const x = cx * CHUNK + lx, z = cz * CHUNK + lz;
+      const cell = ch.cells[lx][lz];
+      groundCells.push([x, z]);
+      if (cell.water) waterCells.push([x, z]);
+      if (cell.tree) treeCells.push([x, z]);
+      if (cell.stone > 0 || cell.ore > 0) stoneCells.push([x, z]);
+      if (cell.farm) farmCells.push([x, z]);
+      if (cell.road) roadCells.push([x, z]);
+      if (!cell.water && !cell.farm && !cell.tree && !cell.road && !cell.building && cell.stone <= 0 && cell.ore <= 0 && cell.h <= 0.66) freeCells.push([x, z]);
+    }
+    const parts = {};
+    const ground = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, 0.5, CELL), this._groundMat || new THREE.MeshLambertMaterial({ map: this.groundTex || null }), Math.max(1, groundCells.length));
+    groundCells.forEach(([x, z], i) => {
+      const cell = ch.cells[x % CHUNK][z % CHUNK];
       const h = cell.water ? -0.15 : cell.h * 0.9;
       m.makeTranslation(x + 0.5, h - 0.25, z + 0.5);
       ground.setMatrixAt(i, m);
       col.copy(this._cellColor(cell, "spring", x, z));
       if (cell.tree) col.multiplyScalar(0.85);
       ground.setColorAt(i, col);
-      order.push([x, z]);
-      i++;
     });
-    this._groundCells = order;
     ground.instanceMatrix.needsUpdate = true;
     if (ground.instanceColor) ground.instanceColor.needsUpdate = true;
-    this.scene.add(ground); group.push(ground);
-    this.groundMesh = ground;
-    this._season = null;
-
-    const waterCells = [];
-    forEachGeneratedCell(grid, (x, z, c) => { if (c.water) waterCells.push([x, z]); });
+    group.add(ground);
+    parts.ground = ground;
     if (waterCells.length) {
-      this.waterMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, 0.12, CELL), new THREE.MeshLambertMaterial({ color: 0x3a9ad9, transparent: true, opacity: 0.72 }), waterCells.length);
-      waterCells.forEach(([x, z], idx) => {
-        m.makeTranslation(x + 0.5, 0.32, z + 0.5);
-        this.waterMesh.setMatrixAt(idx, m);
-      });
-      this.scene.add(this.waterMesh); group.push(this.waterMesh);
+      const water = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, 0.12, CELL), new THREE.MeshLambertMaterial({ color: 0x3a9ad9, transparent: true, opacity: 0.72 }), waterCells.length);
+      waterCells.forEach(([x, z], idx) => { m.makeTranslation(x + 0.5, 0.32, z + 0.5); water.setMatrixAt(idx, m); });
+      group.add(water);
+      parts.water = water;
     }
-
     // Trees: trunk + canopy, instanced, with real size variety and
     // per-tree canopy jitter (reapplied on season change).
-    const treeCells = [];
-    forEachGeneratedCell(grid, (x, z, c) => { if (c.tree) treeCells.push([x, z]); });
-    this._treeCells = treeCells;
-    this._treeJitter = treeCells.map(([x, z]) => 0.88 + (((x * 13 + z * 7) % 100) / 100) * 0.24);
+    const treeJitter = treeCells.map(([x, z]) => 0.88 + (((x * 13 + z * 7) % 100) / 100) * 0.24);
     if (treeCells.length) {
       const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.13, 0.18, 0.8, 6), new THREE.MeshLambertMaterial({ color: 0x6b4423 }), treeCells.length);
       const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.85, 0), new THREE.MeshLambertMaterial({ color: 0x2e6b2e }), treeCells.length);
@@ -665,22 +766,17 @@ export class Renderer {
         m.makeScale(s, s * (0.9 + (((x * 3 + z * 11) % 10) / 10) * 0.3), s); m.setPosition(x + 0.5, 0.65 * s, z + 0.5); trunk.setMatrixAt(idx, m);
         m.makeScale(s, s, s); m.setPosition(x + 0.5, 1.7 * s, z + 0.5); canopy.setMatrixAt(idx, m);
         m.makeScale(s, s, s); m.setPosition(x + 0.5, 2.35 * s, z + 0.5); canopyTop.setMatrixAt(idx, m);
-        canopy.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(this._treeJitter[idx]));
-        canopyTop.setColorAt(idx, this._c.copy(SEASON_CANOPY_TOP.spring).multiplyScalar(this._treeJitter[idx]));
+        canopy.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(treeJitter[idx]));
+        canopyTop.setColorAt(idx, this._c.copy(SEASON_CANOPY_TOP.spring).multiplyScalar(treeJitter[idx]));
       });
       if (canopy.instanceColor) canopy.instanceColor.needsUpdate = true;
       if (canopyTop.instanceColor) canopyTop.instanceColor.needsUpdate = true;
-      this.scene.add(trunk, canopy, canopyTop); group.push(trunk, canopy, canopyTop);
-      this.canopyMesh = canopy; this.canopyTopMesh = canopyTop;
-    } else { this.canopyMesh = null; this.canopyTopMesh = null; }
-
+      group.add(trunk, canopy, canopyTop);
+      parts.trunk = trunk; parts.canopy = canopy; parts.canopyTop = canopyTop;
+    }
     // Ground life: grass tufts, flowers, and bushes on free ground,
     // all instanced and placed by a deterministic cell hash so the
     // dressing is identical on every load. Nothing here is per-frame.
-    const freeCells = [];
-    forEachGeneratedCell(grid, (x, z, cell) => {
-      if (!cell.water && !cell.farm && !cell.tree && !cell.road && !cell.building && cell.stone <= 0 && cell.ore <= 0 && cell.h <= 0.66) freeCells.push([x, z]);
-    });
     const tuftSpots = [];
     const flowerSpots = [];
     const bushSpots = [];
@@ -692,56 +788,103 @@ export class Renderer {
       if (hash < 0.1) flowerSpots.push([x + 0.5, z + 0.5, hash]);
       else if (hash < 0.17) bushSpots.push([x + 0.5, z + 0.5, hash]);
     }
-    this._tuftJitter = tuftSpots.map((s, i) => ((i * 37) % 100) / 100);
-    this.tuftMesh = new THREE.InstancedMesh(new THREE.ConeGeometry(0.09, 0.42, 4), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, tuftSpots.length));
+    const tuftJitter = tuftSpots.map((s, i) => ((i * 37) % 100) / 100);
+    const tufts = new THREE.InstancedMesh(new THREE.ConeGeometry(0.09, 0.42, 4), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, tuftSpots.length));
     tuftSpots.forEach(([px, pz, s], idx) => {
       m.makeScale(s, s, s); m.setPosition(px, 0.2 * s + 0.02, pz);
-      this.tuftMesh.setMatrixAt(idx, m);
-      this.tuftMesh.setColorAt(idx, this._c.copy(SEASON_GRASS.spring).multiplyScalar(0.78 + this._tuftJitter[idx] * 0.3));
+      tufts.setMatrixAt(idx, m);
+      tufts.setColorAt(idx, this._c.copy(SEASON_GRASS.spring).multiplyScalar(0.78 + tuftJitter[idx] * 0.3));
     });
-    if (this.tuftMesh.instanceColor) this.tuftMesh.instanceColor.needsUpdate = true;
-    this.scene.add(this.tuftMesh); group.push(this.tuftMesh);
+    if (tufts.instanceColor) tufts.instanceColor.needsUpdate = true;
+    group.add(tufts);
+    parts.tufts = tufts;
     const FLOWER_COLORS = [0xe53935, 0xffd54f, 0xf8f8f8, 0xab47bc];
-    this.flowerMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(0.1, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, flowerSpots.length));
+    const flowers = new THREE.InstancedMesh(new THREE.OctahedronGeometry(0.1, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, flowerSpots.length));
     flowerSpots.forEach(([px, pz, hash], idx) => {
       m.makeScale(1, 1, 1); m.setPosition(px, 0.2, pz);
-      this.flowerMesh.setMatrixAt(idx, m);
-      this.flowerMesh.setColorAt(idx, this._c.setHex(FLOWER_COLORS[Math.floor(hash * 100) % FLOWER_COLORS.length]));
+      flowers.setMatrixAt(idx, m);
+      flowers.setColorAt(idx, this._c.setHex(FLOWER_COLORS[Math.floor(hash * 100) % FLOWER_COLORS.length]));
     });
-    if (this.flowerMesh.instanceColor) this.flowerMesh.instanceColor.needsUpdate = true;
-    this.scene.add(this.flowerMesh); group.push(this.flowerMesh);
-    this._bushJitter = bushSpots.map((s, i) => ((i * 53) % 100) / 100);
-    this.bushMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, bushSpots.length));
+    if (flowers.instanceColor) flowers.instanceColor.needsUpdate = true;
+    group.add(flowers);
+    parts.flowers = flowers;
+    const bushJitter = bushSpots.map((s, i) => ((i * 53) % 100) / 100);
+    const bushes = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, bushSpots.length));
     bushSpots.forEach(([px, pz, hash], idx) => {
       const s = 0.7 + hash * 5;
       m.makeScale(s, s * 0.8, s); m.setPosition(px, 0.32, pz);
-      this.bushMesh.setMatrixAt(idx, m);
-      this.bushMesh.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(0.85 + this._bushJitter[idx] * 0.25));
+      bushes.setMatrixAt(idx, m);
+      bushes.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(0.85 + bushJitter[idx] * 0.25));
     });
-    if (this.bushMesh.instanceColor) this.bushMesh.instanceColor.needsUpdate = true;
-    this.scene.add(this.bushMesh); group.push(this.bushMesh);
-    this._buildStatic = group;
-    this._stoneCells = [];
-    forEachGeneratedCell(grid, (x, z, c) => { if (c.stone > 0 || c.ore > 0) this._stoneCells.push([x, z]); });
-    this.stoneMesh = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0x9a9a9a }), Math.max(1, this._stoneCells.length));
-    this._stoneCells.forEach(([x, z], idx) => {
-      this.stoneMesh.setColorAt(idx, cellAt(grid, x, z).ore > 0 ? this._c.setHex(0x7f9fb5) : this._c.setHex(0x9a9a9a));
+    if (bushes.instanceColor) bushes.instanceColor.needsUpdate = true;
+    group.add(bushes);
+    parts.bushes = bushes;
+    const stones = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0x9a9a9a }), Math.max(1, stoneCells.length));
+    stoneCells.forEach(([x, z], idx) => {
+      stones.setColorAt(idx, cellAt(grid, x, z).ore > 0 ? this._c.setHex(0x7f9fb5) : this._c.setHex(0x9a9a9a));
     });
-    if (this.stoneMesh.instanceColor) this.stoneMesh.instanceColor.needsUpdate = true;
-    this.scene.add(this.stoneMesh);
+    if (stones.instanceColor) stones.instanceColor.needsUpdate = true;
+    group.add(stones);
+    parts.stones = stones;
     // Crops: five plants per farm cell, in a row, so fields read as
     // dense rows rather than single blocks.
-    this._farmCells = [];
-    forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) this._farmCells.push([x, z]); });
-    this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length * 5));
-    this.scene.add(this.cropMesh);
+    const crops = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, farmCells.length * 5));
+    group.add(crops);
+    parts.crops = crops;
+    let roads = null;
+    if (roadCells.length) {
+      roads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xc9b18a }), roadCells.length);
+      const rm = new THREE.Matrix4();
+      roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, cellAt(grid, x, z).h * 0.9 + 0.04, z + 0.5); roads.setMatrixAt(idx, rm); });
+      group.add(roads);
+    }
+    parts.roads = roads;
+    ch.dirty = false;
+    return {
+      key: chunkKey(cx, cz), cx, cz, group, parts,
+      groundCells, treeCells, treeJitter, stoneCells, farmCells, roadCells,
+      tuftJitter, bushJitter, season: null, band: null, roadEra: -1,
+    };
+  }
+
+  _disposeChunkGroup(rec) {
+    if (!rec) return;
+    if (rec.group) {
+      this.scene.remove(rec.group);
+      rec.group.traverse((o) => { if (o.geometry && o.geometry !== SHADOW_GEO) o.geometry.dispose(); });
+    }
+    if (this._chunkGroups) this._chunkGroups.delete(rec.key);
+    if (this._streamStats) this._streamStats.disposed++;
+    rec.group = null;
+    rec.parts = {};
+  }
+
+  buildStatic(grid) {
+    // A fresh static pass: drop every chunk group and rebuild from
+    // the generated chunks. The building mesh stays global (see
+    // _syncBuildings); its groups are recreated here as before.
+    if (this._chunkGroups) for (const rec of [...this._chunkGroups.values()]) this._disposeChunkGroup(rec);
+    this._chunkGroups = new Map();
+    this._rebuildQueue = [];
+    if (!this._streamStats) this._streamStats = { built: 0, disposed: 0, rebuilt: 0 };
+    if (!this._pinnedChunks) this._pinnedChunks = new Set();
+    for (const ch of grid.chunks.values()) {
+      const rec = this._buildChunkGroup(grid, ch.cx, ch.cz);
+      if (!rec) continue;
+      rec.band = this._chunkBand(ch.cx, ch.cz, null);
+      this._applyBandVisibility(rec);
+      this._chunkGroups.set(rec.key, rec);
+      this.scene.add(rec.group);
+      this._streamStats.built++;
+    }
+    this._buildStatic = [...this._chunkGroups.values()].map((r) => r.group);
+    this._season = null;
     this.buildingsGroup = new THREE.Group();
     this.scene.add(this.buildingsGroup);
     this.dressingGroup = new THREE.Group();
     this.scene.add(this.dressingGroup);
-    this._roadMesh = null;
-    this._roadCells = [];
   }
+
 
   _clearGroup(group) {
     group.traverse((o) => { if (o.geometry && o.geometry !== SHADOW_GEO) o.geometry.dispose(); });
@@ -999,10 +1142,14 @@ export class Renderer {
       catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY, facingAngle); } catch (e2) { return null; } }
     };
     const built = [];
-    for (const b of state.buildings) { const m = safeMesh(b.type, b.x, b.z); if (m) built.push(m); }
+    for (const b of state.buildings) {
+      const m = safeMesh(b.type, b.x, b.z);
+      if (m) { m.userData.chunkKey = chunkKey(Math.floor(b.x / CHUNK), Math.floor(b.z / CHUNK)); built.push(m); }
+    }
     for (const q of state.buildQueue) {
       const frame = safeMesh(q.type || "hut", q.x, q.z);
       if (!frame) continue;
+      frame.userData.chunkKey = chunkKey(Math.floor(q.x / CHUNK), Math.floor(q.z / CHUNK));
       frame.scale.setScalar(0.6);
       frame.traverse((o) => { if (o.material && o.material !== MAT_BODY && o.material !== MAT_WINDOW && o.material !== MAT_SNOW) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; } });
       built.push(frame);
@@ -1227,38 +1374,23 @@ export class Renderer {
   }
 
   update(state, grid, dt, elapsed) {
+    // Streaming first: bands, disposal, and at most one rebuild
+    // set the stage for everything below. Farm/road/tree/stone
+    // count changes arrive as sim dirty flags and rebuild their
+    // chunk through the same queue; no global recheck runs here.
+    this.syncChunks(state, grid);
     this._syncBuildings(state, grid);
     this._applySeasonTint(state, grid);
     this._updateParticles(state, dt);
     this._updateSmoke(dt);
-    // Farms and roads grow on their own, so their meshes must grow
-    // when new cells appear. Recheck about once a second.
-    if (!this._farmCheckAt || state.elapsed - this._farmCheckAt > 1) {
-      this._farmCheckAt = state.elapsed;
-      const cells = [];
-      const roadCells = [];
-      forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) cells.push([x, z]); if (c.road) roadCells.push([x, z]); });
-      if (cells.length !== this._farmCells.length) {
-        this._farmCells = cells;
-        if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.geometry.dispose(); }
-        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length * 5));
-        this.scene.add(this.cropMesh);
-      }
-      if (roadCells.length !== this._roadCells.length) {
-        this._roadCells = roadCells;
-        if (this._roadMesh) { this.scene.remove(this._roadMesh); this._roadMesh.geometry.dispose(); }
-        this._roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xc9b18a }), Math.max(1, roadCells.length));
-        const rm = new THREE.Matrix4();
-        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, cellAt(grid, x, z).h * 0.9 + 0.04, z + 0.5); this._roadMesh.setMatrixAt(idx, rm); });
-        this.scene.add(this._roadMesh);
-        this._roadEra = -1; // re-tint for the current era
-      }
-    }
     // Era dressing for the roads: dirt, then cobble, then paved.
+    // Each chunk's road mesh carries its own material and era.
     const era = eraStageOf(state.tech ? state.tech.level : 0);
-    if (this._roadMesh && era !== this._roadEra) {
-      this._roadEra = era;
-      this._roadMesh.material.color.setHex(ERA_PALETTE[era].road);
+    for (const rec of this._chunkGroups.values()) {
+      if (rec.parts.roads && rec.roadEra !== era) {
+        rec.roadEra = era;
+        rec.parts.roads.material.color.setHex(ERA_PALETTE[era].road);
+      }
     }
     // Wet ground in rain: darker, colder ground tint. Weather changes
     // are slow, so this runs only on a change.
@@ -1266,33 +1398,42 @@ export class Renderer {
     if (wkind !== this._wetKind) {
       this._wetKind = wkind;
       const wet = wkind === "rain" || wkind === "storm";
-      if (this.groundMesh) this.groundMesh.material.color.setHex(wet ? 0x9fb2c8 : 0xffffff);
+      if (this._groundMat) this._groundMat.color.setHex(wet ? 0x9fb2c8 : 0xffffff);
       this._cloudMat.color.setHex(wkind === "storm" ? 0x5d6d7e : wkind === "snow" ? 0xe8e8e8 : 0xffffff);
     }
     // Stones + crops scale with remaining amount / growth stage.
+    // Only chunks in the full/standard bands draw them, so only
+    // those update: silhouette chunks hide both outright.
     const m = this._m;
-    this._stoneCells.forEach(([x, z], idx) => {
-      const cell = cellAt(grid, x, z);
-      const amt = cell.stone + cell.ore;
-      const s = amt > 0 ? 0.55 + Math.min(0.45, amt * 0.05) : 0.001;
-      m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.35, z + 0.5);
-      this.stoneMesh.setMatrixAt(idx, m);
-    });
-    this.stoneMesh.instanceMatrix.needsUpdate = true;
     const winterCrops = state.season === "winter";
-    this._farmCells.forEach(([x, z], idx) => {
-      const cell = cellAt(grid, x, z);
-      const stage = cell.crop < 0 ? 0 : cell.crop;
-      const hScale = 0.3 + stage * 0.28;
-      for (let j = 0; j < 5; j++) {
-        const px = x + 0.5 + (j - 2) * 0.2;
-        m.makeScale(1, hScale, 1); m.setPosition(px, 0.05 + 0.25 * hScale, z + 0.5);
-        this.cropMesh.setMatrixAt(idx * 5 + j, m);
-        this.cropMesh.setColorAt(idx * 5 + j, this._c.setHex(winterCrops ? 0x8d6e63 : CROP_COLORS[stage]));
+    for (const rec of this._chunkGroups.values()) {
+      if (!rec.group || (rec.band !== "full" && rec.band !== "standard")) continue;
+      if (rec.parts.stones) {
+        rec.stoneCells.forEach(([x, z], idx) => {
+          const cell = cellAt(grid, x, z);
+          const amt = cell.stone + cell.ore;
+          const s = amt > 0 ? 0.55 + Math.min(0.45, amt * 0.05) : 0.001;
+          m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.35, z + 0.5);
+          rec.parts.stones.setMatrixAt(idx, m);
+        });
+        rec.parts.stones.instanceMatrix.needsUpdate = true;
       }
-    });
-    this.cropMesh.instanceMatrix.needsUpdate = true;
-    if (this.cropMesh.instanceColor) this.cropMesh.instanceColor.needsUpdate = true;
+      if (rec.parts.crops) {
+        rec.farmCells.forEach(([x, z], idx) => {
+          const cell = cellAt(grid, x, z);
+          const stage = cell.crop < 0 ? 0 : cell.crop;
+          const hScale = 0.3 + stage * 0.28;
+          for (let j = 0; j < 5; j++) {
+            const px = x + 0.5 + (j - 2) * 0.2;
+            m.makeScale(1, hScale, 1); m.setPosition(px, 0.05 + 0.25 * hScale, z + 0.5);
+            rec.parts.crops.setMatrixAt(idx * 5 + j, m);
+            rec.parts.crops.setColorAt(idx * 5 + j, this._c.setHex(winterCrops ? 0x8d6e63 : CROP_COLORS[stage]));
+          }
+        });
+        rec.parts.crops.instanceMatrix.needsUpdate = true;
+        if (rec.parts.crops.instanceColor) rec.parts.crops.instanceColor.needsUpdate = true;
+      }
+    }
 
     // Villagers.
     const seen = new Set();
@@ -1300,6 +1441,7 @@ export class Renderer {
       seen.add(v.id);
       let g = this.villagerMeshes.get(v.id);
       if (!g) { g = this._villagerGroup(v); this.scene.add(g); this.villagerMeshes.set(v.id, g); }
+      g.visible = this._actorVisible(v.x, v.z, state);
       g.position.x += (v.x + 0.5 - g.position.x) * Math.min(1, dt * 10);
       g.position.z += (v.z + 0.5 - g.position.z) * Math.min(1, dt * 10);
       if (g.position.x === 0 && g.position.z === 0) { g.position.set(v.x + 0.5, 0, v.z + 0.5); }
@@ -1338,6 +1480,7 @@ export class Renderer {
       seenRaiders.add(r.id);
       let g = this.raiderMeshes.get(r.id);
       if (!g) { g = this._raiderGroup(r); g.position.set(r.x + 0.5, 0, r.z + 0.5); this.scene.add(g); this.raiderMeshes.set(r.id, g); }
+      g.visible = this._actorVisible(r.x, r.z, state);
       g.position.x += (r.x + 0.5 - g.position.x) * Math.min(1, dt * 8);
       g.position.z += (r.z + 0.5 - g.position.z) * Math.min(1, dt * 8);
       const bob = Math.abs(Math.sin(elapsed * 8 + r.id)) * 0.05;
@@ -1364,6 +1507,7 @@ export class Renderer {
         head.position.set(0, 0.75, 0.3); g.add(head);
         this.scene.add(g); this.deerMeshes.set(d.id, g);
       }
+      g.visible = this._actorVisible(d.x, d.z, state);
       g.position.x += (d.x + 0.5 - g.position.x) * Math.min(1, dt * 8);
       g.position.z += (d.z + 0.5 - g.position.z) * Math.min(1, dt * 8);
     }
@@ -1381,7 +1525,10 @@ export class Renderer {
     });
     const flooding = state.elapsed < state.effects.floodUntil;
     this.floodPlane.material.opacity = flooding ? 0.35 : 0;
-    if (this.waterMesh) this.waterMesh.material.opacity = 0.66 + Math.sin(elapsed * 1.4) * 0.08;
+    const waterShimmer = 0.66 + Math.sin(elapsed * 1.4) * 0.08;
+    for (const rec of this._chunkGroups.values()) {
+      if (rec.parts.water) rec.parts.water.material.opacity = waterShimmer;
+    }
     for (const cloud of this.clouds.children) {
       cloud.position.x += dt * 0.45;
       if (cloud.position.x > SIZE + 4) cloud.position.x = -4;
@@ -1419,7 +1566,7 @@ export class Renderer {
     this.scene.fog.color.copy(this._skyColor);
     if (wkind === "storm") { this.scene.fog.near = 25; this.scene.fog.far = 55; }
     else if (wkind === "rain" || wkind === "snow") { this.scene.fog.near = 35; this.scene.fog.far = 70; }
-    else { this.scene.fog.near = 45; this.scene.fog.far = 85; }
+    else { this.scene.fog.near = 60; this.scene.fog.far = 140; }
     if (glowOn !== this._wasNight) {
       this._wasNight = glowOn;
       this.nightLight.intensity = isNight ? 1.8 : glowOn ? 0.8 : 0;
@@ -1451,7 +1598,7 @@ export class Renderer {
   }
 
   rotate(dir) { this.yaw += dir * Math.PI / 6; }
-  zoom(f) { this.zoomTarget = Math.max(12, Math.min(60, this.zoomTarget * f)); }
+  zoom(f) { this.zoomTarget = Math.max(12, Math.min(120, this.zoomTarget * f)); }
   zoomIn() { this.zoom(0.78); }
   zoomOut() { this.zoom(1.28); }
   centerOn(x, z) { this.target.set(x, 0, z); }
@@ -1503,7 +1650,7 @@ export class Renderer {
       } else if (pointers.size === 2 && pinch) {
         const [a, b] = [...pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (pinch.startDist > 20 && d > 20) this.zoomTarget = Math.max(12, Math.min(60, pinch.startZoom * (pinch.startDist / d)));
+        if (pinch.startDist > 20 && d > 20) this.zoomTarget = Math.max(12, Math.min(120, pinch.startZoom * (pinch.startDist / d)));
         const mid = midOf();
         this._panBy(mid.x - pinch.midX, mid.y - pinch.midY);
         pinch.midX = mid.x; pinch.midY = mid.y;
