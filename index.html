@@ -17,7 +17,7 @@
   :root { color-scheme: dark; --panel: rgba(16,24,16,.92); --accent: #ffd700; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0e1a0e; font-family: system-ui, -apple-system, sans-serif; color: #eef5ee; }
-  #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; touch-action: none; }
+  #app { position: fixed; left: 0; right: 0; bottom: 0; top: env(safe-area-inset-top, 0px); display: flex; flex-direction: column; touch-action: none; }
   #scene-wrap { position: relative; flex: 1; min-height: 0; touch-action: none; }
   #scene { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
   /* Opaque status bar (black, not black-translucent): iOS keeps the
@@ -25,7 +25,7 @@
      translucent bar over the first chip row. The top padding uses
      the safe-area inset when one is reported, with a 10px floor so
      the chips never sit hard against the bar in plain Safari. */
-  #hud { display: flex; flex-direction: column; gap: 6px; padding: max(10px, env(safe-area-inset-top)) 8px 8px; background: #16240f; font-size: 14px; z-index: 5; }
+  #hud { display: flex; flex-direction: column; gap: 6px; padding: 8px; background: #16240f; font-size: 14px; z-index: 5; }
   .hud-row { display: flex; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
   .hud-row::-webkit-scrollbar { display: none; }
   .chip { background: #24351f; border: 1px solid #465e3a; border-radius: 999px; padding: 6px 12px; white-space: nowrap; }
