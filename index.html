@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#1a3a1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="GodCiv">
 <meta name="description" content="GodCiv: a tiny voxel civilization run by individual villagers. You are the god. Nudge, bless, or bring catastrophe.">
 <title>GodCiv</title>
@@ -20,7 +20,12 @@
   #app { position: fixed; inset: 0; height: 100dvh; display: flex; flex-direction: column; touch-action: none; }
   #scene-wrap { position: relative; flex: 1; min-height: 0; touch-action: none; }
   #scene { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
-  #hud { display: flex; flex-direction: column; gap: 6px; padding: calc(8px + env(safe-area-inset-top)) 8px 8px; background: #16240f; font-size: 14px; z-index: 5; }
+  /* Opaque status bar (black, not black-translucent): iOS keeps the
+     status bar out of the web content instead of drawing a blurred
+     translucent bar over the first chip row. The top padding uses
+     the safe-area inset when one is reported, with a 10px floor so
+     the chips never sit hard against the bar in plain Safari. */
+  #hud { display: flex; flex-direction: column; gap: 6px; padding: max(10px, env(safe-area-inset-top)) 8px 8px; background: #16240f; font-size: 14px; z-index: 5; }
   .hud-row { display: flex; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
   .hud-row::-webkit-scrollbar { display: none; }
   .chip { background: #24351f; border: 1px solid #465e3a; border-radius: 999px; padding: 6px 12px; white-space: nowrap; }
@@ -30,8 +35,9 @@
   .bar i { display: block; height: 100%; background: var(--accent); }
   #stat-effects { color: #ffab91; }
   #stat-raid { color: #ffcc80; border-color: #8d5a1e; }
-  #top-actions { display: flex; gap: 6px; }
-  #top-actions button { min-width: 48px; min-height: 48px; font-size: 17px; padding: 8px 10px; border-radius: 12px; background: #24351f; border: 1px solid #465e3a; }
+  #top-actions { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  #top-actions::-webkit-scrollbar { display: none; }
+  #top-actions button { flex: 0 0 auto; min-width: 48px; min-height: 48px; font-size: 17px; padding: 8px 10px; border-radius: 12px; background: #24351f; border: 1px solid #465e3a; }
   #btn-pause { font-size: 13px; }
   button, select, input { font: inherit; color: #eef5ee; background: #2a402a; border: 1px solid #4a6a4a; border-radius: 8px; padding: 8px 10px; }
   button:active { background: #3a553a; }
@@ -70,6 +76,10 @@
   dialog .row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   @media (max-width: 560px) {
     #hud { font-size: 13px; }
+    .chip { padding: 4px 9px; }
+    #top-actions { gap: 4px; }
+    #top-actions button { min-width: 42px; min-height: 44px; font-size: 15px; padding: 6px 8px; }
+    #btn-pause { font-size: 12px; }
     #panel { top: auto; bottom: 150px; right: 8px; left: 8px; width: auto; max-height: 46%; }
   }
 </style>

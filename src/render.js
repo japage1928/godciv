@@ -14,30 +14,30 @@ const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fi
 const CELL = 1;
 // Grass tint targets per season: the ground shifts with the year.
 const SEASON_GRASS = {
-  spring: new THREE.Color(0x7da05c),
-  summer: new THREE.Color(0x9aa860),
-  autumn: new THREE.Color(0xa8793f),
-  winter: new THREE.Color(0xb8c4b0),
+  spring: new THREE.Color(0x5e8c46),
+  summer: new THREE.Color(0x6f9a44),
+  autumn: new THREE.Color(0x9a7434),
+  winter: new THREE.Color(0x93a184),
 };
 const SEASON_CANOPY = {
-  spring: new THREE.Color(0x2e6b2e),
-  summer: new THREE.Color(0x276127),
+  spring: new THREE.Color(0x27682b),
+  summer: new THREE.Color(0x226127),
   autumn: new THREE.Color(0xc7782a),
-  winter: new THREE.Color(0x6b7a5e),
+  winter: new THREE.Color(0x5d6e52),
 };
 const SEASON_CANOPY_TOP = {
-  spring: new THREE.Color(0x3d8a3d),
-  summer: new THREE.Color(0x358235),
+  spring: new THREE.Color(0x35913a),
+  summer: new THREE.Color(0x2f7d31),
   autumn: new THREE.Color(0xd98a35),
-  winter: new THREE.Color(0x7d8c70),
+  winter: new THREE.Color(0x6f7f62),
 };
 // Era palettes: the whole village changes dress as tech eras pass.
 // Timber and red tile, then stone, then brick, then concrete and glass.
 const ERA_PALETTE = [
-  { wall: 0xeadfc8, timber: 0x5d4037, roof: 0xa52a2a, trim: 0x6d4c41, road: 0xb09a6d, wallMat: 0x8d6e63 },
-  { wall: 0xd7ccc8, timber: 0x4e342e, roof: 0x9e3a2a, trim: 0x5d4037, road: 0x9a8f7a, wallMat: 0x8a8a8a },
-  { wall: 0xb5654a, timber: 0x3e2723, roof: 0x4a3b32, trim: 0x2d1f1a, road: 0x8d8d8d, wallMat: 0x9a6a52 },
-  { wall: 0xcfd8dc, timber: 0x37474f, roof: 0x607d8b, trim: 0x263238, road: 0x707070, wallMat: 0x90a4ae },
+  { wall: 0xe8d9bd, timber: 0x5a3d2b, roof: 0xa83226, trim: 0x6d4c41, road: 0xc9b18a, wallMat: 0x8d6e63 },
+  { wall: 0xd7ccc8, timber: 0x4e342e, roof: 0x9c3524, trim: 0x5d4037, road: 0xb5a894, wallMat: 0x8a8a8a },
+  { wall: 0xb5654a, timber: 0x3e2723, roof: 0x4a3b32, trim: 0x2d1f1a, road: 0x9d9d9d, wallMat: 0x9a6a52 },
+  { wall: 0xcfd8dc, timber: 0x37474f, roof: 0x607d8b, trim: 0x263238, road: 0x8a8a8a, wallMat: 0x90a4ae },
 ];
 const CROP_COLORS = [0x7cb342, 0x8bc34a, 0x9ccc65, 0xe6c619];
 
@@ -49,16 +49,89 @@ export function computePanDelta(yaw, scale, dx, dy) {
   return [-(dx * cos + dy * sin) * scale, -(-dx * sin + dy * cos) * scale];
 }
 
-function makeSpeckleTexture(base, speckles, size = 128) {
+// Procedural canvas textures, built once and cached: no network
+// assets, ever. They multiply with the vertex colors, so each texture
+// is drawn near-white / light: the part color shows through the detail.
+// Grass: soft patch blobs plus speckle, so the ground reads as meadow
+// instead of one flat green per cell.
+function makeGrassTexture() {
+  const size = 128;
   const c = document.createElement("canvas");
   c.width = size; c.height = size;
   const ctx = c.getContext("2d");
-  ctx.fillStyle = base; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#7fae62"; ctx.fillRect(0, 0, size, size);
   let seed = 7;
   const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-  for (let i = 0; i < 260; i++) {
+  for (let i = 0; i < 26; i++) {
+    const gx = rnd() * size, gy = rnd() * size, gr = 12 + rnd() * 26;
+    const grad = ctx.createRadialGradient(gx, gy, 1, gx, gy, gr);
+    const shade = rnd() < 0.5 ? "96,150,74" : "140,178,104";
+    grad.addColorStop(0, "rgba(" + shade + ",0.55)");
+    grad.addColorStop(1, "rgba(" + shade + ",0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(gx - gr, gy - gr, gr * 2, gr * 2);
+  }
+  const speckles = ["#6b8f4e", "#8fb069", "#5d9e4a", "#a8b878", "#75994f"];
+  for (let i = 0; i < 420; i++) {
     ctx.fillStyle = speckles[Math.floor(rnd() * speckles.length)];
-    const s = 2 + rnd() * 5;
+    const s = 1 + rnd() * 4;
+    ctx.fillRect(rnd() * size, rnd() * size, s, s);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Roof tiles: staggered rows with dark grout lines. Drawn light so
+// the red roof color multiplies through and the rows read as courses.
+function makeTileTexture() {
+  const size = 128;
+  const c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#e6e2da"; ctx.fillRect(0, 0, size, size);
+  let seed = 23;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const rows = 4, cols = 4, th = size / rows, tw = size / cols;
+  for (let y = 0; y < rows; y++) {
+    const off = (y % 2) * tw / 2;
+    for (let x = -1; x < cols; x++) {
+      const g = 214 + Math.floor(rnd() * 30);
+      ctx.fillStyle = "rgb(" + g + "," + (g - 4) + "," + (g - 10) + ")";
+      ctx.fillRect(x * tw + off + 1, y * th + 1, tw - 2, th - 2);
+      ctx.fillStyle = "rgba(255,255,255,0.35)";
+      ctx.fillRect(x * tw + off + 1, y * th + 1, tw - 2, 3);
+    }
+  }
+  ctx.fillStyle = "rgba(90,80,70,0.8)";
+  for (let y = 0; y <= rows; y++) ctx.fillRect(0, y * th - 1, size, 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.repeat.set(2, 2);
+  return tex;
+}
+
+// Plaster: warm off-white with faint streaks and speckle. Multiplies
+// with the wall color, so timber houses get plaster variation while
+// the timber frame (untextured parts) stays flat.
+function makePlasterTexture() {
+  const size = 128;
+  const c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#f2ecdd"; ctx.fillRect(0, 0, size, size);
+  let seed = 31;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  for (let i = 0; i < 14; i++) {
+    ctx.fillStyle = "rgba(190,175,150," + (0.08 + rnd() * 0.1) + ")";
+    ctx.fillRect(rnd() * size, 0, 2 + rnd() * 5, size);
+  }
+  const speckles = ["#e2d8c4", "#faf6ea", "#d8ccb2"];
+  for (let i = 0; i < 240; i++) {
+    ctx.fillStyle = speckles[Math.floor(rnd() * speckles.length)];
+    const s = 1 + rnd() * 3;
     ctx.fillRect(rnd() * size, rnd() * size, s, s);
   }
   const tex = new THREE.CanvasTexture(c);
@@ -72,17 +145,19 @@ function makeCobbleTexture() {
   const c = document.createElement("canvas");
   c.width = size; c.height = size;
   const ctx = c.getContext("2d");
-  ctx.fillStyle = "#6e6257"; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#453d33"; ctx.fillRect(0, 0, size, size);
   let seed = 11;
   const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
   for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
-    const g = 130 + Math.floor(rnd() * 50);
+    const g = 140 + Math.floor(rnd() * 55);
     ctx.fillStyle = "rgb(" + g + "," + (g - 6) + "," + (g - 18) + ")";
     const off = (y % 2) * 16;
     ctx.fillRect(x * 32 + off - 16 + 2, y * 32 + 2, 28, 28);
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.fillRect(x * 32 + off - 16 + 2, y * 32 + 2, 28, 3);
   }
   for (let i = 0; i < 120; i++) {
-    ctx.fillStyle = rnd() < 0.5 ? "#7d7469" : "#5d5348";
+    ctx.fillStyle = rnd() < 0.5 ? "#8a8073" : "#5d5348";
     ctx.fillRect(rnd() * size, rnd() * size, 2, 2);
   }
   const tex = new THREE.CanvasTexture(c);
@@ -110,27 +185,47 @@ function makeSmokeTexture() {
 // Each part carries its own color; the merged mesh uses a single
 // vertex-colored material. Parts are built fresh (never cached) so
 // the merge can take ownership of their geometry.
-function partBox(list, w, h, d, x, y, z, color, rx = 0, ry = 0, rz = 0) {
-  list.push({ geo: new THREE.BoxGeometry(w, h, d), x, y, z, rx, ry, rz, color });
+function partBox(list, w, h, d, x, y, z, color, rx = 0, ry = 0, rz = 0, tex = null) {
+  list.push({ geo: new THREE.BoxGeometry(w, h, d), x, y, z, rx, ry, rz, color, tex });
   return list;
 }
-function partCyl(list, rTop, rBot, h, seg, x, y, z, color, rx = 0, ry = 0, rz = 0) {
-  list.push({ geo: new THREE.CylinderGeometry(rTop, rBot, h, seg), x, y, z, rx, ry, rz, color });
+function partCyl(list, rTop, rBot, h, seg, x, y, z, color, rx = 0, ry = 0, rz = 0, tex = null) {
+  list.push({ geo: new THREE.CylinderGeometry(rTop, rBot, h, seg), x, y, z, rx, ry, rz, color, tex });
   return list;
 }
 function prismGeometry(w, h, d) {
   // Triangular prism, ridge along z, apex centered in x. Flat shaded.
+  // UVs are per-face so the roof-tile texture runs in courses: on the
+  // two slopes u runs along the ridge and v runs eave-to-ridge; on the
+  // gable ends u runs across and v runs up.
   const hw = w / 2, hd = d / 2;
   const A = [-hw, 0, -hd], B = [hw, 0, -hd], C = [hw, 0, hd], D = [-hw, 0, hd], E = [0, h, -hd], F = [0, h, hd];
   const tris = [[A, D, F], [A, F, E], [B, E, F], [B, F, C], [A, E, B], [D, C, F]];
   const pos = new Float32Array(tris.flatMap((t) => t.flat()));
+  const uv = new Float32Array(tris.length * 3 * 2);
+  tris.forEach((t, ti) => {
+    t.forEach((p, vi) => {
+      let u, v;
+      if (ti < 4) {
+        // Slope: u along the ridge, v eave (0) to ridge (1).
+        u = (p[2] + hd) / d;
+        v = ti < 2 ? (p[0] + hw) / w : (hw - p[0]) / w;
+      } else {
+        u = (p[0] + hw) / w;
+        v = p[1] / h;
+      }
+      uv[(ti * 3 + vi) * 2] = u;
+      uv[(ti * 3 + vi) * 2 + 1] = v;
+    });
+  });
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
   g.computeVertexNormals();
   return g;
 }
-function partPrism(list, w, h, d, x, y, z, color, ry = 0) {
-  list.push({ geo: prismGeometry(w, h, d), x, y, z, rx: 0, ry, rz: 0, color });
+function partPrism(list, w, h, d, x, y, z, color, ry = 0, tex = null) {
+  list.push({ geo: prismGeometry(w, h, d), x, y, z, rx: 0, ry, rz: 0, color, tex });
   return list;
 }
 const _mergeMatrix = new THREE.Matrix4();
@@ -161,11 +256,14 @@ function mergeParts(list) {
   const pos = new Float32Array(total * 3);
   const nor = new Float32Array(total * 3);
   const col = new Float32Array(total * 3);
+  const uvs = new Float32Array(total * 2);
   let o = 0;
   for (const g of geos) {
     pos.set(g.attributes.position.array, o * 3);
     nor.set(g.attributes.normal.array, o * 3);
     col.set(g.attributes.color.array, o * 3);
+    const uvAttr = g.attributes.uv;
+    if (uvAttr) uvs.set(uvAttr.array, o * 2);
     o += g.attributes.position.count;
     g.dispose();
   }
@@ -173,14 +271,43 @@ function mergeParts(list) {
   out.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   out.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
   out.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  out.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   return out;
 }
 
+// Parts carrying the same tex key merge into one mesh each, so a
+// building is at most three body meshes (plain, roof tile, plaster).
+function mergePartsByTex(list) {
+  const groups = new Map();
+  for (const p of list) {
+    const key = p.tex || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return [...groups.entries()].map(([tex, parts]) => ({ tex, geo: mergeParts(parts) }));
+}
+
 const MAT_BODY = new THREE.MeshLambertMaterial({ vertexColors: true });
-const MAT_WINDOW = new THREE.MeshBasicMaterial({ color: 0xffca28 });
+const MAT_WINDOW = new THREE.MeshBasicMaterial({ color: 0xffd54f });
 const MAT_SNOW = new THREE.MeshLambertMaterial({ color: 0xf2f6f2 });
 const MAT_FLAME = new THREE.MeshBasicMaterial({ color: 0xff9800 });
 const MAT_LAMP = new THREE.MeshBasicMaterial({ color: 0xfff9c4 });
+// Textured materials are built lazily in the constructor: canvas
+// textures need `document`, which headless Node tests do not have.
+// Until then they stay null and textured parts fall back to MAT_BODY,
+// so the smoke test proves the same geometry builds either way.
+let MAT_ROOF = null;
+let MAT_WALL = null;
+function ensureTexMaterials() {
+  if (MAT_ROOF || typeof document === "undefined") return;
+  MAT_ROOF = new THREE.MeshLambertMaterial({ vertexColors: true, map: makeTileTexture() });
+  MAT_WALL = new THREE.MeshLambertMaterial({ vertexColors: true, map: makePlasterTexture() });
+}
+// Fake contact shadows: one shared unit plane and material, scaled
+// per building. No shadow maps (too costly on phones); this dark quad
+// is the grounding cue.
+const SHADOW_GEO = new THREE.PlaneGeometry(1, 1);
+const MAT_SHADOW = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false });
 
 // One timber house, parameterized: walls, timber frame, pitched or
 // flat roof, chimney, door, windows, shutters and flower boxes at
@@ -197,7 +324,7 @@ function timberHouse(o) {
   const flat = o.flat ?? era >= 3;
   partBox(body, o.w + 0.3, 0.18, o.d + 0.3, 0, 0.09, 0, 0x8d8d8d);
   if (era >= 1) partBox(body, o.w + 0.1, 0.3, o.d + 0.1, 0, 0.15, 0, 0x7a7a7a);
-  partBox(body, o.w, o.wallH, o.d, 0, o.wallH / 2 + 0.18, 0, pal.wall);
+  partBox(body, o.w, o.wallH, o.d, 0, o.wallH / 2 + 0.18, 0, pal.wall, 0, 0, 0, "wall");
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     partBox(body, 0.12, o.wallH, 0.12, sx * (hw - 0.06), o.wallH / 2 + 0.18, sz * (hd - 0.06), pal.timber);
   }
@@ -209,22 +336,32 @@ function timberHouse(o) {
   const wallTop = 0.18 + o.wallH;
   let chimneyTop = null;
   if (flat) {
-    partBox(body, o.w + 0.2, 0.15, o.d + 0.2, 0, wallTop + 0.07, 0, pal.roof);
+    partBox(body, o.w + 0.2, 0.15, o.d + 0.2, 0, wallTop + 0.07, 0, pal.roof, 0, 0, 0, "roof");
     for (const sz of [-1, 1]) partBox(body, o.w + 0.2, 0.22, 0.08, 0, wallTop + 0.2, sz * (hd + 0.06), pal.trim);
     for (const sx of [-1, 1]) partBox(body, 0.08, 0.22, o.d + 0.2, sx * (hw + 0.06), wallTop + 0.2, 0, pal.trim);
     partBox(win, o.w * 0.7, 0.3, 0.06, 0, wallTop - 0.2, hd + 0.03, 0xffffff);
-    partBox(snow, o.w + 0.1, 0.08, o.d + 0.1, 0, wallTop + 0.18, 0, 0xffffff);
+    // Snow dusting: a thin inset cap, never edge to edge, so the
+    // roof color reads through in winter.
+    partBox(snow, o.w * 0.62, 0.04, o.d * 0.62, 0, wallTop + 0.17, 0, 0xffffff);
+    partBox(snow, o.w * 0.3, 0.03, o.d * 0.3, o.w * 0.18, wallTop + 0.17, -o.d * 0.15, 0xffffff);
   } else {
-    partPrism(body, o.w + 0.3, o.roofH, o.d + 0.3, 0, wallTop, 0, pal.roof);
+    partPrism(body, o.w + 0.3, o.roofH, o.d + 0.3, 0, wallTop, 0, pal.roof, 0, "roof");
     partBox(body, 0.12, 0.1, o.d + 0.34, 0, wallTop + o.roofH + 0.02, 0, pal.timber);
-    // Snow slabs lying on the two roof slopes, winter only.
+    // Snow dusting, winter only: thin slabs hugging the ridge plus
+    // one patch lower down each slope. The lower slope stays bare so
+    // the red tile shows through instead of a full white blanket.
     const hw2 = (o.w + 0.3) / 2;
     const slopeLen = Math.hypot(hw2, o.roofH) + 0.1;
     const a = Math.atan2(o.roofH, hw2);
     const len = Math.hypot(hw2, o.roofH);
     const nx = o.roofH / len, ny = hw2 / len;
-    partBox(snow, slopeLen, 0.06, o.d + 0.28, hw2 / 2 + nx * 0.05, wallTop + o.roofH / 2 + ny * 0.05, 0, 0xffffff, 0, 0, Math.PI - a);
-    partBox(snow, slopeLen, 0.06, o.d + 0.28, -hw2 / 2 - nx * 0.05, wallTop + o.roofH / 2 + ny * 0.05, 0, 0xffffff, 0, 0, a);
+    const ridgeLen = slopeLen * 0.55;
+    const rcx = hw2 * 0.275, rcy = wallTop + o.roofH * 0.725;
+    partBox(snow, ridgeLen, 0.035, o.d + 0.28, rcx + nx * 0.04, rcy + ny * 0.04, 0, 0xffffff, 0, 0, Math.PI - a);
+    partBox(snow, ridgeLen, 0.035, o.d + 0.28, -rcx - nx * 0.04, rcy + ny * 0.04, 0, 0xffffff, 0, 0, a);
+    const pcx = hw2 * 0.55, pcy = wallTop + o.roofH * 0.45;
+    partBox(snow, slopeLen * 0.22, 0.03, o.d * 0.3, pcx + nx * 0.04, pcy + ny * 0.04, o.d * 0.18, 0xffffff, 0, 0, Math.PI - a);
+    partBox(snow, slopeLen * 0.22, 0.03, o.d * 0.3, -pcx - nx * 0.04, pcy + ny * 0.04, -o.d * 0.18, 0xffffff, 0, 0, a);
   }
   for (const w of o.windows || []) {
     partBox(win, 0.32, 0.34, 0.06, w.x, w.y, hd + 0.03, 0xffffff);
@@ -266,13 +403,13 @@ export class Renderer {
     this._m = new THREE.Matrix4();
     this._c = new THREE.Color();
 
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x4a7c4a, 0.95);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x3d6b35, 0.85);
     this.scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(0xfff2cc, 1.4);
+    this.sun = new THREE.DirectionalLight(0xfff2cc, 1.55);
     this.sun.position.set(30, 40, 10);
     this.scene.add(this.sun);
     this.hemi = hemi;
-    this.nightLight = new THREE.PointLight(0xffa040, 0, 20, 1.2);
+    this.nightLight = new THREE.PointLight(0xffa040, 0, 26, 1.2);
     this.nightLight.position.set(SIZE / 2, 4, SIZE / 2);
     this.scene.add(this.nightLight);
     this._nightMeshes = [];
@@ -385,7 +522,11 @@ export class Renderer {
       this.clouds.add(cloud);
     }
     this.scene.add(this.clouds);
-    this.groundTex = makeSpeckleTexture("#7da05c", ["#6b8f4e", "#8fb069", "#5d9e4a", "#a8b878"]);
+    // Procedural textures, built once here and shared: roof tile,
+    // plaster, grass, cobble. No per-frame work, no network fetches.
+    ensureTexMaterials();
+    this.groundTex = makeGrassTexture();
+    this.groundTex.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     this.cobbleTex = makeCobbleTexture();
 
     this._buildStatic = null;
@@ -402,14 +543,17 @@ export class Renderer {
     this.camera.updateProjectionMatrix();
   }
 
-  _cellColor(cell, season) {
+  _cellColor(cell, season, x = 0, z = 0) {
     if (cell.water) return new THREE.Color(0x2f7fd6);
     if (cell.farm) return new THREE.Color(season === "winter" ? 0x5d4033 : 0x6b4a2b);
     const t = cell.h;
     if (t > 0.66) return new THREE.Color(0x8d8d8d);
     const base = SEASON_GRASS[season || "spring"].clone();
-    if (t > 0.58) base.multiplyScalar(1.06);
-    else base.multiplyScalar(0.88);
+    // Small deterministic per-cell jitter instead of a hard height
+    // step, so the ground reads as one meadow, not a checkerboard.
+    const hash = ((x * 31 + z * 17) % 100) / 100;
+    if (t > 0.58) base.multiplyScalar(1.02 + hash * 0.08);
+    else base.multiplyScalar(0.94 + hash * 0.08);
     return base;
   }
 
@@ -423,7 +567,7 @@ export class Renderer {
     let i = 0;
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
       const cell = grid[x][z];
-      col.copy(this._cellColor(cell, season));
+      col.copy(this._cellColor(cell, season, x, z));
       if (cell.tree) col.multiplyScalar(0.85);
       this.groundMesh.setColorAt(i, col);
       i++;
@@ -431,11 +575,27 @@ export class Renderer {
     if (this.groundMesh.instanceColor) this.groundMesh.instanceColor.needsUpdate = true;
     if (this.canopyMesh) {
       for (let k = 0; k < this._treeCells.length; k++) {
-        this.canopyMesh.setColorAt(k, SEASON_CANOPY[season]);
-        this.canopyTopMesh.setColorAt(k, SEASON_CANOPY_TOP[season]);
+        const j = this._treeJitter ? this._treeJitter[k] : 1;
+        this.canopyMesh.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(j));
+        this.canopyTopMesh.setColorAt(k, this._c.copy(SEASON_CANOPY_TOP[season]).multiplyScalar(j));
       }
       if (this.canopyMesh.instanceColor) this.canopyMesh.instanceColor.needsUpdate = true;
       if (this.canopyTopMesh.instanceColor) this.canopyTopMesh.instanceColor.needsUpdate = true;
+    }
+    // Grass tufts follow the season; flowers and bushes hide in
+    // winter, bushes take the canopy color.
+    if (this.tuftMesh) {
+      for (let k = 0; k < this._tuftJitter.length; k++) {
+        this.tuftMesh.setColorAt(k, this._c.copy(SEASON_GRASS[season]).multiplyScalar(0.78 + this._tuftJitter[k] * 0.3));
+      }
+      if (this.tuftMesh.instanceColor) this.tuftMesh.instanceColor.needsUpdate = true;
+    }
+    if (this.flowerMesh) this.flowerMesh.visible = season !== "winter";
+    if (this.bushMesh) {
+      for (let k = 0; k < this._bushJitter.length; k++) {
+        this.bushMesh.setColorAt(k, this._c.copy(SEASON_CANOPY[season]).multiplyScalar(0.85 + this._bushJitter[k] * 0.25));
+      }
+      if (this.bushMesh.instanceColor) this.bushMesh.instanceColor.needsUpdate = true;
     }
     const snowy = season === "winter";
     if (this.buildingsGroup) {
@@ -457,7 +617,7 @@ export class Renderer {
       const h = cell.water ? -0.15 : cell.h * 0.9;
       m.makeTranslation(x + 0.5, h - 0.25, z + 0.5);
       ground.setMatrixAt(i, m);
-      col.copy(this._cellColor(cell, "spring"));
+      col.copy(this._cellColor(cell, "spring", x, z));
       if (cell.tree) col.multiplyScalar(0.85);
       ground.setColorAt(i, col);
       i++;
@@ -479,23 +639,77 @@ export class Renderer {
       this.scene.add(this.waterMesh); group.push(this.waterMesh);
     }
 
-    // Trees: trunk + canopy, instanced, slight size variance per tree.
+    // Trees: trunk + canopy, instanced, with real size variety and
+    // per-tree canopy jitter (reapplied on season change).
     const treeCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].tree) treeCells.push([x, z]);
     this._treeCells = treeCells;
+    this._treeJitter = treeCells.map(([x, z]) => 0.88 + (((x * 13 + z * 7) % 100) / 100) * 0.24);
     if (treeCells.length) {
       const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.13, 0.18, 0.8, 6), new THREE.MeshLambertMaterial({ color: 0x6b4423 }), treeCells.length);
       const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.85, 0), new THREE.MeshLambertMaterial({ color: 0x2e6b2e }), treeCells.length);
       const canopyTop = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshLambertMaterial({ color: 0x3d8a3d }), treeCells.length);
       treeCells.forEach(([x, z], idx) => {
-        const s = 0.85 + (((x * 7 + z * 13) % 10) / 10) * 0.3;
-        m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.65 * s, z + 0.5); trunk.setMatrixAt(idx, m);
+        const s = 0.7 + (((x * 7 + z * 13) % 10) / 10) * 0.7;
+        m.makeScale(s, s * (0.9 + (((x * 3 + z * 11) % 10) / 10) * 0.3), s); m.setPosition(x + 0.5, 0.65 * s, z + 0.5); trunk.setMatrixAt(idx, m);
         m.makeScale(s, s, s); m.setPosition(x + 0.5, 1.7 * s, z + 0.5); canopy.setMatrixAt(idx, m);
         m.makeScale(s, s, s); m.setPosition(x + 0.5, 2.35 * s, z + 0.5); canopyTop.setMatrixAt(idx, m);
+        canopy.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(this._treeJitter[idx]));
+        canopyTop.setColorAt(idx, this._c.copy(SEASON_CANOPY_TOP.spring).multiplyScalar(this._treeJitter[idx]));
       });
+      if (canopy.instanceColor) canopy.instanceColor.needsUpdate = true;
+      if (canopyTop.instanceColor) canopyTop.instanceColor.needsUpdate = true;
       this.scene.add(trunk, canopy, canopyTop); group.push(trunk, canopy, canopyTop);
       this.canopyMesh = canopy; this.canopyTopMesh = canopyTop;
     } else { this.canopyMesh = null; this.canopyTopMesh = null; }
+
+    // Ground life: grass tufts, flowers, and bushes on free ground,
+    // all instanced and placed by a deterministic cell hash so the
+    // dressing is identical on every load. Nothing here is per-frame.
+    const freeCells = [];
+    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+      const cell = grid[x][z];
+      if (!cell.water && !cell.farm && !cell.tree && !cell.road && !cell.building && cell.stone <= 0 && cell.ore <= 0 && cell.h <= 0.66) freeCells.push([x, z]);
+    }
+    const tuftSpots = [];
+    const flowerSpots = [];
+    const bushSpots = [];
+    for (const [x, z] of freeCells) {
+      const hash = ((x * 31 + z * 17) % 100) / 100;
+      const h2 = ((x * 7 + z * 41) % 100) / 100;
+      tuftSpots.push([x + 0.25 + h2 * 0.3, z + 0.3 + hash * 0.4, 0.8 + hash * 0.5]);
+      tuftSpots.push([x + 0.6 - h2 * 0.3, z + 0.65 - hash * 0.3, 0.7 + h2 * 0.5]);
+      if (hash < 0.1) flowerSpots.push([x + 0.5, z + 0.5, hash]);
+      else if (hash < 0.17) bushSpots.push([x + 0.5, z + 0.5, hash]);
+    }
+    this._tuftJitter = tuftSpots.map((s, i) => ((i * 37) % 100) / 100);
+    this.tuftMesh = new THREE.InstancedMesh(new THREE.ConeGeometry(0.09, 0.42, 4), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, tuftSpots.length));
+    tuftSpots.forEach(([px, pz, s], idx) => {
+      m.makeScale(s, s, s); m.setPosition(px, 0.2 * s + 0.02, pz);
+      this.tuftMesh.setMatrixAt(idx, m);
+      this.tuftMesh.setColorAt(idx, this._c.copy(SEASON_GRASS.spring).multiplyScalar(0.78 + this._tuftJitter[idx] * 0.3));
+    });
+    if (this.tuftMesh.instanceColor) this.tuftMesh.instanceColor.needsUpdate = true;
+    this.scene.add(this.tuftMesh); group.push(this.tuftMesh);
+    const FLOWER_COLORS = [0xe53935, 0xffd54f, 0xf8f8f8, 0xab47bc];
+    this.flowerMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(0.1, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, flowerSpots.length));
+    flowerSpots.forEach(([px, pz, hash], idx) => {
+      m.makeScale(1, 1, 1); m.setPosition(px, 0.2, pz);
+      this.flowerMesh.setMatrixAt(idx, m);
+      this.flowerMesh.setColorAt(idx, this._c.setHex(FLOWER_COLORS[Math.floor(hash * 100) % FLOWER_COLORS.length]));
+    });
+    if (this.flowerMesh.instanceColor) this.flowerMesh.instanceColor.needsUpdate = true;
+    this.scene.add(this.flowerMesh); group.push(this.flowerMesh);
+    this._bushJitter = bushSpots.map((s, i) => ((i * 53) % 100) / 100);
+    this.bushMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, bushSpots.length));
+    bushSpots.forEach(([px, pz, hash], idx) => {
+      const s = 0.7 + hash * 5;
+      m.makeScale(s, s * 0.8, s); m.setPosition(px, 0.32, pz);
+      this.bushMesh.setMatrixAt(idx, m);
+      this.bushMesh.setColorAt(idx, this._c.copy(SEASON_CANOPY.spring).multiplyScalar(0.85 + this._bushJitter[idx] * 0.25));
+    });
+    if (this.bushMesh.instanceColor) this.bushMesh.instanceColor.needsUpdate = true;
+    this.scene.add(this.bushMesh); group.push(this.bushMesh);
     this._buildStatic = group;
     this._stoneCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].stone > 0 || grid[x][z].ore > 0) this._stoneCells.push([x, z]);
@@ -505,11 +719,11 @@ export class Renderer {
     });
     if (this.stoneMesh.instanceColor) this.stoneMesh.instanceColor.needsUpdate = true;
     this.scene.add(this.stoneMesh);
-    // Crops: three plants per farm cell, in a row, so fields read as
-    // rows rather than single blocks.
+    // Crops: five plants per farm cell, in a row, so fields read as
+    // dense rows rather than single blocks.
     this._farmCells = [];
     for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) this._farmCells.push([x, z]);
-    this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length * 3));
+    this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length * 5));
     this.scene.add(this.cropMesh);
     this.buildingsGroup = new THREE.Group();
     this.scene.add(this.buildingsGroup);
@@ -520,7 +734,7 @@ export class Renderer {
   }
 
   _clearGroup(group) {
-    group.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+    group.traverse((o) => { if (o.geometry && o.geometry !== SHADOW_GEO) o.geometry.dispose(); });
     group.clear();
   }
 
@@ -528,16 +742,18 @@ export class Renderer {
   // snow caps (winter only), plus round parts as shared-geometry
   // meshes where a box will not do. Era stage picks the palette and
   // the roof shape; tech level adds workshop detail.
-  _buildingMesh(type, x, z, techLevel = 0, era = 0) {
+  _buildingMesh(type, x, z, techLevel = 0, era = 0, groundY = 0.45) {
     const g = new THREE.Group();
     g.position.set(x + 0.5, 0.3, z + 0.5);
     const pal = ERA_PALETTE[era] || ERA_PALETTE[0];
     const flat = era >= 3;
     let chimneyTop = null;
-    const finish = (body, win, snow, extra) => {
+    const finish = (body, win, snow, extra, footprint) => {
       if (body.length) {
-        const mesh = new THREE.Mesh(mergeParts(body), MAT_BODY);
-        g.add(mesh);
+        for (const { tex, geo } of mergePartsByTex(body)) {
+          const mat = tex === "roof" ? (MAT_ROOF || MAT_BODY) : tex === "wall" ? (MAT_WALL || MAT_BODY) : MAT_BODY;
+          g.add(new THREE.Mesh(geo, mat));
+        }
       }
       if (win.length) {
         const wmesh = new THREE.Mesh(mergeParts(win), MAT_WINDOW);
@@ -552,13 +768,34 @@ export class Renderer {
         g.add(smesh);
       }
       if (extra) for (const e of extra) g.add(e);
-      if (chimneyTop) this._chimneys.push([x + 0.5 + chimneyTop[0], 0.3 + chimneyTop[1], z + 0.5 + chimneyTop[2]]);
+      if (chimneyTop) {
+        this._chimneys.push([x + 0.5 + chimneyTop[0], 0.3 + chimneyTop[1], z + 0.5 + chimneyTop[2]]);
+        // Fire glowing on the chimney top at dusk and night, as in
+        // the mockup. A night mesh: hidden by day, lit after dark.
+        const flame = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.26, 6), MAT_FLAME);
+        flame.position.set(chimneyTop[0], chimneyTop[1] - 0.05, chimneyTop[2]);
+        flame.userData.glow = true;
+        g.add(flame);
+        this._nightMeshes.push(flame);
+      }
+      if (footprint) {
+        // Fake contact shadow: a dark quad just above the ground,
+        // wider than the footprint, so the building sits on the
+        // ground instead of floating. No shadow maps on phones.
+        const shadow = new THREE.Mesh(SHADOW_GEO, MAT_SHADOW);
+        shadow.rotation.x = -Math.PI / 2;
+        shadow.scale.set(footprint[0] + 0.7, footprint[1] + 0.7, 1);
+        shadow.position.y = groundY + 0.02 - 0.3;
+        shadow.renderOrder = 1;
+        shadow.userData.isShadow = true;
+        g.add(shadow);
+      }
       return g;
     };
     const house = (o) => {
       const r = timberHouse({ ...o, pal, era, flat: o.flat ?? flat });
       chimneyTop = r.chimneyTop;
-      return finish(r.body, r.win, r.snow, o.extra);
+      return finish(r.body, r.win, r.snow, o.extra, [o.w, o.d]);
     };
 
     if (type === "towncenter") {
@@ -570,15 +807,15 @@ export class Renderer {
       const extra = [];
       const banner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
       banner.position.set(0, 1.0, 1.03); extra.push(banner);
-      return finish(body, r.win, r.snow, extra);
+      return finish(body, r.win, r.snow, extra, [2.4, 2.0]);
     } else if (type === "granary") {
       const body = [], win = [], snow = [];
       for (const sx of [-0.7, 0.7]) for (const sz of [-0.55, 0.55]) partBox(body, 0.16, 0.5, 0.16, sx, 0.25, sz, pal.timber);
       partBox(body, 1.9, 1.1, 1.5, 0, 1.05, 0, pal.wall);
       partBox(body, 1.9, 0.12, 1.5, 0, 1.66, 0, pal.timber);
-      partPrism(body, 2.2, 0.8, 1.8, 0, 1.72, 0, 0xd7a94e);
+      partPrism(body, 2.2, 0.8, 1.8, 0, 1.72, 0, 0xd7a94e, 0, "roof");
       partBox(body, 0.5, 0.7, 0.06, 0, 0.85, 0.78, 0x3e2723);
-      return finish(body, win, snow);
+      return finish(body, win, snow, null, [1.9, 1.5]);
     } else if (type === "marker") {
       const body = [];
       partCyl(body, 0.09, 0.11, 1.3, 6, 0, 0.65, 0, pal.timber);
@@ -589,7 +826,7 @@ export class Renderer {
       partBox(body, 1.6, 0.25, 1.6, 0, 0.12, 0, pal.timber);
       partBox(body, 0.55, 0.55, 0.55, -0.4, 0.5, 0, 0xa1887f);
       partBox(body, 0.55, 0.55, 0.55, 0.4, 0.5, 0, 0xd7a94e);
-      return finish(body, [], []);
+      return finish(body, [], [], null, [1.6, 1.6]);
     } else if (type === "altar") {
       const body = [];
       partBox(body, 1.2, 0.3, 1.2, 0, 0.15, 0, 0x9e9e9e);
@@ -598,7 +835,7 @@ export class Renderer {
       const extra = [];
       const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), MAT_FLAME);
       flame.position.y = 1.75; extra.push(flame);
-      return finish(body, [], [], extra);
+      return finish(body, [], [], extra, [1.2, 1.2]);
     } else if (type === "hut") {
       return house({ w: 1.7, d: 1.7, wallH: 1.0, roofH: 0.9, chimney: true, windows: [{ x: 0.55, y: 0.75 }] });
     } else if (type === "longhouse") {
@@ -608,8 +845,8 @@ export class Renderer {
       partCyl(body, 0.55, 0.6, 0.7, 8, 0, 0.35, 0, 0x9e9e9e);
       partCyl(body, 0.42, 0.42, 0.1, 8, 0, 0.65, 0, 0x29b6f6);
       for (const sx of [-0.5, 0.5]) partBox(body, 0.12, 1.1, 0.12, sx, 0.55, 0, pal.timber);
-      partPrism(body, 1.5, 0.5, 0.9, 0, 1.1, 0, pal.roof);
-      return finish(body, [], []);
+      partPrism(body, 1.5, 0.5, 0.9, 0, 1.1, 0, pal.roof, 0, "roof");
+      return finish(body, [], [], null, [1.2, 1.2]);
     } else if (type === "workshop") {
       const r = timberHouse({ pal, era, flat, w: 2.0, d: 1.6, wallH: 1.1, roofH: 0.8, chimney: true, doorColor: 0x3e2723, windows: [{ x: -0.6, y: 0.8 }] });
       chimneyTop = r.chimneyTop;
@@ -620,7 +857,7 @@ export class Renderer {
         partBox(body, 0.5, 0.35, 0.4, 0.6, 0.18, 0.95, 0x78909c);
       }
       if (techLevel >= 2) partBox(body, 0.6, 0.3, 0.28, 0.1, 0.15, 0.95, 0x607d8b);
-      return finish(body, r.win, r.snow);
+      return finish(body, r.win, r.snow, null, [2.0, 1.6]);
     } else if (type === "shrine") {
       const body = [];
       partBox(body, 1.3, 0.3, 1.3, 0, 0.15, 0, 0x9e9e9e);
@@ -629,38 +866,38 @@ export class Renderer {
       const extra = [];
       const flame = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.35, 6), new THREE.MeshBasicMaterial({ color: 0xfff176 }));
       flame.position.y = 2.0; extra.push(flame);
-      return finish(body, [], [], extra);
+      return finish(body, [], [], extra, [1.3, 1.3]);
     } else if (type === "greathall") {
       const r = timberHouse({ pal, era, flat, w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }] });
       chimneyTop = r.chimneyTop;
       const body = r.body;
       partBox(body, 0.6, 1.6, 0.6, 1.4, 0.8, -0.7, 0x8a8a8a);
       partBox(body, 0.7, 0.9, 0.06, 0, 1.2, 1.05, 0xb71c1c);
-      return finish(body, r.win, r.snow);
+      return finish(body, r.win, r.snow, null, [3.2, 2.0]);
     } else if (type === "farmhouse") {
       const r = timberHouse({ pal, era, flat, w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }] });
       const body = r.body;
       partCyl(body, 0.3, 0.3, 1.3, 8, 1.05, 0.65, -0.4, 0x9e9e9e);
-      return finish(body, r.win, r.snow);
+      return finish(body, r.win, r.snow, null, [1.8, 1.5]);
     } else if (type === "school") {
       const body = [], win = [], snow = [];
       const wallCol = flat ? 0xe8e8e8 : 0xefebe9;
       const roofCol = flat ? pal.roof : 0x1565c0;
-      partBox(body, 2.2, 1.2, 1.7, 0, 0.78, 0, wallCol);
+      partBox(body, 2.2, 1.2, 1.7, 0, 0.78, 0, wallCol, 0, 0, 0, "wall");
       for (const sx of [-1, 1]) for (const sz of [-1, 1]) partBox(body, 0.12, 1.2, 0.12, sx * 1.04, 0.78, sz * 0.79, pal.timber);
       partBox(body, 0.5, 0.7, 0.06, 0, 0.53, 0.88, 0x3e2723);
       if (flat) {
-        partBox(body, 2.4, 0.15, 1.9, 0, 1.53, 0, roofCol);
+        partBox(body, 2.4, 0.15, 1.9, 0, 1.53, 0, roofCol, 0, 0, 0, "roof");
         partBox(win, 1.5, 0.3, 0.06, 0, 1.2, 0.88, 0xffffff);
-        partBox(snow, 2.3, 0.08, 1.8, 0, 1.64, 0, 0xffffff);
+        partBox(snow, 1.5, 0.04, 1.15, 0, 1.64, 0, 0xffffff);
       } else {
-        partPrism(body, 2.5, 0.9, 2.0, 0, 1.38, 0, roofCol);
+        partPrism(body, 2.5, 0.9, 2.0, 0, 1.38, 0, roofCol, 0, "roof");
         partBox(body, 0.8, 0.4, 0.05, 0, 1.15, 0.88, 0xffffff);
       }
       partBox(body, 0.14, 1.2, 0.14, 1.25, 0.78, 0.6, pal.timber);
       partBox(body, 0.3, 0.3, 0.3, 1.25, 1.53, 0.6, 0xffd700);
       for (const w of [{ x: -0.7, y: 0.8 }, { x: 0.7, y: 0.8 }]) partBox(win, 0.32, 0.34, 0.06, w.x, w.y, 0.88, 0xffffff);
-      return finish(body, win, snow);
+      return finish(body, win, snow, null, [2.2, 1.7]);
     } else if (type === "healer") {
       const r = timberHouse({ pal, era, flat, w: 1.7, d: 1.6, wallH: 1.0, roofH: 0.9, chimney: false, windows: [{ x: 0.55, y: 0.7 }] });
       const body = r.body;
@@ -668,12 +905,12 @@ export class Renderer {
         // Green roof replaces the red one: rebuild is wasteful, so the
         // prism is added here only when the house helper used the era
         // roof; instead recolor by adding a green prism slightly proud.
-        partPrism(body, 2.02, 0.92, 1.92, 0, 1.18, 0, 0x2e7d32);
+        partPrism(body, 2.02, 0.92, 1.92, 0, 1.18, 0, 0x2e7d32, 0, "roof");
       }
       partBox(body, 0.55, 0.55, 0.05, 0, 1.25, 0.83, 0xffffff);
       partBox(body, 0.12, 0.4, 0.02, 0, 1.25, 0.87, 0xc62828);
       partBox(body, 0.4, 0.12, 0.02, 0, 1.25, 0.87, 0xc62828);
-      return finish(body, r.win, r.snow);
+      return finish(body, r.win, r.snow, null, [1.7, 1.6]);
     } else if (type === "wall") {
       const body = [];
       if (era === 0) {
@@ -694,7 +931,7 @@ export class Renderer {
         partBox(body, 1.1, 0.14, 1.1, 0, 1.65, 0, pal.timber);
         partBox(body, 1.1, 0.3, 0.08, 0, 1.85, 0.51, pal.timber);
         partBox(body, 1.1, 0.3, 0.08, 0, 1.85, -0.51, pal.timber);
-        partPrism(body, 1.4, 0.7, 1.4, 0, 2.0, 0, pal.roof);
+        partPrism(body, 1.4, 0.7, 1.4, 0, 2.0, 0, pal.roof, 0, "roof");
         partCyl(body, 0.05, 0.05, 0.8, 5, 0, 2.9, 0, pal.timber);
         partBox(body, 0.45, 0.28, 0.04, 0.25, 2.85, 0, 0xb71c1c);
       } else {
@@ -712,7 +949,7 @@ export class Renderer {
     // renders invisible.
     const body = [];
     partBox(body, 1.4, 1.0, 1.4, 0, 0.5, 0, pal.wall);
-    return finish(body, [], []);
+    return finish(body, [], [], null, [1.4, 1.4]);
   }
 
   _syncBuildings(state, grid) {
@@ -731,8 +968,10 @@ export class Renderer {
     this._nightMeshes = [];
     this._chimneys = [];
     const safeMesh = (type, x, z) => {
-      try { return this._buildingMesh(type, x, z, techLevel, era); }
-      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era); } catch (e2) { return null; } }
+      const cell = grid && grid[x] && grid[x][z];
+      const groundY = cell ? cell.h * 0.9 : 0.45;
+      try { return this._buildingMesh(type, x, z, techLevel, era, groundY); }
+      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY); } catch (e2) { return null; } }
     };
     const built = [];
     for (const b of state.buildings) { const m = safeMesh(b.type, b.x, b.z); if (m) built.push(m); }
@@ -812,6 +1051,25 @@ export class Renderer {
       }
     }
     if (this._chimneys.length > 24) this._chimneys.length = 24;
+    // Crates, a barrel, and a short fence run beside some houses, so
+    // the yards read lived-in. Only where the next cell over is free.
+    for (const b of state.buildings) {
+      if (b.type !== "hut" && b.type !== "longhouse" && b.type !== "farmhouse") continue;
+      if ((b.x * 5 + b.z * 11) % 4 !== 0) continue;
+      const nx = b.x + 1, nz = b.z + 1;
+      if (nx < 0 || nz < 0 || nx >= SIZE || nz >= SIZE) continue;
+      const cell = grid[nx][nz];
+      if (!cell || cell.building || cell.water || cell.farm || cell.tree) continue;
+      const parts = [];
+      partBox(parts, 0.42, 0.42, 0.42, -0.2, 0.21, 0, 0xa1887f);
+      partBox(parts, 0.42, 0.42, 0.42, -0.2, 0.63, 0, 0x8d6e63);
+      partCyl(parts, 0.22, 0.22, 0.52, 8, 0.35, 0.26, 0.1, 0x6d4c41);
+      for (let i = 0; i < 3; i++) partBox(parts, 0.12, 0.7, 0.12, -0.55 + i * 0.55, 0.35, 0.45, 0x7a5230);
+      partBox(parts, 1.25, 0.08, 0.08, 0, 0.55, 0.45, 0x5d4037);
+      const yard = new THREE.Mesh(mergeParts(parts), MAT_BODY);
+      yard.position.set(nx + 0.5, 0.3, nz + 0.5);
+      this.dressingGroup.add(yard);
+    }
     this._wasNight = null;
     this._buildSignature = sig;
   }
@@ -946,13 +1204,13 @@ export class Renderer {
       if (cells.length !== this._farmCells.length) {
         this._farmCells = cells;
         if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.geometry.dispose(); }
-        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length * 3));
+        this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, cells.length * 5));
         this.scene.add(this.cropMesh);
       }
       if (roadCells.length !== this._roadCells.length) {
         this._roadCells = roadCells;
         if (this._roadMesh) { this.scene.remove(this._roadMesh); this._roadMesh.geometry.dispose(); }
-        this._roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xb09a6d }), Math.max(1, roadCells.length));
+        this._roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xc9b18a }), Math.max(1, roadCells.length));
         const rm = new THREE.Matrix4();
         roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this._roadMesh.setMatrixAt(idx, rm); });
         this.scene.add(this._roadMesh);
@@ -989,11 +1247,11 @@ export class Renderer {
       const cell = grid[x][z];
       const stage = cell.crop < 0 ? 0 : cell.crop;
       const hScale = 0.3 + stage * 0.28;
-      for (let j = 0; j < 3; j++) {
-        const px = x + 0.5 + (j - 1) * 0.28;
+      for (let j = 0; j < 5; j++) {
+        const px = x + 0.5 + (j - 2) * 0.2;
         m.makeScale(1, hScale, 1); m.setPosition(px, 0.05 + 0.25 * hScale, z + 0.5);
-        this.cropMesh.setMatrixAt(idx * 3 + j, m);
-        this.cropMesh.setColorAt(idx * 3 + j, this._c.setHex(winterCrops ? 0x8d6e63 : CROP_COLORS[stage]));
+        this.cropMesh.setMatrixAt(idx * 5 + j, m);
+        this.cropMesh.setColorAt(idx * 5 + j, this._c.setHex(winterCrops ? 0x8d6e63 : CROP_COLORS[stage]));
       }
     });
     this.cropMesh.instanceMatrix.needsUpdate = true;
@@ -1098,14 +1356,18 @@ export class Renderer {
     const t = state.time;
     const phase = phaseOf(t);
     const isNight = phase === "night";
+    // Windows, torches, and chimney fires glow from dusk through
+    // dawn, not only at dead of night: the warm light against the
+    // dark is the mockup's whole atmosphere.
+    const glowOn = isNight || phase === "dawn" || phase === "dusk";
     const dayFactor = Math.sin(t * Math.PI * 2 - Math.PI / 2) * 0.5 + 0.5;
-    let sunI = 0.18 + dayFactor * 1.25;
-    let hemiI = 0.22 + dayFactor * 0.7;
-    let skyL = 0.14 + dayFactor * 0.5;
-    let skyS = 0.6;
-    let skyH = 0.58;
-    if (phase === "dawn" || phase === "dusk") { skyH = 0.07; skyS = 0.7; skyL = 0.42; }
-    if (isNight) { skyH = 0.62; skyS = 0.45; skyL = 0.07; }
+    let sunI = 0.22 + dayFactor * 1.35;
+    let hemiI = 0.2 + dayFactor * 0.65;
+    let skyL = 0.12 + dayFactor * 0.48;
+    let skyS = 0.62;
+    let skyH = 0.59;
+    if (phase === "dawn" || phase === "dusk") { skyH = 0.07; skyS = 0.7; skyL = 0.4; }
+    if (isNight) { skyH = 0.62; skyS = 0.5; skyL = 0.06; }
     if (wkind === "storm") { sunI *= 0.4; hemiI *= 0.65; skyL -= 0.12; skyS = 0.35; }
     else if (wkind === "rain") { sunI *= 0.65; hemiI *= 0.85; skyL -= 0.06; skyS = 0.4; }
     else if (wkind === "snow") { skyL += 0.08; skyS = 0.3; }
@@ -1115,16 +1377,16 @@ export class Renderer {
     const sunAngle = t * Math.PI * 2;
     this.sun.position.set(Math.cos(sunAngle) * 40, Math.sin(sunAngle) * 35 + 6, 10);
     this.hemi.intensity = Math.max(0.12, hemiI);
-    this._skyColor.setHSL(skyH, skyS, Math.max(0.05, Math.min(0.68, skyL)));
+    this._skyColor.setHSL(skyH, skyS, Math.max(0.05, Math.min(0.62, skyL)));
     this.scene.background = this._skyColor;
     this.scene.fog.color.copy(this._skyColor);
-    if (wkind === "storm") { this.scene.fog.near = 30; this.scene.fog.far = 60; }
-    else if (wkind === "rain" || wkind === "snow") { this.scene.fog.near = 40; this.scene.fog.far = 75; }
-    else { this.scene.fog.near = 55; this.scene.fog.far = 95; }
-    if (isNight !== this._wasNight) {
-      this._wasNight = isNight;
-      this.nightLight.intensity = isNight ? 1.4 : 0;
-      for (const mesh of this._nightMeshes) mesh.visible = isNight;
+    if (wkind === "storm") { this.scene.fog.near = 25; this.scene.fog.far = 55; }
+    else if (wkind === "rain" || wkind === "snow") { this.scene.fog.near = 35; this.scene.fog.far = 70; }
+    else { this.scene.fog.near = 45; this.scene.fog.far = 85; }
+    if (glowOn !== this._wasNight) {
+      this._wasNight = glowOn;
+      this.nightLight.intensity = isNight ? 1.8 : glowOn ? 0.8 : 0;
+      for (const mesh of this._nightMeshes) mesh.visible = glowOn;
     }
     const celebrating = !!(state.celebration && state.elapsed < state.celebration.until);
     this.celebrationGroup.visible = celebrating;

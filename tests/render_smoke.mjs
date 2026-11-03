@@ -47,4 +47,43 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   assert.ok(fake.buildingsGroup.children.length > firstCount, "a new hut must grow the drawn group");
 }
 
+// Winter snow is a dusting, not a blanket: on a pitched hut the snow
+// mesh must span only part of the roof width, so the red tile reads
+// through. The old full-slope slabs spanned wider than the body.
+// Also: every house gets a fake contact shadow, and a chimney gets a
+// glow flame for dusk/night.
+{
+  const fake = { _nightMeshes: [], _chimneys: [], _season: "winter" };
+  const g = Renderer.prototype._buildingMesh.call(fake, "hut", 24, 24, 0, 0, 0.45);
+  let snow = null, shadow = null, glow = 0;
+  const bodyBox = new THREE.Box3();
+  for (const child of g.children) {
+    if (!child.geometry) continue;
+    child.geometry.computeBoundingBox();
+    if (child.userData.isSnow) snow = child;
+    else if (child.userData.isShadow) shadow = child;
+    else {
+      if (child.userData.glow) glow++;
+      bodyBox.union(child.geometry.boundingBox);
+    }
+  }
+  assert.ok(snow, "hut must have a snow mesh");
+  const bodySpan = bodyBox.max.x - bodyBox.min.x;
+  const snowSpan = snow.geometry.boundingBox.max.x - snow.geometry.boundingBox.min.x;
+  assert.ok(bodySpan > 0 && snowSpan > 0, "meshes must have extent");
+  assert.ok(snowSpan < bodySpan * 0.9, "snow must cover only part of the roof slope: snow span " + snowSpan.toFixed(2) + " vs body " + bodySpan.toFixed(2));
+  assert.ok(shadow, "hut must have a contact shadow quad");
+  assert.ok(glow >= 2, "hut with a chimney must have window glow and a chimney flame, got " + glow);
+}
+
+// render.js must never fetch: all textures are procedural canvases,
+// and the module must not reference the network at all.
+{
+  const fs = await import("node:fs");
+  const src = fs.readFileSync(new URL("../src/render.js", import.meta.url), "utf8");
+  for (const banned of ["fetch(", "XMLHttpRequest", "TextureLoader", "http://", "https://", "new Image"]) {
+    assert.ok(!src.includes(banned), "render.js must not contain " + banned);
+  }
+}
+
 console.log("render smoke test passed: all building types build, sync fills and grows the group");
