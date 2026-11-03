@@ -9,7 +9,7 @@ import {
   newWorld, step, serialize, deserialize, applyGod, expandFarms,
   findLotSpot, lotScore, isPlanStreet, isFieldZone, streetExtent, streetFrontage,
   paveStreets, planStreetCells, findPlannedSpot, scoreSpot, clearFarmBed, findFarmBed,
-  SIZE,
+  SIZE, cellAt, peekCell, forEachGeneratedCell,
 } from "../src/sim.js";
 
 const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
@@ -24,7 +24,7 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   assert.ok(streetFrontage(g, x, z), "a lot must front a paved street");
   assert.ok(!isFieldZone(s, x, z), "a lot must not sit in the fields");
   assert.ok(!isPlanStreet(s, x, z), "a lot must not sit on a street");
-  assert.ok(!g[x][z].road && !g[x][z].farm && !g[x][z].building, "a lot must be free ground");
+  assert.ok(!cellAt(g, x, z).road && !cellAt(g, x, z).farm && !cellAt(g, x, z).building, "a lot must be free ground");
   assert.ok(findPlannedSpot(s, g, "hut"), "findPlannedSpot must still return a lot");
   const founding = s.buildings.find((b) => b.type === "hut");
   assert.equal(scoreSpot(s, g, founding.x, founding.z, "hut"), -Infinity, "an occupied cell must score as unusable");
@@ -49,14 +49,14 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
     }
     assert.ok(spot, "lots must open within a few paving rounds (iteration " + i + ")");
     const [x, z] = spot;
-    g[x][z].building = "hut";
-    g[x][z].blocked = true;
+    cellAt(g, x, z).building = "hut";
+    cellAt(g, x, z).blocked = true;
     s.buildings.push({ type: "hut", x, z, done: true, builtDay: 1 });
     placed.push([x, z]);
-    for (let rx = 0; rx < SIZE; rx++) for (let rz = 0; rz < SIZE; rz++) {
-      assert.ok(!(g[rx][rz].road && g[rx][rz].farm), "no road may sit on a farm cell, at " + rx + "," + rz);
-      assert.ok(!(g[rx][rz].road && isFieldZone(s, rx, rz)), "no road may enter the field blocks, at " + rx + "," + rz);
-    }
+    forEachGeneratedCell(g, (rx, rz, c) => {
+      assert.ok(!(c.road && c.farm), "no road may sit on a farm cell, at " + rx + "," + rz);
+      assert.ok(!(c.road && isFieldZone(s, rx, rz)), "no road may enter the field blocks, at " + rx + "," + rz);
+    });
   }
   const dwellings = s.buildings.filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
   for (let i = 0; i < dwellings.length; i++) for (let j = i + 1; j < dwellings.length; j++) {
@@ -80,13 +80,13 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
     while (!spot && rounds < 10) { paveStreets(s, g); rounds++; spot = findLotSpot(s, g, "hut"); }
     assert.ok(spot, "a lot must open within a few paving rounds (iteration " + i + ")");
     let minD = Infinity;
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+    forEachGeneratedCell(g, (x, z) => {
       if (lotScore(s, g, x, z, "hut") > -Infinity) minD = Math.min(minD, Math.hypot(x - s._cx, z - s._cz));
-    }
+    });
     const d = Math.hypot(spot[0] - s._cx, spot[1] - s._cz);
     assert.ok(d <= minD + 2, "lot choice must infill before sprawling: chose dist " + d.toFixed(1) + ", nearest lot " + minD.toFixed(1));
-    g[spot[0]][spot[1]].building = "hut";
-    g[spot[0]][spot[1]].blocked = true;
+    cellAt(g, spot[0], spot[1]).building = "hut";
+    cellAt(g, spot[0], spot[1]).blocked = true;
     s.buildings.push({ type: "hut", x: spot[0], z: spot[1], done: true, builtDay: 1 });
   }
 }
@@ -100,7 +100,7 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   assert.ok(s._farmCells.length > 18, "fields must grow under hunger, got " + s._farmCells.length);
   for (const [x, z] of s._farmCells) {
     assert.ok(isFieldZone(s, x, z), "every farm cell must stay in the western field blocks, at " + x + "," + z);
-    assert.ok(!g[x][z].road, "no farm cell may be a road cell, at " + x + "," + z);
+    assert.ok(!cellAt(g, x, z).road, "no farm cell may be a road cell, at " + x + "," + z);
     assert.ok(!isPlanStreet(s, x, z, 23), "no farm cell may sit on the street plan, at " + x + "," + z);
   }
 }
@@ -110,7 +110,7 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   assert.ok(bed, "a new farm bed must exist");
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
     if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
-    assert.ok(!g[bed[0] + dx][bed[1] + dz].road, "a new bed must keep one cell clear of roads, road at " + (bed[0] + dx) + "," + (bed[1] + dz));
+    assert.ok(!cellAt(g, bed[0] + dx, bed[1] + dz).road, "a new bed must keep one cell clear of roads, road at " + (bed[0] + dx) + "," + (bed[1] + dz));
   }
   const added = clearFarmBed(s, g, s._cx - 9, s._cz);
   assert.ok(added >= 3, "a farm bed must add at least 3 new plots, added=" + added);
@@ -127,7 +127,8 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   assert.ok(spot[0] < s._cx, "a farmhouse lot must sit on the western half");
   let nearFarm = false;
   for (let dx = -3; dx <= 3 && !nearFarm; dx++) for (let dz = -3; dz <= 3; dz++) {
-    if (inBoundsCheck(g, spot[0] + dx, spot[1] + dz) && g[spot[0] + dx][spot[1] + dz].farm) nearFarm = true;
+    const nc = peekCell(g, spot[0] + dx, spot[1] + dz);
+    if (nc && nc.farm) nearFarm = true;
   }
   assert.ok(nearFarm, "a farmhouse lot must sit within reach of worked fields");
   const added = clearFarmBed(s, g, s._cx - 4, s._cz + 8);
@@ -135,7 +136,7 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   for (const [x, z] of s._farmCells) assert.ok(isFieldZone(s, x, z), "field clearing must stay in the field blocks, at " + x + "," + z);
 }
 
-function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < SIZE && !!grid[x]; }
+function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < SIZE && !!peekCell(grid, x, z); }
 
 // Grandfathering: an old-format world with a scattered hut and a
 // road laid through a farm bed loads with everything intact, and
@@ -144,33 +145,34 @@ function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < 
 {
   const { state: s, grid: g } = newWorld(7);
   let scatter = null;
-  for (let x = 0; x < SIZE && !scatter; x++) for (let z = 0; z < SIZE; z++) {
-    const c = g[x][z];
+  forEachGeneratedCell(g, (x, z, c) => {
+    if (scatter) return;
     if (!c.water && !c.building && !c.farm && !c.tree && !c.road && c.stone <= 0
-      && Math.hypot(x - s._cx, z - s._cz) >= 12 && !streetFrontage(g, x, z)) { scatter = [x, z]; break; }
-  }
+      && Math.hypot(x - s._cx, z - s._cz) >= 12 && !streetFrontage(g, x, z)) scatter = [x, z];
+  });
   assert.ok(scatter, "open ground must exist for the scattered hut");
-  g[scatter[0]][scatter[1]].building = "hut";
-  g[scatter[0]][scatter[1]].blocked = true;
+  cellAt(g, scatter[0], scatter[1]).building = "hut";
+  cellAt(g, scatter[0], scatter[1]).blocked = true;
   s.buildings.push({ type: "hut", x: scatter[0], z: scatter[1], done: true, builtDay: 20 });
   const [fx, fz] = s._farmCells[0];
-  g[fx][fz].road = true; // the old failure: a road through a crop field
+  cellAt(g, fx, fz).road = true; // the old failure: a road through a crop field
   const beforeBuildings = s.buildings.map((b) => b.type + b.x + "," + b.z).sort().join("|");
-  const beforeRoads = g.flat().filter((c) => c.road).length;
+  let beforeRoads = 0; forEachGeneratedCell(g, (x, z, c) => { if (c.road) beforeRoads++; });
   const beforeFarms = s._farmCells.length;
   const loaded = deserialize(serialize(s, g));
   const ls = loaded.state, lg = loaded.grid;
   assert.equal(ls.buildings.map((b) => b.type + b.x + "," + b.z).sort().join("|"), beforeBuildings, "every building, including scattered ones, must survive load");
-  assert.equal(lg.flat().filter((c) => c.road).length, beforeRoads, "grandfathered roads must survive load untouched");
+  let afterRoads = 0; forEachGeneratedCell(lg, (x, z, c) => { if (c.road) afterRoads++; });
+  assert.equal(afterRoads, beforeRoads, "grandfathered roads must survive load untouched");
   assert.equal(ls._farmCells.length, beforeFarms, "farm plots must survive load");
-  assert.ok(lg[fx][fz].road && lg[fx][fz].farm, "the old road through the field is grandfathered, not erased");
+  assert.ok(cellAt(lg, fx, fz).road && cellAt(lg, fx, fz).farm, "the old road through the field is grandfathered, not erased");
   const spot = findLotSpot(ls, lg, "hut");
   assert.ok(spot, "a lot must exist in the loaded world");
   assert.ok(streetFrontage(lg, spot[0], spot[1]), "new builds in a loaded world must front a street");
   paveStreets(ls, lg);
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    assert.ok(!(lg[x][z].road && lg[x][z].farm && !(x === fx && z === fz)), "paving must never lay a new road on a farm cell, at " + x + "," + z);
-  }
+  forEachGeneratedCell(lg, (x, z, c) => {
+    assert.ok(!(c.road && c.farm && !(x === fx && z === fz)), "paving must never lay a new road on a farm cell, at " + x + "," + z);
+  });
 }
 
 // A god-ordered hut stands on a lot too: the god's hut action uses
@@ -190,13 +192,13 @@ function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < 
 // A far-flung settled building does extend the plan.
 {
   const { state: s, grid: g } = newWorld(49);
-  const wallCell = planStreetCells(s, 8).find(([x, z]) => !g[x][z].road && !g[x][z].building && !g[x][z].farm && !g[x][z].water);
+  const wallCell = planStreetCells(s, 8).find(([x, z]) => { const c = cellAt(g, x, z); return !c.road && !c.building && !c.farm && !c.water; });
   assert.ok(wallCell, "an unpaved plan-street cell must exist");
-  g[wallCell[0]][wallCell[1]].building = "wall";
-  g[wallCell[0]][wallCell[1]].blocked = true;
+  cellAt(g, wallCell[0], wallCell[1]).building = "wall";
+  cellAt(g, wallCell[0], wallCell[1]).blocked = true;
   s.buildings.push({ type: "wall", x: wallCell[0], z: wallCell[1], done: true, builtDay: 1 });
   for (let i = 0; i < 10; i++) paveStreets(s, g);
-  assert.ok(!g[wallCell[0]][wallCell[1]].road, "paving must never overwrite a wall");
+  assert.ok(!cellAt(g, wallCell[0], wallCell[1]).road, "paving must never overwrite a wall");
   assert.equal(streetExtent(s), 5, "walls do not extend the street plan");
   s.buildings.push({ type: "hut", x: s._cx + 10, z: s._cz, done: true, builtDay: 1 });
   assert.equal(streetExtent(s), 11, "a building at distance 10 must extend the plan to ring 11");
@@ -214,9 +216,9 @@ function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < 
     if (["wall", "tower", "marker", "towncenter", "altar"].includes(b.type)) continue;
     assert.ok(streetFrontage(g, b.x, b.z), "every settled building must front a street, " + JSON.stringify(b));
   }
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    assert.ok(!(g[x][z].road && g[x][z].farm), "no road may sit on a farm cell, at " + x + "," + z);
-  }
+  forEachGeneratedCell(g, (x, z, c) => {
+    assert.ok(!(c.road && c.farm), "no road may sit on a farm cell, at " + x + "," + z);
+  });
 }
 
 console.log("layout smoke test passed: lots face streets, roads avoid fields, growth infills, old worlds load intact");

@@ -71,7 +71,7 @@ try {
   assert.ok(state.weather && state.weather.kind, "served state must carry weather");
   assert.equal(typeof state.morale, "number", "served state must carry morale");
   assert.ok(state.tech && typeof state.tech.level === "number", "served state must carry tech");
-  assert.ok(grid.length === 48, "served grid must rebuild");
+  assert.ok(grid.chunks instanceof Map && grid.chunks.size >= 9, "served grid must rebuild as a chunk store, got " + (grid.chunks ? grid.chunks.size : "no chunks"));
 
   // POST /api/god: a bless returns ok plus the updated state.
   const foodBefore = state.stockpile.food;

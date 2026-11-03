@@ -1,12 +1,12 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v12";
+const APP_VERSION = "v13";
 const PAGES_ORIGIN = "https://japage1928.github.io";
 // The always-on village lives on the same origin as this page when the
 // page is served by the server. Any other origin (GitHub Pages, a local
@@ -141,8 +141,8 @@ function renderPanel() {
     const longhouses = s.buildings.filter((b) => b.type === "longhouse").length;
     const greathalls = s.buildings.filter((b) => b.type === "greathall").length;
     const farmhouses = s.buildings.filter((b) => b.type === "farmhouse").length;
-    const farmPlots = world.grid.flat().filter((c) => c.farm).length;
-    const roadCells = world.grid.flat().filter((c) => c.road).length;
+    let farmPlots = 0, roadCells = 0;
+    forEachGeneratedCell(world.grid, (x, z, c) => { if (c.farm) farmPlots++; if (c.road) roadCells++; });
     const moraleLine = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(" · ");
     const tech = s.tech || { level: 0, progress: 0 };
     const nextTier = TECH_TIERS[tech.level + 1];
@@ -308,7 +308,8 @@ function enterWorld(w, isServer) {
       } else if (pick.type === "ground") {
         if (armed) { doGod(armed, pick.x, pick.z); }
         else if (pick.x >= 0 && pick.x < SIZE && pick.z >= 0 && pick.z < SIZE) {
-          const cell = world.grid[pick.x][pick.z];
+          const cell = cellAt(world.grid, pick.x, pick.z);
+          if (!cell) { toast("Beyond the edge of the known world."); return; }
           toast(cell.water ? "Water." : cell.tree ? "Trees. Wood waits here." : cell.farm ? "Farm plot, crop stage " + cell.crop + "/3." : cell.stone ? "Rock and ore." : cell.building ? cell.building : "Open ground.");
         }
       }

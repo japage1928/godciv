@@ -4,7 +4,7 @@
 import assert from "node:assert";
 import {
   newWorld, step, serialize, deserialize, recomputeMorale, computeDemands,
-  makeVillager, dawnDemographics, isStudent, seasonOf, phaseOf, SEASONS, WEATHER_KINDS, SAVE_VERSION,
+  makeVillager, dawnDemographics, isStudent, seasonOf, phaseOf, SEASONS, WEATHER_KINDS, SAVE_VERSION, cellAt,
 } from "../src/sim.js";
 
 const DAYS = 30;
@@ -121,7 +121,7 @@ for (const seed of [7, 42, 1234, 999]) {
 {
   const { state, grid } = newWorld(23);
   state.buildings.push({ type: "school", x: state._cx + 3, z: state._cz + 3, done: true, builtDay: 1 });
-  grid[state._cx + 3][state._cz + 3].building = "school";
+  cellAt(grid, state._cx + 3, state._cz + 3).building = "school";
   const child = makeVillager(state, state._cx + 1, state._cz + 1, false, { ageDays: 5, coins: 0 });
   state.villagers.push(child);
   assert.ok(isStudent(state, child), "a 5-day-old with a school must count as a student");
@@ -142,7 +142,7 @@ for (const seed of [7, 42, 1234, 999]) {
 {
   const { state, grid } = newWorld(24);
   const [fx, fz] = state._farmCells[0];
-  const cell = grid[fx][fz];
+  const cell = cellAt(grid, fx, fz);
   cell.crop = 1; cell.cropGrow = 0;
   state.weather = { kind: "rain", until: state.elapsed + 1000 };
   for (let i = 0; i < 40; i++) step(state, grid, 0.25); // 10 sim-seconds

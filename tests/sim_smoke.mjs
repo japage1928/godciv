@@ -1,10 +1,11 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES, findPlannedSpot, scoreSpot, clearFarmBed, expandFarms } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES, findPlannedSpot, scoreSpot, clearFarmBed, expandFarms, cellAt, peekCell, forEachGeneratedCell, generatedChunks } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
-assert.equal(grid.length, SIZE);
+assert.ok(grid.chunks instanceof Map, "grid must be a chunk store");
+assert.equal(generatedChunks(grid).length, 9, "a fresh world materializes 9 chunks, got " + generatedChunks(grid).length);
 const startPos = new Map(state.villagers.map((v) => [v.id, [v.x, v.z]]));
 
 // Run ~10 sim-minutes in 0.25s substeps.
@@ -99,17 +100,17 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   const s4 = w4.state, g4 = w4.grid;
   s4.stockpile.food = 50; s4.stockpile.wood = 50; s4.stockpile.stone = 50;
   s4.buildings.push({ type: "hut", x: s4._cx + 4, z: s4._cz, done: true });
-  g4[s4._cx + 4][s4._cz].building = "hut";
+  cellAt(g4, s4._cx + 4, s4._cz).building = "hut";
   for (let i = 0; i < 120; i++) step(s4, g4, 0.25); // 30 sim-seconds
   assert.ok(s4.buildQueue.some((q) => q.type === "granary") || s4.buildings.some((b) => b.type === "granary"), "surplus food must start a granary on its own");
   let roads = 0;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (g4[x][z].road) roads++;
+  forEachGeneratedCell(g4, (x, z, c) => { if (c.road) roads++; });
   assert.ok(roads > 0, "roads must be laid toward the second hut, found " + roads);
   // Save/load keeps roads and the town center.
   const loaded = deserialize(serialize(s4, g4));
   assert.ok(loaded.state.buildings.some((b) => b.type === "towncenter"), "town center must survive save/load");
   let roads2 = 0;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (loaded.grid[x][z].road) roads2++;
+  forEachGeneratedCell(loaded.grid, (x, z, c) => { if (c.road) roads2++; });
   assert.ok(roads2 > 0, "roads must survive save/load");
 }
 
@@ -173,9 +174,9 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 // road, dwellings keep 3 cells apart, and farm beds stay west.
 {
   const { state: s, grid: g } = newWorld(19);
-  const roads = g.flat().filter((c) => c.road).length;
+  let roads = 0; forEachGeneratedCell(g, (x, z, c) => { if (c.road) roads++; });
   assert.ok(roads >= 12, "founding must lay a plaza + farm road, road cells=" + roads);
-  assert.ok(g[s._cx + 2][s._cz].road || g[s._cx - 2][s._cz].road, "plaza ring must have road cells beside the center");
+  assert.ok(cellAt(g, s._cx + 2, s._cz).road || cellAt(g, s._cx - 2, s._cz).road, "plaza ring must have road cells beside the center");
   // No dwelling spot may sit within 2 cells of the founding hut.
   for (let x = 0; x < 48; x++) for (let z = 0; z < 48; z++) {
     if (Math.max(Math.abs(x - (s._cx - 2)), Math.abs(z - (s._cz - 3))) <= 2 && !(x === s._cx - 2 && z === s._cz - 3)) {
@@ -190,13 +191,14 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
     const d = Math.max(Math.abs(dwellings[i].x - dwellings[j].x), Math.abs(dwellings[i].z - dwellings[j].z));
     assert.ok(d >= 3, "dwellings must keep 3 cells apart, " + JSON.stringify(dwellings[i]) + " vs " + JSON.stringify(dwellings[j]));
   }
-  const roadTotal = g.flat().filter((c) => c.road).length;
+  let roadTotal = 0; forEachGeneratedCell(g, (x, z, c) => { if (c.road) roadTotal++; });
   assert.ok(roadTotal >= 12, "roads must at least keep the founding plaza, road cells=" + roadTotal);
   // Every dwelling must sit on or beside the road network.
   for (const b of dwellings) {
     let nearRoad = false;
     for (let dx = -3; dx <= 3 && !nearRoad; dx++) for (let dz = -3; dz <= 3; dz++) {
-      if (g[b.x + dx] && g[b.x + dx][b.z + dz] && g[b.x + dx][b.z + dz].road) nearRoad = true;
+      const nc = peekCell(g, b.x + dx, b.z + dz);
+      if (nc && nc.road) nearRoad = true;
     }
     assert.ok(nearRoad, "dwelling must connect to a road, " + JSON.stringify(b));
   }
@@ -221,7 +223,7 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 {
   const { state: s, grid: g } = newWorld(17);
   for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true, builtDay: 1 });
-  for (const b of s.buildings) g[b.x][b.z].building = b.type;
+  for (const b of s.buildings) cellAt(g, b.x, b.z).building = b.type;
   while (s.villagers.length < s.populationCap - 1) s.villagers.push(makeVillager(s, 25, 25));
   const demands = computeDemands(s, g);
   assert.ok(demands.some((d) => d.type === "longhouse"), "a crowded spread-out village must demand a longhouse upgrade, got " + demands.map((d) => d.type).join(","));
@@ -233,7 +235,7 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 {
   const { state: s, grid: g } = newWorld(18);
   for (let i = 0; i < 4; i++) s.buildings.push({ type: "hut", x: s._cx + 5 + i, z: s._cz + 5, done: true, builtDay: 1 });
-  for (const b of s.buildings) g[b.x][b.z].building = b.type;
+  for (const b of s.buildings) cellAt(g, b.x, b.z).building = b.type;
   s.populationCap = 28;
   while (s.villagers.length < 24) s.villagers.push(makeVillager(s, 25, 25));
   const demands = computeDemands(s, g);

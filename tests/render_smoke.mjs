@@ -8,7 +8,7 @@
 import assert from "node:assert";
 import * as THREE from "../vendor/three.module.js";
 import { Renderer } from "../src/render.js";
-import { newWorld } from "../src/sim.js";
+import { newWorld, cellAt } from "../src/sim.js";
 
 const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well", "workshop", "shrine", "farmhouse", "school", "healer", "wall", "tower", "marker", "stockpile", "altar", "mystery-type"];
 
@@ -83,8 +83,8 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   const { state, grid } = newWorld(42);
   state.buildings = [{ type: "hut", x: 30, z: 30, done: true, builtDay: 1 }];
   state.villagers = [];
-  grid[30][30].building = "hut";
-  grid[31][30].road = true; // street to the east, and no other road beside the hut
+  cellAt(grid, 30, 30).building = "hut";
+  cellAt(grid, 31, 30).road = true; // street to the east, and no other road beside the hut
   const fake = Object.create(Renderer.prototype);
   fake.buildingsGroup = new THREE.Group();
   fake.dressingGroup = new THREE.Group();

@@ -5,7 +5,7 @@
 import assert from "node:assert";
 import {
   newWorld, step, serialize, deserialize, findPath, spawnRaid, makeRaider,
-  SIZE, WALL_RING_R,
+  SIZE, WALL_RING_R, cellAt,
 } from "../src/sim.js";
 
 const STEPS_PER_DAY = 180 * 4;
@@ -35,10 +35,10 @@ function runSeconds(state, grid, seconds) {
 // --- (b) walls block pathing: no route across a closed wall line ---
 {
   const { grid } = newWorld(7);
-  for (let z = 0; z < SIZE; z++) grid[20][z].blocked = true;
+  for (let z = 0; z < 48; z++) cellAt(grid, 20, z).blocked = true;
   const blocked = findPath(grid, 1, 24, 40, 24);
   assert.equal(blocked, null, "no path may cross a closed wall line");
-  grid[20][24].blocked = false; // the gate
+  cellAt(grid, 20, 24).blocked = false; // the gate
   const open = findPath(grid, 1, 24, 40, 24);
   assert.ok(open && open.length > 0, "a path must exist through the gate");
   assert.ok(open.some(([x, z]) => x === 20 && z === 24), "the path must use the gate cell, got " + JSON.stringify(open.slice(0, 4)));
@@ -48,8 +48,8 @@ function runSeconds(state, grid, seconds) {
 // --- (b2) a raider batters a wall down, given time and no towers ---
 {
   const { state, grid } = newWorld(7);
-  grid[20][5].building = "wall";
-  grid[20][5].blocked = true;
+  cellAt(grid, 20, 5).building = "wall";
+  cellAt(grid, 20, 5).blocked = true;
   state.buildings.push({ type: "wall", x: 20, z: 5, hp: 30, maxHp: 30, done: true, builtDay: 1 });
   const r = makeRaider(state, 19.5, 5.5);
   state.raiders.push(r);
@@ -57,7 +57,7 @@ function runSeconds(state, grid, seconds) {
   state.raidUntil = state.elapsed + 120;
   state._raidStats = { deaths: 0, stolen: 0, killed: 0 };
   runSeconds(state, grid, 12);
-  assert.equal(grid[20][5].building, null, "the wall cell must be cleared after battering");
+  assert.equal(cellAt(grid, 20, 5).building, null, "the wall cell must be cleared after battering");
   assert.ok(!state.buildings.some((b) => b.type === "wall" && b.x === 20 && b.z === 5), "the wall building must be gone");
   assert.ok(state.log.some((e) => /break through the wall/.test(e.text)), "the breakthrough must be logged");
   console.log("raider breaks through an undefended wall");
@@ -66,8 +66,8 @@ function runSeconds(state, grid, seconds) {
 // --- (b3) tower damage can kill a raider ---
 {
   const { state, grid } = newWorld(7);
-  grid[24][24].building = "tower";
-  grid[24][24].blocked = true;
+  cellAt(grid, 24, 24).building = "tower";
+  cellAt(grid, 24, 24).blocked = true;
   state.buildings.push({ type: "tower", x: 24, z: 24, hp: 60, maxHp: 60, done: true, builtDay: 1 });
   const r = makeRaider(state, 24.5, 25.5);
   r.hp = 2; // one volley (2 damage at era stage 0) fells it
@@ -93,15 +93,15 @@ function buildComparisonWorld(walled) {
   state.stockpile.fish = 0;
   state.stockpile.meat = 0;
   if (walled) {
-    for (let z = 0; z < SIZE; z++) {
-      if (grid[20][z].water) continue;
-      grid[20][z].building = "wall";
-      grid[20][z].blocked = true;
+    for (let z = 0; z < 48; z++) {
+      if (cellAt(grid, 20, z).water) continue;
+      cellAt(grid, 20, z).building = "wall";
+      cellAt(grid, 20, z).blocked = true;
       state.buildings.push({ type: "wall", x: 20, z, hp: 30, maxHp: 30, done: true, builtDay: 1 });
     }
     for (const tz of [10, 20, 30, 40]) {
-      grid[22][tz].building = "tower";
-      grid[22][tz].blocked = true;
+      cellAt(grid, 22, tz).building = "tower";
+      cellAt(grid, 22, tz).blocked = true;
       state.buildings.push({ type: "tower", x: 22, z: tz, hp: 60, maxHp: 60, done: true, builtDay: 1 });
     }
   }

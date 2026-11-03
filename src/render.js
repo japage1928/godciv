@@ -8,7 +8,7 @@
 // Buildings are merged vertex-colored geometry: one draw call per
 // building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, phaseOf, eraStageOf, WALL_RING_R, streetFrontage } from "./sim.js";
+import { SIZE, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, forEachGeneratedCell, generatedCellCount } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
@@ -394,7 +394,7 @@ export class Renderer {
     this.scene.background = new THREE.Color(0x87ceeb);
     this.scene.fog = new THREE.Fog(0x87ceeb, 55, 95);
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
-    this.target = new THREE.Vector3(SIZE / 2, 0, SIZE / 2);
+    this.target = new THREE.Vector3(24, 0, 24); // the village center; SIZE/2 is map middle now
     // Elevated three-quarter framing, as in the mockups.
     this.distance = 30;
     this.zoomTarget = 30;
@@ -412,7 +412,7 @@ export class Renderer {
     this.scene.add(this.sun);
     this.hemi = hemi;
     this.nightLight = new THREE.PointLight(0xffa040, 0, 26, 1.2);
-    this.nightLight.position.set(SIZE / 2, 4, SIZE / 2);
+    this.nightLight.position.set(24, 4, 24);
     this.scene.add(this.nightLight);
     this._nightMeshes = [];
     this._wasNight = null;
@@ -427,9 +427,9 @@ export class Renderer {
     this._pPos = new Float32Array(P_COUNT * 3);
     this._pVel = new Float32Array(P_COUNT * 2);
     for (let i = 0; i < P_COUNT; i++) {
-      this._pPos[i * 3] = Math.random() * SIZE;
+      this._pPos[i * 3] = -24 + Math.random() * 96;
       this._pPos[i * 3 + 1] = Math.random() * 16;
-      this._pPos[i * 3 + 2] = Math.random() * SIZE;
+      this._pPos[i * 3 + 2] = -24 + Math.random() * 96;
       this._pVel[i * 2] = 6 + Math.random() * 4;
       this._pVel[i * 2 + 1] = (Math.random() - 0.5) * 1.2;
     }
@@ -466,7 +466,7 @@ export class Renderer {
     // Celebration dressing at the town center: banner poles and a
     // bonfire, built once, shown only while a festival runs.
     this.celebrationGroup = new THREE.Group();
-    this.celebrationGroup.position.set(SIZE / 2, 0, SIZE / 2);
+    this.celebrationGroup.position.set(24, 0, 24);
     const bannerCols = [0xb71c1c, 0xffd700, 0x2e7d32, 0x1565c0];
     bannerCols.forEach((c, i) => {
       const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
@@ -504,11 +504,11 @@ export class Renderer {
     }
     this.scene.add(this.fireGroup);
     this.floodPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(SIZE, SIZE),
+      new THREE.PlaneGeometry(96, 96),
       new THREE.MeshBasicMaterial({ color: 0x2196f3, transparent: true, opacity: 0 })
     );
     this.floodPlane.rotation.x = -Math.PI / 2;
-    this.floodPlane.position.set(SIZE / 2, 0.55, SIZE / 2);
+    this.floodPlane.position.set(24, 0.55, 24);
     this.scene.add(this.floodPlane);
 
     this.clouds = new THREE.Group();
@@ -566,13 +566,14 @@ export class Renderer {
     if (season === this._season || !this.groundMesh) return;
     this._season = season;
     const col = new THREE.Color();
-    let i = 0;
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-      const cell = grid[x][z];
+    const order = this._groundCells || [];
+    for (let i = 0; i < order.length; i++) {
+      const [x, z] = order[i];
+      const cell = cellAt(grid, x, z);
+      if (!cell) continue;
       col.copy(this._cellColor(cell, season, x, z));
       if (cell.tree) col.multiplyScalar(0.85);
       this.groundMesh.setColorAt(i, col);
-      i++;
     }
     if (this.groundMesh.instanceColor) this.groundMesh.instanceColor.needsUpdate = true;
     if (this.canopyMesh) {
@@ -611,19 +612,27 @@ export class Renderer {
     }
     const group = [];
     const groundGeo = new THREE.BoxGeometry(CELL, 0.5, CELL);
-    const ground = new THREE.InstancedMesh(groundGeo, new THREE.MeshLambertMaterial({ map: this.groundTex }), SIZE * SIZE);
+    // Only generated chunks hold ground instances: the map is 320
+    // wide, but the ground that exists is the ground that is settled.
+    // Per-chunk groups arrive in Phase C; this pass keeps one mesh
+    // over generated cells, in a recorded order the season tint
+    // reuses, so no frame ever touches an ungenerated cell.
+    const groundCount = generatedCellCount(grid);
+    const ground = new THREE.InstancedMesh(groundGeo, new THREE.MeshLambertMaterial({ map: this.groundTex || null }), Math.max(1, groundCount));
     const m = new THREE.Matrix4(); const col = new THREE.Color();
+    const order = [];
     let i = 0;
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-      const cell = grid[x][z];
+    forEachGeneratedCell(grid, (x, z, cell) => {
       const h = cell.water ? -0.15 : cell.h * 0.9;
       m.makeTranslation(x + 0.5, h - 0.25, z + 0.5);
       ground.setMatrixAt(i, m);
       col.copy(this._cellColor(cell, "spring", x, z));
       if (cell.tree) col.multiplyScalar(0.85);
       ground.setColorAt(i, col);
+      order.push([x, z]);
       i++;
-    }
+    });
+    this._groundCells = order;
     ground.instanceMatrix.needsUpdate = true;
     if (ground.instanceColor) ground.instanceColor.needsUpdate = true;
     this.scene.add(ground); group.push(ground);
@@ -631,7 +640,7 @@ export class Renderer {
     this._season = null;
 
     const waterCells = [];
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].water) waterCells.push([x, z]);
+    forEachGeneratedCell(grid, (x, z, c) => { if (c.water) waterCells.push([x, z]); });
     if (waterCells.length) {
       this.waterMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, 0.12, CELL), new THREE.MeshLambertMaterial({ color: 0x3a9ad9, transparent: true, opacity: 0.72 }), waterCells.length);
       waterCells.forEach(([x, z], idx) => {
@@ -644,7 +653,7 @@ export class Renderer {
     // Trees: trunk + canopy, instanced, with real size variety and
     // per-tree canopy jitter (reapplied on season change).
     const treeCells = [];
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].tree) treeCells.push([x, z]);
+    forEachGeneratedCell(grid, (x, z, c) => { if (c.tree) treeCells.push([x, z]); });
     this._treeCells = treeCells;
     this._treeJitter = treeCells.map(([x, z]) => 0.88 + (((x * 13 + z * 7) % 100) / 100) * 0.24);
     if (treeCells.length) {
@@ -669,10 +678,9 @@ export class Renderer {
     // all instanced and placed by a deterministic cell hash so the
     // dressing is identical on every load. Nothing here is per-frame.
     const freeCells = [];
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-      const cell = grid[x][z];
+    forEachGeneratedCell(grid, (x, z, cell) => {
       if (!cell.water && !cell.farm && !cell.tree && !cell.road && !cell.building && cell.stone <= 0 && cell.ore <= 0 && cell.h <= 0.66) freeCells.push([x, z]);
-    }
+    });
     const tuftSpots = [];
     const flowerSpots = [];
     const bushSpots = [];
@@ -714,17 +722,17 @@ export class Renderer {
     this.scene.add(this.bushMesh); group.push(this.bushMesh);
     this._buildStatic = group;
     this._stoneCells = [];
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].stone > 0 || grid[x][z].ore > 0) this._stoneCells.push([x, z]);
+    forEachGeneratedCell(grid, (x, z, c) => { if (c.stone > 0 || c.ore > 0) this._stoneCells.push([x, z]); });
     this.stoneMesh = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42, 0), new THREE.MeshLambertMaterial({ color: 0x9a9a9a }), Math.max(1, this._stoneCells.length));
     this._stoneCells.forEach(([x, z], idx) => {
-      this.stoneMesh.setColorAt(idx, grid[x][z].ore > 0 ? this._c.setHex(0x7f9fb5) : this._c.setHex(0x9a9a9a));
+      this.stoneMesh.setColorAt(idx, cellAt(grid, x, z).ore > 0 ? this._c.setHex(0x7f9fb5) : this._c.setHex(0x9a9a9a));
     });
     if (this.stoneMesh.instanceColor) this.stoneMesh.instanceColor.needsUpdate = true;
     this.scene.add(this.stoneMesh);
     // Crops: five plants per farm cell, in a row, so fields read as
     // dense rows rather than single blocks.
     this._farmCells = [];
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) this._farmCells.push([x, z]);
+    forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) this._farmCells.push([x, z]); });
     this.cropMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), new THREE.MeshLambertMaterial({ color: 0x8bc34a }), Math.max(1, this._farmCells.length * 5));
     this.scene.add(this.cropMesh);
     this.buildingsGroup = new THREE.Group();
@@ -980,7 +988,7 @@ export class Renderer {
     this._nightMeshes = [];
     this._chimneys = [];
     const safeMesh = (type, x, z) => {
-      const cell = grid && grid[x] && grid[x][z];
+      const cell = grid ? cellAt(grid, x, z) : null;
       const groundY = cell ? cell.h * 0.9 : 0.45;
       // Face the nearest street: the door side turns toward it. A
       // house with no street beside it keeps the default facing, as
@@ -1006,12 +1014,12 @@ export class Renderer {
     // drawn only once a wall exists. Torches and market stalls dress
     // the plaza as the village grows.
     const pal = ERA_PALETTE[era];
-    const cx = state._cx ?? SIZE / 2, cz = state._cz ?? SIZE / 2;
+    const cx = state._cx ?? 24, cz = state._cz ?? 24;
     if (hasWalls) {
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const gx = cx + dx * WALL_RING_R, gz = cz + dz * WALL_RING_R;
         if (gx < 0 || gz < 0 || gx >= SIZE || gz >= SIZE) continue;
-        if (grid[gx][gz].building) continue;
+        if (cellAt(grid, gx, gz).building) continue;
         const parts = [];
         const along = dx !== 0;
         for (const s of [-0.7, 0.7]) {
@@ -1053,7 +1061,7 @@ export class Renderer {
       for (const [dx, dz] of [[3, 0], [0, 3], [-3, 0]]) {
         const sx = cx + dx, sz = cz + dz;
         if (sx < 0 || sz < 0 || sx >= SIZE || sz >= SIZE) continue;
-        const cell = grid[sx][sz];
+        const cell = cellAt(grid, sx, sz);
         if (cell.building || cell.water || cell.farm) continue;
         const parts = [];
         for (const px of [-0.6, 0.6]) for (const pz of [-0.5, 0.5]) partBox(parts, 0.09, 1.2, 0.09, px, 0.6, pz, pal.timber);
@@ -1075,7 +1083,7 @@ export class Renderer {
       if ((b.x * 5 + b.z * 11) % 4 !== 0) continue;
       const nx = b.x + 1, nz = b.z + 1;
       if (nx < 0 || nz < 0 || nx >= SIZE || nz >= SIZE) continue;
-      const cell = grid[nx][nz];
+      const cell = cellAt(grid, nx, nz);
       if (!cell || cell.building || cell.water || cell.farm || cell.tree) continue;
       const parts = [];
       partBox(parts, 0.42, 0.42, 0.42, -0.2, 0.21, 0, 0xa1887f);
@@ -1093,7 +1101,7 @@ export class Renderer {
       if (!["hut", "longhouse", "greathall", "farmhouse", "workshop", "school", "healer", "granary", "shrine"].includes(b.type)) continue;
       const front = grid ? streetFrontage(grid, b.x, b.z) : null;
       if (!front) continue;
-      const cell = grid[b.x][b.z];
+      const cell = cellAt(grid, b.x, b.z);
       const step = new THREE.Mesh(STEP_GEO, MAT_STEP);
       step.position.set(b.x + 0.5 + front[0] * 0.95, (cell ? cell.h * 0.9 : 0.45) + 0.05, b.z + 0.5 + front[1] * 0.95);
       step.userData.doorstep = true;
@@ -1188,11 +1196,11 @@ export class Renderer {
       pos[i * 3] += this._pVel[i * 2 + 1] * dt * (snow ? 2 : 0.5);
       if (pos[i * 3 + 1] < 0) {
         pos[i * 3 + 1] = 14 + Math.random() * 2;
-        pos[i * 3] = Math.random() * SIZE;
-        pos[i * 3 + 2] = Math.random() * SIZE;
+        pos[i * 3] = -24 + Math.random() * 96;
+        pos[i * 3 + 2] = -24 + Math.random() * 96;
       }
-      if (pos[i * 3] < 0) pos[i * 3] += SIZE;
-      if (pos[i * 3] > SIZE) pos[i * 3] -= SIZE;
+      if (pos[i * 3] < -24) pos[i * 3] += 96;
+      if (pos[i * 3] > 72) pos[i * 3] -= 96;
     }
     this._pGeo.attributes.position.needsUpdate = true;
   }
@@ -1229,7 +1237,7 @@ export class Renderer {
       this._farmCheckAt = state.elapsed;
       const cells = [];
       const roadCells = [];
-      for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) { if (grid[x][z].farm) cells.push([x, z]); if (grid[x][z].road) roadCells.push([x, z]); }
+      forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) cells.push([x, z]); if (c.road) roadCells.push([x, z]); });
       if (cells.length !== this._farmCells.length) {
         this._farmCells = cells;
         if (this.cropMesh) { this.scene.remove(this.cropMesh); this.cropMesh.geometry.dispose(); }
@@ -1241,7 +1249,7 @@ export class Renderer {
         if (this._roadMesh) { this.scene.remove(this._roadMesh); this._roadMesh.geometry.dispose(); }
         this._roadMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.12, 0.95), new THREE.MeshLambertMaterial({ map: this.cobbleTex, color: 0xc9b18a }), Math.max(1, roadCells.length));
         const rm = new THREE.Matrix4();
-        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, grid[x][z].h * 0.9 + 0.04, z + 0.5); this._roadMesh.setMatrixAt(idx, rm); });
+        roadCells.forEach(([x, z], idx) => { rm.makeTranslation(x + 0.5, cellAt(grid, x, z).h * 0.9 + 0.04, z + 0.5); this._roadMesh.setMatrixAt(idx, rm); });
         this.scene.add(this._roadMesh);
         this._roadEra = -1; // re-tint for the current era
       }
@@ -1264,7 +1272,7 @@ export class Renderer {
     // Stones + crops scale with remaining amount / growth stage.
     const m = this._m;
     this._stoneCells.forEach(([x, z], idx) => {
-      const cell = grid[x][z];
+      const cell = cellAt(grid, x, z);
       const amt = cell.stone + cell.ore;
       const s = amt > 0 ? 0.55 + Math.min(0.45, amt * 0.05) : 0.001;
       m.makeScale(s, s, s); m.setPosition(x + 0.5, 0.35, z + 0.5);
@@ -1273,7 +1281,7 @@ export class Renderer {
     this.stoneMesh.instanceMatrix.needsUpdate = true;
     const winterCrops = state.season === "winter";
     this._farmCells.forEach(([x, z], idx) => {
-      const cell = grid[x][z];
+      const cell = cellAt(grid, x, z);
       const stage = cell.crop < 0 ? 0 : cell.crop;
       const hScale = 0.3 + stage * 0.28;
       for (let j = 0; j < 5; j++) {
@@ -1419,7 +1427,7 @@ export class Renderer {
     }
     const celebrating = !!(state.celebration && state.elapsed < state.celebration.until);
     this.celebrationGroup.visible = celebrating;
-    if (celebrating) this.celebrationGroup.position.set((state._cx || SIZE / 2) + 0.5, 0, (state._cz || SIZE / 2) + 0.5);
+    if (celebrating) this.celebrationGroup.position.set((state._cx ?? 24) + 0.5, 0, (state._cz ?? 24) + 0.5);
     this.shake = Math.max(0, this.shake - dt * 2);
     if (state._quake && state.elapsed < state._quake.until) this.shake = 0.5;
 

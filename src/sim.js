@@ -4,10 +4,19 @@
 // villager, the god never directly controls a villager, a local model only
 // ever advises the leader. The model never writes state directly.
 
-// Save format version. v10 wrote version 2; v11 writes 3; v12 writes 4.
-// See migrateSave in deserialize() for the migration pattern.
-export const SAVE_VERSION = 4;
-export const SIZE = 48;
+// Save format version. v10 wrote version 2; v11 writes 3; v12 writes 4;
+// v13 writes 5: chunked 320x320 world, guards, neighbor villages.
+// See the migration pattern in deserialize().
+export const SAVE_VERSION = 5;
+// The world is cut into 16x16 chunks, Minecraft-style: only generated
+// chunks hold cells, only active chunks tick. Map size 320x320
+// (20x20 chunks, 102,400 cells, 44.4x the old 48x48 area). The old
+// 48x48 block keeps its exact coordinates: center (24,24), chunk (1,1).
+export const WORLD_SIZE = 320;
+export const CHUNK = 16;
+export const OLD_SIZE = 48;
+export const SIZE = WORLD_SIZE; // map side; kept as the name the UI/tests already use
+export const CHUNKS_ACROSS = WORLD_SIZE / CHUNK;
 export const DAY_LENGTH = 180; // sim seconds per day: 45 real seconds at 4x, 22.5 at 8x
 export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher"];
 export const TRAITS = ["devout", "skeptic", "brave", "cautious", "industrious", "lazy", "kind", "greedy"];
@@ -123,11 +132,453 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export const key = (x, z) => x + "," + z;
 const inBounds = (x, z) => x >= 0 && z >= 0 && x < SIZE && z < SIZE;
 
+// --- chunks: the map, cut up (DEFENSE-AND-MAP-DESIGN.md sections 1-3) ---
+// A chunk is 16x16 cells, generated deterministically from the seed the
+// first time anything needs it. Ungenerated chunks cost nothing: no
+// arrays, no save bytes. The old 48x48 block reproduces bit-for-bit
+// from the original RNG stream (generateOldBlock); new land comes
+// from integer hashes of (seed, chunk, cell), never from a shared
+// stream, so generation order cannot change a cell.
+
+// Pure integer hash -> [0,1). Same inputs, same output, every load.
+export function hash01(seed, a, b, salt = 0) {
+  let h = (seed >>> 0) ^ 0x9e3779b9;
+  h = Math.imul(h ^ Math.imul(a | 0, 0x85ebca6b), 0xc2b2ae35);
+  h = Math.imul(h ^ Math.imul(b | 0, 0x27d4eb2f), 0x165667b1);
+  h = Math.imul(h ^ Math.imul(salt | 0, 0x9e3779b1), 0x85ebca6b);
+  h ^= h >>> 15; h = Math.imul(h, 0x2c1b3c6d); h ^= h >>> 12;
+  return (h >>> 0) / 4294967296;
+}
+
+const _latticeCache = new Map();
+function latticeForSeed(seed) {
+  let coarse = _latticeCache.get(seed);
+  if (!coarse) {
+    const rng = mulberry32(seed);
+    coarse = [];
+    for (let i = 0; i < 9; i++) { coarse.push([]); for (let j = 0; j < 9; j++) coarse[i].push(rng()); }
+    _latticeCache.set(seed, coarse);
+  }
+  return coarse;
+}
+function latticeValue(seed, lx, lz) {
+  if (lx >= 0 && lx <= 8 && lz >= 0 && lz <= 8) return latticeForSeed(seed)[lx][lz];
+  return hash01(seed, lx, lz, 101);
+}
+// Terrain height. The noise span stays pinned at 48 (OLD_SIZE): the
+// formula is (x / 48) * 8 at every map size, so the old world's
+// heights never shift. The lattice extends past 8x8 by hash.
+export function terrainHeight(seed, x, z) {
+  const gx = (x / OLD_SIZE) * 8, gz = (z / OLD_SIZE) * 8;
+  const x0 = Math.floor(gx), z0 = Math.floor(gz);
+  const fx = gx - x0, fz = gz - z0;
+  const s = (t) => t * t * (3 - 2 * t);
+  const a = latticeValue(seed, x0, z0), b = latticeValue(seed, x0 + 1, z0);
+  const c = latticeValue(seed, x0, z0 + 1), d = latticeValue(seed, x0 + 1, z0 + 1);
+  return a + (b - a) * s(fx) + (c - a) * s(fz) + (a - b - c + d) * s(fx) * s(fz);
+}
+// A new-territory lake, if this chunk hashes to one: about 1 chunk in
+// 12, a disc of radius 3-6 at a hashed center, only where the noise
+// height is low. Pure function of (seed, chunk).
+export function chunkLake(seed, cx, cz) {
+  if (hash01(seed, cx, cz, 301) >= 1 / 12) return null;
+  const lx = Math.floor(hash01(seed, cx, cz, 302) * CHUNK);
+  const lz = Math.floor(hash01(seed, cz, cx, 302) * CHUNK);
+  const r = 3 + Math.floor(hash01(seed, cx, cz, 303) * 4);
+  return { x: cx * CHUNK + lx, z: cz * CHUNK + lz, r };
+}
+function isLandAt(seed, x, z) {
+  const h = terrainHeight(seed, x, z);
+  if (x < OLD_SIZE && z < OLD_SIZE) return !(Math.hypot(x - 36, z - 36) < 6.5 && h < 0.62);
+  const lake = chunkLake(seed, Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+  return !(lake && Math.hypot(x - lake.x, z - lake.z) < lake.r && h < 0.62);
+}
+
+// The original 48x48 generation, verbatim: same RNG draw order, same
+// clearing, same farm plots, same tree/stone rejection loops. This is
+// what the migration test proves identical against the snapshot.
+function generateOldBlock(seed) {
+  const S = OLD_SIZE;
+  // The old code ran terrain and villagers off ONE rng: the village
+  // stream starts where the terrain stream stops. Count the draws
+  // so newWorld can fast-forward a fresh instance to the same spot
+  // (the block is memoized, so the instance itself cannot be reused).
+  const base = mulberry32(seed);
+  let draws = 0;
+  const rng = () => { draws++; return base(); };
+  const cells = [];
+  const coarse = [];
+  for (let i = 0; i < 9; i++) { coarse.push([]); for (let j = 0; j < 9; j++) coarse[i].push(rng()); }
+  const noiseAt = (x, z) => {
+    const gx = (x / S) * 8, gz = (z / S) * 8;
+    const x0 = Math.floor(gx), z0 = Math.floor(gz);
+    const fx = gx - x0, fz = gz - z0;
+    const s = (t) => t * t * (3 - 2 * t);
+    const a = coarse[x0][z0], b = coarse[Math.min(8, x0 + 1)][z0];
+    const c = coarse[x0][Math.min(8, z0 + 1)], d = coarse[Math.min(8, x0 + 1)][Math.min(8, z0 + 1)];
+    return a + (b - a) * s(fx) + (c - a) * s(fz) + (a - b - c + d) * s(fx) * s(fz);
+  };
+  const cx = 24, cz = 24;
+  const lake = { x: 36, z: 36, r: 6.5 };
+  const inB = (x, z) => x >= 0 && z >= 0 && x < S && z < S;
+  for (let x = 0; x < S; x++) {
+    cells.push([]);
+    for (let z = 0; z < S; z++) {
+      const h = noiseAt(x, z);
+      const dLake = Math.hypot(x - lake.x, z - lake.z);
+      const dCenter = Math.hypot(x - cx, z - cz);
+      const water = dLake < lake.r && h < 0.62;
+      cells[x].push({
+        h, water, blocked: water, road: false,
+        tree: false, stone: 0, ore: 0, crop: -1, cropGrow: 0,
+        building: null, farm: false,
+      });
+      void dCenter;
+    }
+  }
+  for (let x = cx - 6; x <= cx + 6; x++) for (let z = cz - 6; z <= cz + 6; z++) {
+    if (!inB(x, z)) continue;
+    cells[x][z].water = false; cells[x][z].blocked = false; cells[x][z].tree = false; cells[x][z].stone = 0;
+  }
+  const farmCells = [];
+  for (let x = cx - 6; x <= cx - 4; x++) for (let z = cz - 1; z <= cz + 1; z++) { cells[x][z].farm = true; cells[x][z].crop = 0; cells[x][z].cropGrow = rng() * 20; farmCells.push([x, z]); }
+  for (let x = cx - 6; x <= cx - 4; x++) for (let z = cz + 3; z <= cz + 5; z++) { cells[x][z].farm = true; cells[x][z].crop = 0; cells[x][z].cropGrow = rng() * 20; farmCells.push([x, z]); }
+  for (let i = 0; i < 90; i++) {
+    const x = Math.floor(rng() * S), z = Math.floor(rng() * S);
+    if (cells[x][z].water || Math.hypot(x - cx, z - cz) < 8 || cells[x][z].farm) continue;
+    cells[x][z].tree = true; cells[x][z].blocked = true;
+  }
+  const stoneSpots = [];
+  for (let i = 0; i < 30; i++) {
+    const x = Math.floor(rng() * S), z = Math.floor(rng() * S);
+    if (cells[x][z].water || Math.hypot(x - cx, z - cz) < 7 || cells[x][z].tree || cells[x][z].farm) continue;
+    cells[x][z].stone = 8 + Math.floor(rng() * 5);
+    cells[x][z].ore = cells[x][z].h > 0.55 && rng() < 0.6 ? 4 + Math.floor(rng() * 3) : 0;
+    cells[x][z].blocked = true;
+    stoneSpots.push([x, z]);
+  }
+  return { cells, farmCells, stoneSpots, draws };
+}
+
+function oldBlockFor(grid) {
+  if (!grid._oldBlock) grid._oldBlock = generateOldBlock(grid.seed);
+  return grid._oldBlock;
+}
+
+// Neighbor-village sites, picked deterministically from the seed.
+// Pure functions only: no chunk is generated to pick a site, so this
+// is cheap enough to run on every load (and memoized per seed).
+const _siteCache = new Map();
+export function pickVillageSites(seed, count = 2) {
+  const cached = _siteCache.get(seed);
+  if (cached) return cached;
+  const scored = [];
+  for (let x = 0; x < WORLD_SIZE; x++) for (let z = 0; z < WORLD_SIZE; z++) {
+    if (Math.hypot(x - 24, z - 24) < 60) continue;
+    if (x < OLD_SIZE && z < OLD_SIZE) continue;
+    if (!isLandAt(seed, x, z)) continue;
+    let trees = 0, stones = 0;
+    for (let i = 0; i < 16; i++) {
+      const sx = x + Math.floor(hash01(seed, i, x, 401) * 21) - 10;
+      const sz = z + Math.floor(hash01(seed, i, z, 402) * 21) - 10;
+      if (!inBounds(sx, sz) || !isLandAt(seed, sx, sz)) continue;
+      if (hash01(seed, sx, sz, 201) < 0.039) trees++;
+      if (hash01(seed, sx, sz, 202) < 0.013) stones++;
+    }
+    scored.push({ x, z, score: trees * 2 + stones * 3 + hash01(seed, x, z, 403) });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const sites = [];
+  for (const c of scored) {
+    if (sites.length >= count) break;
+    if (sites.some((s) => Math.hypot(s.x - c.x, s.z - c.z) < 50)) continue;
+    sites.push({ x: c.x, z: c.z });
+  }
+  _siteCache.set(seed, sites);
+  return sites;
+}
+
+export const VILLAGE_NAMES = ["Emberford", "Stonehollow", "Millbrook", "Aldergate", "Fenwick", "Cinderhold"];
+// A neighbor village's abstract record (design section 13.2). Data
+// only: the abstract dawn tick, activation, and diplomacy arrive in
+// Phase F. Age-matched backstory, derived from the seed: the same
+// seed gives the same neighbors every time, no roll at load.
+export function makeVillageRecord(seed, id, site, otherIds = []) {
+  const stockpile = {
+    food: 40 + Math.floor(hash01(seed, id, 11, 501) * 41),
+    wood: 30 + Math.floor(hash01(seed, id, 12, 501) * 31),
+    stone: 10 + Math.floor(hash01(seed, id, 13, 501) * 21),
+    ore: Math.floor(hash01(seed, id, 14, 501) * 8),
+    fish: Math.floor(hash01(seed, id, 15, 501) * 20),
+    meat: Math.floor(hash01(seed, id, 16, 501) * 12),
+  };
+  const relations = {};
+  for (const oid of otherIds) relations[oid] = 0;
+  relations[0] = 0;
+  return {
+    id, name: VILLAGE_NAMES[(id - 1) % VILLAGE_NAMES.length],
+    center: [site.x, site.z],
+    leaderName: NAMES[Math.floor(hash01(seed, id, 1, 503) * NAMES.length)],
+    known: false, active: false,
+    pop: 8 + Math.floor(hash01(seed, id, 2, 501) * 9),
+    popCap: 20,
+    stockpile, coins: 10 + Math.floor(hash01(seed, id, 3, 501) * 21),
+    techLevel: 1 + Math.floor(hash01(seed, id, 4, 501) * 2), techProgress: 0,
+    morale: 45 + Math.floor(hash01(seed, id, 5, 501) * 11),
+    buildings: { towncenter: 1, hut: 2, granary: 1 },
+    relations, foundedDay: 1, lastContactDay: 0, warExhaustion: 0,
+    jobMix: { farmer: 0.4, woodcutter: 0.2, miner: 0.15, fisher: 0.1, hunter: 0.05, builder: 0.05, hauler: 0.05 },
+  };
+}
+
+export function chunkKey(cx, cz) { return cx + "," + cz; }
+export function chunkOf(x, z) { return [Math.floor(x / CHUNK), Math.floor(z / CHUNK)]; }
+
+export function createGrid(seed) {
+  return {
+    seed, worldSize: WORLD_SIZE, chunks: new Map(),
+    _oldBlock: null, _lattice: null,
+    _genQueue: [], _genQueued: new Set(),
+    _activeSet: new Set(),
+    _indexDirty: true, _treeSet: new Set(), _stoneSet: new Set(), _oreSet: new Set(),
+    _stoneSpots: [],
+    _villageSites: [],
+  };
+}
+
+function genChunkCells(grid, cx, cz) {
+  if (cx >= 0 && cx < 3 && cz >= 0 && cz < 3) {
+    const old = oldBlockFor(grid).cells;
+    const cells = [];
+    for (let lx = 0; lx < CHUNK; lx++) {
+      cells.push([]);
+      for (let lz = 0; lz < CHUNK; lz++) cells[lx].push(old[cx * CHUNK + lx][cz * CHUNK + lz]);
+    }
+    return cells;
+  }
+  const seed = grid.seed;
+  const lake = chunkLake(seed, cx, cz);
+  const cells = [];
+  for (let lx = 0; lx < CHUNK; lx++) {
+    cells.push([]);
+    for (let lz = 0; lz < CHUNK; lz++) {
+      const x = cx * CHUNK + lx, z = cz * CHUNK + lz;
+      const h = terrainHeight(seed, x, z);
+      const water = !!(lake && Math.hypot(x - lake.x, z - lake.z) < lake.r && h < 0.62);
+      const cell = {
+        h, water, blocked: water, road: false,
+        tree: false, stone: 0, ore: 0, crop: -1, cropGrow: 0,
+        building: null, farm: false,
+      };
+      if (!water) {
+        const dCenter = Math.hypot(x - 24, z - 24);
+        if (dCenter >= 8 && hash01(seed, x, z, 201) < 0.039) { cell.tree = true; cell.blocked = true; }
+        else if (dCenter >= 7 && hash01(seed, x, z, 202) < 0.013) {
+          cell.stone = 8 + Math.floor(hash01(seed, z, x, 202) * 5);
+          cell.ore = h > 0.55 && hash01(seed, x, z, 203) < 0.6 ? 4 + Math.floor(hash01(seed, z, x, 203) * 3) : 0;
+          cell.blocked = true;
+        }
+      }
+      cells[lx].push(cell);
+    }
+  }
+  // A neighbor-village site clears its ground the way the founding
+  // clearing does: trees and stone out, water out, room to build.
+  // No buildings yet: those arrive at activation (Phase F).
+  for (const s of grid._villageSites || []) {
+    const [scx, scz] = chunkOf(s.x, s.z);
+    if (Math.abs(scx - cx) > 1 || Math.abs(scz - cz) > 1) continue;
+    for (let lx = 0; lx < CHUNK; lx++) for (let lz = 0; lz < CHUNK; lz++) {
+      const x = cx * CHUNK + lx, z = cz * CHUNK + lz;
+      if (Math.hypot(x - s.x, z - s.z) <= 6) {
+        const c = cells[lx][lz];
+        c.water = false; c.blocked = false; c.tree = false; c.stone = 0; c.ore = 0;
+      }
+    }
+  }
+  return cells;
+}
+
+export function getChunk(grid, cx, cz) {
+  if (cx < 0 || cz < 0 || cx >= CHUNKS_ACROSS || cz >= CHUNKS_ACROSS) return null;
+  const k = chunkKey(cx, cz);
+  let ch = grid.chunks.get(k);
+  if (!ch) {
+    ch = { cx, cz, cells: genChunkCells(grid, cx, cz), generated: true, dirty: true, frozenAt: null, shore: null };
+    grid.chunks.set(k, ch);
+    grid._indexDirty = true;
+    // A new chunk can put water beside a neighbor's land: its shore
+    // flag must be recomputed, not trusted from before.
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const n = grid.chunks.get(chunkKey(cx + dx, cz + dz));
+      if (n) n.shore = null;
+    }
+  }
+  return ch;
+}
+export function peekChunk(grid, cx, cz) {
+  if (cx < 0 || cz < 0 || cx >= CHUNKS_ACROSS || cz >= CHUNKS_ACROSS) return null;
+  return grid.chunks.get(chunkKey(cx, cz)) || null;
+}
+// The one accessor that knows about chunks. cellAt generates the
+// chunk on touch (generation is hash arithmetic, under the 10ms
+// budget); peekCell never generates and returns null for
+// ungenerated land, which pathfinding treats as blocked.
+export function cellAt(grid, x, z) {
+  if (!inBounds(x, z)) return null;
+  const ch = getChunk(grid, Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+  return ch ? ch.cells[x % CHUNK][z % CHUNK] : null;
+}
+export function peekCell(grid, x, z) {
+  if (!inBounds(x, z)) return null;
+  const ch = peekChunk(grid, Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+  return ch ? ch.cells[x % CHUNK][z % CHUNK] : null;
+}
+export function isGenerated(grid, cx, cz) { return grid.chunks.has(chunkKey(cx, cz)); }
+export function generatedChunks(grid) { return [...grid.chunks.values()]; }
+export function generatedCellCount(grid) { return grid.chunks.size * CHUNK * CHUNK; }
+export function forEachGeneratedCell(grid, fn) {
+  for (const ch of grid.chunks.values()) {
+    for (let lx = 0; lx < CHUNK; lx++) for (let lz = 0; lz < CHUNK; lz++) {
+      fn(ch.cx * CHUNK + lx, ch.cz * CHUNK + lz, ch.cells[lx][lz]);
+    }
+  }
+}
+// Queue a chunk for generation, at most one per tick (step drains
+// the queue). Pathfinding into ungenerated land queues instead of
+// generating inline, so no tick ever pays for the whole map.
+export function queueChunk(grid, cx, cz) {
+  if (cx < 0 || cz < 0 || cx >= CHUNKS_ACROSS || cz >= CHUNKS_ACROSS) return;
+  const k = chunkKey(cx, cz);
+  if (grid.chunks.has(k) || grid._genQueued.has(k)) return;
+  grid._genQueued.add(k);
+  grid._genQueue.push([cx, cz]);
+}
+export function drainGenQueue(grid, max = 1) {
+  let n = 0;
+  while (n < max && grid._genQueue.length) {
+    const [cx, cz] = grid._genQueue.shift();
+    grid._genQueued.delete(chunkKey(cx, cz));
+    getChunk(grid, cx, cz);
+    n++;
+  }
+  return n;
+}
+// Call after mutating a cell: marks the chunk dirty for render/save
+// and invalidates the tree/stone indexes and the shore flag.
+export function noteMutation(grid, x, z) {
+  grid._indexDirty = true;
+  const ch = peekChunk(grid, Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+  if (ch) { ch.dirty = true; ch.shore = null; }
+}
+
+// Spatial indexes, rebuilt lazily from generated chunks only. The
+// rebuild is linear in generated cells and runs at most once per
+// mutation batch; every lookup after that reads the sets.
+export function ensureIndexes(grid) {
+  if (!grid._indexDirty) return;
+  const trees = new Set(), stones = new Set(), ores = new Set(), spots = [];
+  forEachGeneratedCell(grid, (x, z, c) => {
+    if (c.tree) trees.add(key(x, z));
+    if (c.stone > 0) { stones.add(key(x, z)); spots.push([x, z]); }
+    if (c.ore > 0) ores.add(key(x, z));
+  });
+  grid._treeSet = trees; grid._stoneSet = stones; grid._oreSet = ores; grid._stoneSpots = spots;
+  grid._indexDirty = false;
+}
+export function chunkHasShore(grid, ch) {
+  if (ch.shore != null) return ch.shore;
+  let shore = false;
+  for (let lx = 0; lx < CHUNK && !shore; lx++) for (let lz = 0; lz < CHUNK && !shore; lz++) {
+    const x = ch.cx * CHUNK + lx, z = ch.cz * CHUNK + lz;
+    const c = ch.cells[lx][lz];
+    if (c.water || c.blocked) continue;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = peekCell(grid, x + dx, z + dz);
+      if (n && n.water) { shore = true; break; }
+    }
+  }
+  ch.shore = shore;
+  return shore;
+}
+export function hasShoreGrid(grid) {
+  for (const ch of grid.chunks.values()) if (chunkHasShore(grid, ch)) return true;
+  return false;
+}
+
+// --- active chunks (design section 2) ---
+export const ACTIVE_RADIUS_CHUNKS = 2;
+function markActive(set, x, z) {
+  const [ccx, ccz] = chunkOf(Math.round(x), Math.round(z));
+  for (let dx = -ACTIVE_RADIUS_CHUNKS; dx <= ACTIVE_RADIUS_CHUNKS; dx++) {
+    for (let dz = -ACTIVE_RADIUS_CHUNKS; dz <= ACTIVE_RADIUS_CHUNKS; dz++) {
+      const cx = ccx + dx, cz = ccz + dz;
+      if (cx >= 0 && cz >= 0 && cx < CHUNKS_ACROSS && cz < CHUNKS_ACROSS) set.add(chunkKey(cx, cz));
+    }
+  }
+}
+export function computeActiveSet(state) {
+  const set = new Set();
+  for (const v of state.villagers) markActive(set, v.x, v.z);
+  for (const b of state.buildings) markActive(set, b.x, b.z);
+  for (const r of state.raiders || []) markActive(set, r.x, r.z);
+  for (const d of state.deer || []) markActive(set, d.x, d.z);
+  for (const t of state.caravans || []) markActive(set, t.x, t.z);
+  for (const w of state.warParties || []) for (const m of w.members || []) markActive(set, m.x, m.z);
+  markActive(set, state._cx, state._cz);
+  for (const rec of state.villages || []) if (rec.active) markActive(set, rec.center[0], rec.center[1]);
+  return set;
+}
+// Freeze quiet chunks, wake returning ones with one bounded crop
+// catch-up. A frozen chunk's cells do not change; crops catch up at
+// most one growth stage on reactivation, never a miracle harvest.
+export function updateActiveChunks(state, grid) {
+  const next = computeActiveSet(state);
+  const prev = grid._activeSet;
+  for (const k of prev) {
+    if (next.has(k)) continue;
+    const ch = grid.chunks.get(k);
+    if (!ch || ch.frozenAt != null) continue;
+    ch.frozenAt = state.elapsed;
+    // Deer in a freezing chunk are released; the dawn top-up rule
+    // respawns them near the village.
+    if (state.deer && state.deer.length) {
+      state.deer = state.deer.filter((d) => {
+        const [dcx, dcz] = chunkOf(Math.round(d.x), Math.round(d.z));
+        return chunkKey(dcx, dcz) !== k;
+      });
+    }
+  }
+  for (const k of next) {
+    if (prev.has(k)) continue;
+    const ch = grid.chunks.get(k);
+    if (!ch || ch.frozenAt == null) continue;
+    for (let lx = 0; lx < CHUNK; lx++) for (let lz = 0; lz < CHUNK; lz++) {
+      const c = ch.cells[lx][lz];
+      if (c.farm && c.crop >= 0 && c.crop < 3) {
+        c.cropGrow += 28;
+        if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; }
+      }
+    }
+    ch.frozenAt = null;
+  }
+  grid._activeSet = next;
+}
+
 // Breadth-first pathfinding on the walkable grid. Cheap at 48x48, and it
 // means villagers walk around water and buildings instead of steering
 // blindly through them (the Luanti v1 steer-to-target weakness).
-export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000, avoidFarm = false) {
+export function findPath(grid, sx, sz, tx, tz, maxSteps = null, avoidFarm = false) {
   if (!inBounds(tx, tz)) return null;
+  // Chunk-aware: the search never generates. Cells in ungenerated
+  // chunks read as blocked, and the target's chunk is queued for
+  // generation (one chunk per tick, drained by step()), so the next
+  // rethink finds the way. The step cap scales with the active
+  // region instead of a fixed 4,000: a path across the settled area
+  // is longer than a path across the old 48-grid.
+  if (maxSteps == null) maxSteps = 4000 + (grid._activeSet ? grid._activeSet.size : 9) * 512;
+  const targetCell = peekCell(grid, tx, tz);
+  if (!targetCell) { queueChunk(grid, Math.floor(tx / CHUNK), Math.floor(tz / CHUNK)); return null; }
   // A blocked target (a finished building) is still reachable: the
   // path ends on its doorstep. Before this fix, findPath returned
   // null for every building target, so paveRoads could only ever
@@ -144,8 +595,10 @@ export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000, avoidFarm = fals
       const nx = x + dx, nz = z + dz;
       if (!inBounds(nx, nz)) continue;
       const isTarget = nx === tx && nz === tz;
-      if (grid[nx][nz].blocked && !isTarget) continue;
-      if (avoidFarm && grid[nx][nz].farm && !isTarget) continue;
+      const nc = peekCell(grid, nx, nz);
+      if (!nc) { queueChunk(grid, Math.floor(nx / CHUNK), Math.floor(nz / CHUNK)); continue; }
+      if (nc.blocked && !isTarget) continue;
+      if (avoidFarm && nc.farm && !isTarget) continue;
       const k = key(nx, nz);
       if (prev.has(k)) continue;
       prev.set(k, key(x, z));
@@ -161,61 +614,20 @@ export function findPath(grid, sx, sz, tx, tz, maxSteps = 4000, avoidFarm = fals
 }
 
 export function newWorld(seed) {
+  // The old 48x48 block generates from the original stream, untouched
+  // (generateOldBlock); the sim's own RNG is the SAME stream the old
+  // code ran, fast-forwarded past the terrain draws (generateOldBlock
+  // counts them), so the village's luck is unchanged by the refactor.
+  const grid = createGrid(seed);
+  const block = oldBlockFor(grid);
   const rng = mulberry32(seed);
-  const grid = [];
-  // Smooth value-noise heightfield.
-  const coarse = [];
-  for (let i = 0; i < 9; i++) { coarse.push([]); for (let j = 0; j < 9; j++) coarse[i].push(rng()); }
-  const noiseAt = (x, z) => {
-    const gx = (x / SIZE) * 8, gz = (z / SIZE) * 8;
-    const x0 = Math.floor(gx), z0 = Math.floor(gz);
-    const fx = gx - x0, fz = gz - z0;
-    const s = (t) => t * t * (3 - 2 * t);
-    const a = coarse[x0][z0], b = coarse[Math.min(8, x0 + 1)][z0];
-    const c = coarse[x0][Math.min(8, z0 + 1)], d = coarse[Math.min(8, x0 + 1)][Math.min(8, z0 + 1)];
-    return a + (b - a) * s(fx) + (c - a) * s(fz) + (a - b - c + d) * s(fx) * s(fz);
-  };
+  for (let i = 0; i < block.draws; i++) rng();
+  const sites = pickVillageSites(seed, 2);
+  grid._villageSites = sites;
+  // Materialize the 9 old chunks now: the village lives here.
+  for (let cx = 0; cx < 3; cx++) for (let cz = 0; cz < 3; cz++) getChunk(grid, cx, cz);
   const cx = 24, cz = 24;
-  const lake = { x: 36, z: 36, r: 6.5 };
-  for (let x = 0; x < SIZE; x++) {
-    grid.push([]);
-    for (let z = 0; z < SIZE; z++) {
-      const h = noiseAt(x, z);
-      const dLake = Math.hypot(x - lake.x, z - lake.z);
-      const dCenter = Math.hypot(x - cx, z - cz);
-      const water = dLake < lake.r && h < 0.62;
-      grid[x].push({
-        h, water, blocked: water, road: false,
-        tree: false, stone: 0, ore: 0, crop: -1, cropGrow: 0,
-        building: null, farm: false,
-      });
-    }
-  }
-  // Village clearing.
-  for (let x = cx - 6; x <= cx + 6; x++) for (let z = cz - 6; z <= cz + 6; z++) {
-    if (!inBounds(x, z)) continue;
-    grid[x][z].water = false; grid[x][z].blocked = false; grid[x][z].tree = false; grid[x][z].stone = 0;
-  }
-  // Farm plots: two 3x3 beds west of the stockpile.
-  const farmCells = [];
-  for (let x = cx - 6; x <= cx - 4; x++) for (let z = cz - 1; z <= cz + 1; z++) { grid[x][z].farm = true; grid[x][z].crop = 0; grid[x][z].cropGrow = rng() * 20; farmCells.push([x, z]); }
-  for (let x = cx - 6; x <= cx - 4; x++) for (let z = cz + 3; z <= cz + 5; z++) { grid[x][z].farm = true; grid[x][z].crop = 0; grid[x][z].cropGrow = rng() * 20; farmCells.push([x, z]); }
-  // Trees, away from the clearing and the lake shore.
-  for (let i = 0; i < 90; i++) {
-    const x = Math.floor(rng() * SIZE), z = Math.floor(rng() * SIZE);
-    if (grid[x][z].water || Math.hypot(x - cx, z - cz) < 8 || grid[x][z].farm) continue;
-    grid[x][z].tree = true; grid[x][z].blocked = true;
-  }
-  // Stone / ore clusters on high ground.
-  const stoneSpots = [];
-  for (let i = 0; i < 30; i++) {
-    const x = Math.floor(rng() * SIZE), z = Math.floor(rng() * SIZE);
-    if (grid[x][z].water || Math.hypot(x - cx, z - cz) < 7 || grid[x][z].tree || grid[x][z].farm) continue;
-    grid[x][z].stone = 8 + Math.floor(rng() * 5);
-    grid[x][z].ore = grid[x][z].h > 0.55 && rng() < 0.6 ? 4 + Math.floor(rng() * 3) : 0;
-    grid[x][z].blocked = true;
-    stoneSpots.push([x, z]);
-  }
+  const farmCells = [...block.farmCells];
 
   const state = {
     version: SAVE_VERSION, seed, day: 1, time: 0.3, speed: 1, paused: false,
@@ -242,19 +654,23 @@ export function newWorld(seed) {
     cooldowns: {}, stats: { births: 0, deaths: 0, blessings: 0, trades: 0, leaves: 0, celebrations: 0, plagues: 0 },
     fund: 20, marketAt: 30, rateHistory: [], spoiled: 0,
     nextVillagerId: 1, nextDeerId: 1, elapsed: 0,
+    // Neighbor villages: records only until Phase F wakes them.
+    // The player's village is id 0; records 1 and 2 are neighbors.
+    villageSites: sites,
+    villages: sites.map((s, i) => makeVillageRecord(seed, i + 1, s, sites.map((_, j) => j + 1).filter((id) => id !== i + 1))),
+    caravans: [], warParties: [], nextCaravanId: 1, nextWarPartyId: 1,
   };
-  for (const b of state.buildings) grid[b.x][b.z].building = b.type;
+  for (const b of state.buildings) cellAt(grid, b.x, b.z).building = b.type;
   state.rngState = null; // runtime only, rebuilt on load
   state._rng = rng;
   state._farmCells = farmCells;
-  state._stoneSpots = stoneSpots;
-  state._oreSpots = stoneSpots.filter(([x, z]) => grid[x][z].ore > 0);
+  state._oreSpots = oldBlockFor(grid).stoneSpots.filter(([x, z]) => cellAt(grid, x, z).ore > 0);
   state._cx = cx; state._cz = cz;
 
   const spawnSpots = [[cx + 1, cz + 1], [cx - 1, cz + 1], [cx + 1, cz - 1], [cx - 1, cz - 1], [cx, cz + 2], [cx + 2, cz + 2]];
   for (let i = 0; i < 6; i++) state.villagers.push(makeVillager(state, spawnSpots[i][0], spawnSpots[i][1], i === 0));
   for (let i = 0; i < 4; i++) state.deer.push(makeDeer(state, cx + 8 + i * 2, cz + 8));
-  for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
+  for (const b of state.buildings) { if (b.builtDay == null) b.builtDay = 1; if (b.village == null) b.village = 0; }
   pavePlaza(grid, cx, cz);
   assignHomes(state);
   delegateRoles(state, grid);
@@ -366,13 +782,9 @@ function refusesAssignment(state, v) {
 }
 
 // Is there any fishable shore on the map? (A land cell next to water.)
+// Answered from per-chunk shore flags over generated chunks only.
 export function hasShore(grid) {
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    const c = grid[x][z];
-    if (c.water || c.blocked) continue;
-    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => inBounds(x + dx, z + dz) && grid[x + dx][z + dz].water)) return true;
-  }
-  return false;
+  return hasShoreGrid(grid);
 }
 
 // Leader delegation: the leader looks at what the village needs and
@@ -476,12 +888,25 @@ function bestJob(state, v) {
   return best;
 }
 
-function nearestCell(grid, fromX, fromZ, pred) {
+export function nearestCell(grid, fromX, fromZ, pred) {
+  // Chunk-pruned scan: only generated chunks are searched, and a
+  // chunk whose nearest cell cannot beat the best match found is
+  // skipped whole. Same result as a full-grid scan on generated
+  // land, at a cost that follows settlement, not map size.
   let best = null, bestD = Infinity;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    if (!pred(grid[x][z], x, z)) continue;
-    const d = Math.hypot(x - fromX, z - fromZ);
-    if (d < bestD) { bestD = d; best = [x, z]; }
+  for (const ch of grid.chunks.values()) {
+    const x0 = ch.cx * CHUNK, z0 = ch.cz * CHUNK;
+    const x1 = x0 + CHUNK - 1, z1 = z0 + CHUNK - 1;
+    const dx = fromX < x0 ? x0 - fromX : fromX > x1 ? fromX - x1 : 0;
+    const dz = fromZ < z0 ? z0 - fromZ : fromZ > z1 ? fromZ - z1 : 0;
+    if (Math.hypot(dx, dz) >= bestD) continue;
+    for (let lx = 0; lx < CHUNK; lx++) for (let lz = 0; lz < CHUNK; lz++) {
+      const c = ch.cells[lx][lz];
+      const x = x0 + lx, z = z0 + lz;
+      if (!pred(c, x, z)) continue;
+      const d = Math.hypot(x - fromX, z - fromZ);
+      if (d < bestD) { bestD = d; best = [x, z]; }
+    }
   }
   return best;
 }
@@ -490,9 +915,9 @@ function setTarget(state, grid, v, x, z) {
   if (x == null) { v.target = null; v.path = null; return; }
   // Stand on a walkable neighbour if the cell itself is blocked.
   let tx = x, tz = z;
-  if (grid[tx][tz].blocked) {
+  if (cellAt(grid, tx, tz).blocked) {
     const free = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => [tx + dx, tz + dz])
-      .find(([nx, nz]) => inBounds(nx, nz) && !grid[nx][nz].blocked);
+      .find(([nx, nz]) => inBounds(nx, nz) && !cellAt(grid, nx, nz).blocked);
     if (!free) { v.target = null; v.path = null; return; }
     [tx, tz] = free;
   }
@@ -876,7 +1301,7 @@ function think(state, grid, v) {
     const node = nearestCell(grid, v.x, v.z, (c) => c.stone > 0 || c.ore > 0);
     if (node) setTarget(state, grid, v, node[0], node[1]); else v.state = "idle";
   } else if (job === "fisher") {
-    const shore = nearestCell(grid, v.x, v.z, (c, x, z) => !c.water && !c.blocked && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => inBounds(x + dx, z + dz) && grid[x + dx][z + dz].water));
+    const shore = nearestCell(grid, v.x, v.z, (c, x, z) => !c.water && !c.blocked && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const n = inBounds(x + dx, z + dz) ? peekCell(grid, x + dx, z + dz) : null; return !!(n && n.water); }));
     if (shore) setTarget(state, grid, v, shore[0], shore[1]); else v.state = "idle";
   } else if (job === "hunter") {
     const deer = state.deer[0];
@@ -916,7 +1341,7 @@ function workNeed(state, v, base) {
 
 function doWork(state, grid, v, dt) {
   const [tx, tz] = v.target || [];
-  const cell = tx != null ? grid[tx][tz] : null;
+  const cell = tx != null ? cellAt(grid, tx, tz) : null;
   v.workTimer += dt;
   const baseNeed = v.job === "builder" ? 2.5 : v.job === "fisher" ? 9.0 : v.job === "teacher" ? 2.0 : 1.6;
   const need = workNeed(state, v, baseNeed);
@@ -939,11 +1364,11 @@ function doWork(state, grid, v, dt) {
     if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2 + (tech.level >= 1 ? 1 : 0) + (tech.level >= 2 ? 1 : 0) + fineBonus + steelBonus); }
     else if (state.elapsed >= state.effects.droughtUntil) { cell.crop = Math.min(3, cell.crop + 1); }
   } else if (v.job === "woodcutter" && cell && cell.tree) {
-    cell.tree = false; cell.blocked = false; addCarry("wood", 2 + fineBonus + steelBonus);
+    cell.tree = false; cell.blocked = false; noteMutation(grid, tx, tz); addCarry("wood", 2 + fineBonus + steelBonus);
     if (hasWorkshop) { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("wood", 1); }
   } else if ((v.job === "miner" || v.job === "hauler") && cell && (cell.stone > 0 || cell.ore > 0)) {
-    if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); }
-    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus + steelBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
+    if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); noteMutation(grid, tx, tz); }
+    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus + steelBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; noteMutation(grid, tx, tz); }
     else addCarry("wood"); // hauler fallback at a spent node: gather firewood nearby
     if (v.job === "hauler" && !cell.stone && !cell.ore) addCarry("wood");
     if (hasWorkshop && v.job === "miner") { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("stone", 1); }
@@ -973,49 +1398,51 @@ function doWork(state, grid, v, dt) {
             const old = state.buildings.find((b) => b.x === q.x && b.z === q.z && b.type === from);
             const target = old || state.buildings.find((b) => b.x === q.x && b.z === q.z);
             if (target) target.type = type;
-            grid[q.x][q.z].building = type;
+            cellAt(grid, q.x, q.z).building = type;
+            noteMutation(grid, q.x, q.z);
             state.populationCap += type === "longhouse" ? 4 : 6;
             log(state, type === "longhouse"
               ? "A hut grows into a longhouse. The village can hold " + state.populationCap + " souls."
               : "A longhouse grows into a great hall. The village can hold " + state.populationCap + " souls.");
           } else {
-            state.buildings.push({ type, x: q.x, z: q.z, done: true, builtDay: state.day });
-            grid[q.x][q.z].building = type;
+            state.buildings.push({ type, x: q.x, z: q.z, done: true, builtDay: state.day, village: 0 });
+            cellAt(grid, q.x, q.z).building = type;
+            noteMutation(grid, q.x, q.z);
             if (type === "hut") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               state.populationCap += 4;
               log(state, "A new hut rises on the housing ring. The village can hold " + state.populationCap + " souls.");
             } else if (type === "granary") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A granary stands. Stored food will keep far longer now.");
             } else if (type === "marker") {
               state.faith = clamp(state.faith + 2, 0, 100);
               log(state, "A boundary marker is raised. The village knows its ground.");
             } else if (type === "well") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A well is dug. Water is close at hand now.");
             } else if (type === "workshop") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A workshop opens. Miners and woodcutters work with proper tools.");
             } else if (type === "shrine") {
               state.faith = clamp(state.faith + 5, 0, 100);
               log(state, "A shrine is raised. The people take heart.");
             } else if (type === "farmhouse") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               state.populationCap += 2;
               const added = clearFarmBed(state, grid, q.x, q.z);
               log(state, "A farmhouse rises in the west fields, with " + added + " new field plots around it. It houses 2 farmhands.");
             } else if (type === "school") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A school opens its doors. The children will learn their letters.");
             } else if (type === "healer") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A healer's hut opens. The sick will mend faster near it.");
             } else if (type === "wall") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A stretch of wall rises on the wall ring.");
             } else if (type === "tower") {
-              grid[q.x][q.z].blocked = true;
+              cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A watch tower rises. Its guard watches the gates.");
             }
           }
@@ -1024,7 +1451,7 @@ function doWork(state, grid, v, dt) {
           if (state.fund >= 2) { state.fund -= 2; v.coins += 2; }
         } else {
           log(state, "The " + (q.type || "hut") + " frame stands unfinished: not enough in the stockpile.");
-          if (q.type !== "longhouse" && q.type !== "greathall") { grid[q.x][q.z].building = null; grid[q.x][q.z].blocked = false; }
+          if (q.type !== "longhouse" && q.type !== "greathall") { cellAt(grid, q.x, q.z).building = null; cellAt(grid, q.x, q.z).blocked = false; }
         }
       }
     }
@@ -1135,7 +1562,7 @@ export function planStreetCells(state, extent = streetExtent(state)) {
 export function streetFrontage(grid, x, z) {
   for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
     const nx = x + dx, nz = z + dz;
-    if (inBounds(nx, nz) && grid[nx][nz].road) return [dx, dz];
+    if (inBounds(nx, nz)) { const nc = peekCell(grid, nx, nz); if (nc && nc.road) return [dx, dz]; }
   }
   return null;
 }
@@ -1145,7 +1572,8 @@ export function streetFrontage(grid, x, z) {
 // no dwelling within 2 cells (Chebyshev) of another.
 function lotFree(state, grid, x, z, type, extent) {
   if (!inBounds(x, z)) return false;
-  const c = grid[x][z];
+  const c = peekCell(grid, x, z);
+  if (!c) return false;
   if (c.blocked || c.water || c.farm || c.building || c.tree || c.road) return false;
   if (c.stone > 0 || c.ore > 0) return false;
   if (isPlanStreet(state, x, z, extent)) return false;
@@ -1155,7 +1583,7 @@ function lotFree(state, grid, x, z, type, extent) {
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
       if (!dx && !dz) continue;
       const nx = x + dx, nz = z + dz;
-      const n = inBounds(nx, nz) ? grid[nx][nz] : null;
+      const n = inBounds(nx, nz) ? peekCell(grid, nx, nz) : null;
       if (n && n.building && DWELLING_TYPES.includes(n.building)) return false;
       // A queued dwelling counts too: the grid is only marked when
       // a build completes, so without this two huts queued on
@@ -1173,7 +1601,7 @@ function lotFree(state, grid, x, z, type, extent) {
     if (x >= state._cx) return false;
     let nearFarm = false;
     for (let dx = -3; dx <= 3 && !nearFarm; dx++) for (let dz = -3; dz <= 3; dz++) {
-      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) nearFarm = true;
+      if (inBounds(x + dx, z + dz)) { const fc = peekCell(grid, x + dx, z + dz); if (fc && fc.farm) nearFarm = true; }
     }
     if (!nearFarm) return false;
   }
@@ -1191,7 +1619,7 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
   // good neighbours; closer than that is already hard-rejected above.
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
     if (Math.max(Math.abs(dx), Math.abs(dz)) < 3) continue;
-    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+    const n = inBounds(x + dx, z + dz) ? peekCell(grid, x + dx, z + dz) : null;
     if (n && n.building) score += 1.0;
   }
   if (type === "hut" || type === "longhouse" || type === "greathall") {
@@ -1205,14 +1633,14 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
     score += x < cx ? 4 : -4; // farm district is west
     let farmsNear = 0;
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
-      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) farmsNear++;
+      if (inBounds(x + dx, z + dz)) { const fc = peekCell(grid, x + dx, z + dz); if (fc && fc.farm) farmsNear++; }
     }
     score += farmsNear * 0.4;
   } else if (type === "granary") {
     score -= Math.abs(dist - 4) * 1.0;
     let farmsNear = 0;
     for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
-      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) farmsNear++;
+      if (inBounds(x + dx, z + dz)) { const fc = peekCell(grid, x + dx, z + dz); if (fc && fc.farm) farmsNear++; }
     }
     score += farmsNear * 0.4;
   } else if (type === "well") {
@@ -1222,8 +1650,8 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
     if (altar) score -= Math.hypot(x - altar.x, z - altar.z) * 3;
   } else if (type === "workshop") {
     let nearestStone = Infinity;
-    for (const [sx, sz] of state._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
-    score -= nearestStone * 0.8;
+    for (const [sx, sz] of grid._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
+    if (nearestStone !== Infinity) score -= nearestStone * 0.8;
     score -= Math.abs(dist - 7) * 0.5;
   } else if (type === "school" || type === "healer") {
     // Civic buildings sit near the center, within easy reach of homes.
@@ -1233,9 +1661,13 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
 }
 
 export function findLotSpot(state, grid, type) {
+  ensureIndexes(grid);
   const extent = streetExtent(state);
   let best = null, bestScore = -Infinity;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+  // Lots live beside streets, and the street plan never reaches past
+  // ring 23: scan the settled bbox, not the whole map.
+  const R = 32, cx = state._cx, cz = state._cz;
+  for (let x = Math.max(0, cx - R); x <= Math.min(SIZE - 1, cx + R); x++) for (let z = Math.max(0, cz - R); z <= Math.min(SIZE - 1, cz + R); z++) {
     const sc = lotScore(state, grid, x, z, type, extent);
     if (sc > bestScore) { bestScore = sc; best = [x, z]; }
   }
@@ -1261,7 +1693,7 @@ export const WALL_RING_R = 9;
 
 function ringCellFree(state, grid, x, z) {
   if (!inBounds(x, z)) return false;
-  const c = grid[x][z];
+  const c = cellAt(grid, x, z);
   return !c.blocked && !c.water && !c.farm && !c.building && !c.tree && c.stone <= 0 && c.ore <= 0 && !c.road;
 }
 
@@ -1276,7 +1708,7 @@ export function findWallSpot(state, grid) {
     if (state.buildQueue.some((q) => q.x === x && q.z === z)) continue;
     let score = 0;
     for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-      const n = inBounds(x + ax, z + az) ? grid[x + ax][z + az] : null;
+      const n = inBounds(x + ax, z + az) ? cellAt(grid, x + ax, z + az) : null;
       if (n && n.building === "wall") score += 3;
       if (n && n.building === "tower") score += 1;
     }
@@ -1300,7 +1732,7 @@ export function findTowerSpot(state, grid) {
     const nearGate = (Math.abs(dx) === 1 && Math.abs(dz) === R) || (Math.abs(dx) === R && Math.abs(dz) === 1);
     let score = nearGate ? 5 : 0;
     for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const n = inBounds(x + ax, z + az) ? grid[x + ax][z + az] : null;
+      const n = inBounds(x + ax, z + az) ? cellAt(grid, x + ax, z + az) : null;
       if (n && n.building === "wall") score += 2;
     }
     for (const b of state.buildings) {
@@ -1319,11 +1751,11 @@ export function pavePlaza(grid, cx, cz) {
   let laid = 0;
   const lay = (x, z) => {
     if (!inBounds(x, z)) return;
-    const c = grid[x][z];
+    const c = cellAt(grid, x, z);
     if (c.water || c.building || c.farm || c.road) return;
     if (c.tree) { c.tree = false; c.blocked = false; }
     if (c.stone > 0) { c.stone = 0; c.ore = 0; c.blocked = false; }
-    c.road = true; laid++;
+    c.road = true; laid++; noteMutation(grid, x, z);
   };
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
     if (Math.max(Math.abs(dx), Math.abs(dz)) === 2) lay(cx + dx, cz + dz);
@@ -1346,12 +1778,12 @@ export function paveStreets(state, grid) {
   let paved = 0;
   for (const [x, z] of plan) {
     if (paved >= 8) break;
-    const c = grid[x][z];
+    const c = cellAt(grid, x, z);
     if (c.road) continue;
     if (c.water || c.building || c.farm) continue;
     let touchesRoad = false;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+      const n = inBounds(x + dx, z + dz) ? cellAt(grid, x + dx, z + dz) : null;
       if (n && n.road) { touchesRoad = true; break; }
     }
     if (!touchesRoad) continue;
@@ -1359,7 +1791,7 @@ export function paveStreets(state, grid) {
     if (c.stone > 0) { c.stone = 0; c.ore = 0; }
     c.blocked = false;
     c.road = true;
-    paved++;
+    paved++; noteMutation(grid, x, z);
   }
   if (paved && (state._streetLogAt == null || state.elapsed - state._streetLogAt > 120)) {
     state._streetLogAt = state.elapsed;
@@ -1405,7 +1837,7 @@ export function expandVillage(state, grid) {
   if (state.villagers.length >= 6 && markers < 4 && state.buildQueue.length < 2 && s.wood >= 2) {
     const cx = state._cx, cz = state._cz;
     const corners = [[cx - 6, cz - 6], [cx + 6, cz - 6], [cx - 6, cz + 6], [cx + 6, cz + 6]];
-    const spot = corners.find(([x, z]) => inBounds(x, z) && !grid[x][z].blocked && !grid[x][z].water && !grid[x][z].farm && !grid[x][z].building && !grid[x][z].tree && !state.buildQueue.some((q) => q.x === x && q.z === z));
+    const spot = corners.find(([x, z]) => inBounds(x, z) && !cellAt(grid, x, z).blocked && !cellAt(grid, x, z).water && !cellAt(grid, x, z).farm && !cellAt(grid, x, z).building && !cellAt(grid, x, z).tree && !state.buildQueue.some((q) => q.x === x && q.z === z));
     if (spot) {
       state.buildQueue.push({ type: "marker", x: spot[0], z: spot[1], progress: 0, needWood: 2, needStone: 0, needOre: 0 });
       log(state, "The villagers raise a boundary marker.");
@@ -1421,7 +1853,7 @@ export function expandVillage(state, grid) {
 export function findFarmBed(state, grid) {
   const cx = state._cx, cz = state._cz;
   let best = null, bestScore = -Infinity;
-  for (let x = 4; x < SIZE - 4; x++) for (let z = 4; z < SIZE - 4; z++) {
+  for (let x = Math.max(2, cx - 20); x <= cx - 4; x++) for (let z = Math.max(2, cz - 20); z <= Math.min(SIZE - 3, cz + 20); z++) {
     if (Math.hypot(x - cx, z - cz) > 14) continue;
     if (x > cx - 5) continue; // farm beds stay in the western district
     if (x + 1 > cx - 3) continue; // the whole bed stays west of the plaza
@@ -1430,7 +1862,7 @@ export function findFarmBed(state, grid) {
       const bx = x + dx, bz = z + dz;
       // Beds stay inside the field blocks and off the street plan.
       if (!isFieldZone(state, bx, bz) || isPlanStreet(state, bx, bz)) { free = -99; break; }
-      const c = grid[bx][bz];
+      const c = cellAt(grid, bx, bz);
       if (c.water || c.building || c.road) { free = -99; break; }
       if (c.farm) farmsNear++;
       else if (!c.blocked) free++;
@@ -1441,7 +1873,7 @@ export function findFarmBed(state, grid) {
     // read as blocks and no road ever threads between the beds.
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
       if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
-      if (grid[x + dx][z + dz].road) { free = -99; break; }
+      if (cellAt(grid, x + dx, z + dz).road) { free = -99; break; }
     }
     if (free < 0) continue;
     const newCells = free + trees;
@@ -1462,7 +1894,7 @@ export function clearFarmBed(state, grid, cx0, cz0) {
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     const x = cx0 + dx, z = cz0 + dz;
     if (!inBounds(x, z)) continue;
-    const c = grid[x][z];
+    const c = cellAt(grid, x, z);
     if (c.water || c.building || c.road || c.farm) continue;
     if (isPlanStreet(state, x, z)) continue;
     // Fields belong in the field blocks: a bed cleared around a
@@ -1473,6 +1905,7 @@ export function clearFarmBed(state, grid, cx0, cz0) {
     if (c.stone > 0) { c.stone = 0; c.ore = 0; }
     c.blocked = false; c.farm = true; c.crop = 0; c.cropGrow = 0;
     state._farmCells.push([x, z]);
+    noteMutation(grid, x, z);
     added++;
   }
   return added;
@@ -1548,15 +1981,21 @@ export function spawnRaid(state, grid, size = null) {
   const n = size ?? Math.min(6, 2 + Math.floor(pop / 12));
   const dirs = ["north", "south", "east", "west"];
   const dir = dirs[Math.floor(state._rng() * 4)];
+  // Original spawn pattern: the old block's edge, one draw per
+  // raider. Every edge cell sits 23+ cells from the center, which
+  // is the doc's >=20 active-region-edge rule on the settled map,
+  // and the cells are always generated land. (Phase E may push the
+  // spawn outward as the settled region grows; the pattern stays.)
   const spawned = [];
   for (let i = 0; i < n; i++) {
     let x, z;
-    if (dir === "north") { x = 2 + Math.floor(state._rng() * (SIZE - 4)); z = 1; }
-    else if (dir === "south") { x = 2 + Math.floor(state._rng() * (SIZE - 4)); z = SIZE - 2; }
-    else if (dir === "west") { x = 1; z = 2 + Math.floor(state._rng() * (SIZE - 4)); }
-    else { x = SIZE - 2; z = 2 + Math.floor(state._rng() * (SIZE - 4)); }
+    if (dir === "north") { x = 2 + Math.floor(state._rng() * (OLD_SIZE - 4)); z = 1; }
+    else if (dir === "south") { x = 2 + Math.floor(state._rng() * (OLD_SIZE - 4)); z = OLD_SIZE - 2; }
+    else if (dir === "west") { x = 1; z = 2 + Math.floor(state._rng() * (OLD_SIZE - 4)); }
+    else { x = OLD_SIZE - 2; z = 2 + Math.floor(state._rng() * (OLD_SIZE - 4)); }
     let tries = 0;
-    while (grid[x][z].water && tries < 10) { x = clamp(x + 1, 1, SIZE - 2); z = clamp(z + 1, 1, SIZE - 2); tries++; }
+    let cell = peekCell(grid, x, z);
+    while (cell && cell.water && tries < 10) { x = clamp(x + 1, 1, OLD_SIZE - 2); z = clamp(z + 1, 1, OLD_SIZE - 2); tries++; cell = peekCell(grid, x, z); }
     const r = makeRaider(state, x + 0.5, z + 0.5);
     r.homeEdge = [x, z];
     state.raiders.push(r);
@@ -1569,12 +2008,14 @@ export function spawnRaid(state, grid, size = null) {
   return spawned;
 }
 
-function nearestWallCell(grid, r) {
+function nearestWallCell(state, r) {
+  // The building list is the wall index: walls and towers are few,
+  // and the list is always current. No full-grid scan.
   let best = null, bestD = Infinity;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    if (grid[x][z].building !== "wall" && grid[x][z].building !== "tower") continue;
-    const d = Math.hypot(x - r.x, z - r.z);
-    if (d < bestD) { bestD = d; best = [x, z]; }
+  for (const b of state.buildings) {
+    if (b.type !== "wall" && b.type !== "tower") continue;
+    const d = Math.hypot(b.x - r.x, b.z - r.z);
+    if (d < bestD) { bestD = d; best = [b.x, b.z]; }
   }
   return best;
 }
@@ -1584,7 +2025,7 @@ function moveRaider(state, grid, r, tx, tz, dt) {
     r.retargetAt = state.elapsed + 3;
     const path = findPath(grid, Math.round(r.x), Math.round(r.z), clamp(Math.round(tx), 0, SIZE - 1), clamp(Math.round(tz), 0, SIZE - 1), 4000);
     if (path && path.length) { r.path = path; r.direct = null; }
-    else { r.path = null; r.direct = nearestWallCell(grid, r); }
+    else { r.path = null; r.direct = nearestWallCell(state, r); }
   }
   let dest = null;
   if (r.path && r.path.length) dest = r.path[0];
@@ -1607,7 +2048,7 @@ function destructibleNear(state, grid, r) {
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [0, 0]]) {
     const x = Math.round(r.x) + dx, z = Math.round(r.z) + dz;
     if (!inBounds(x, z)) continue;
-    const t = grid[x][z].building;
+    const t = cellAt(grid, x, z).building;
     if (!t || t === "towncenter" || t === "altar") continue;
     const b = state.buildings.find((o) => o.x === x && o.z === z);
     if (b) return b;
@@ -1684,8 +2125,9 @@ function stepRaiders(state, grid, dt) {
       target.damage = (target.damage || 0) + 6 * dt;
       if (target.damage >= buildingHp(target)) {
         state.buildings = state.buildings.filter((o) => o !== target);
-        grid[target.x][target.z].building = null;
-        grid[target.x][target.z].blocked = false;
+        cellAt(grid, target.x, target.z).building = null;
+        cellAt(grid, target.x, target.z).blocked = false;
+        noteMutation(grid, target.x, target.z);
         log(state, target.type === "wall" ? "Raiders break through the wall!"
           : target.type === "tower" ? "Raiders topple a tower!"
           : "Raiders sack the " + target.type + "!");
@@ -1715,6 +2157,11 @@ function stepRaiders(state, grid, dt) {
 export function step(state, grid, dt) {
   if (state.paused) return;
   state.elapsed += dt;
+  // Chunk machinery, once per substep: drain one queued generation,
+  // refresh the active set (freeze/catch-up), refresh the indexes.
+  drainGenQueue(grid, 1);
+  updateActiveChunks(state, grid);
+  ensureIndexes(grid);
   updateWeather(state);
   if (state.elapsed >= state.expandAt) { state.expandAt = state.elapsed + 20; expandVillage(state, grid); }
   if (state.elapsed >= state.delegateAt) { state.delegateAt = state.elapsed + 15; delegateRoles(state, grid); }
@@ -1724,9 +2171,16 @@ export function step(state, grid, dt) {
     // Trees regrow in spring, rest in summer, and not at all in winter.
     const attempts = state.season === "winter" ? 0 : state.season === "spring" ? 6 : 3;
     for (let i = 0; i < attempts; i++) {
-      const x = Math.floor(state._rng() * SIZE), z = Math.floor(state._rng() * SIZE);
-      const c = grid[x][z];
-      if (!c.water && !c.blocked && !c.tree && !c.farm && !c.building && c.stone <= 0 && Math.hypot(x - state._cx, z - state._cz) > 8) { c.tree = true; c.blocked = true; }
+      // Two draws per attempt, exactly as the old code: blind
+      // coordinates across the settled 48-block. Rolling across the
+      // whole 320-grid would plant almost nothing (9/400 attempts
+      // land on generated ground) and starve the woodcutters; new
+      // territory already grows its hash-scattered trees.
+      const x = Math.floor(state._rng() * OLD_SIZE), z = Math.floor(state._rng() * OLD_SIZE);
+      const ch = grid.chunks.get(chunkKey(Math.floor(x / CHUNK), Math.floor(z / CHUNK)));
+      if (!ch) continue;
+      const c = ch.cells[x % CHUNK][z % CHUNK];
+      if (!c.water && !c.blocked && !c.tree && !c.farm && !c.building && c.stone <= 0 && Math.hypot(x - state._cx, z - state._cz) > 8) { c.tree = true; c.blocked = true; noteMutation(grid, x, z); }
     }
   }
   state.time += dt / DAY_LENGTH;
@@ -1818,7 +2272,7 @@ export function step(state, grid, dt) {
     const eraGrowth = (state.tech && state.tech.level >= 4 ? 1.25 : 1) * (state.tech && state.tech.level >= 5 ? 1.15 : 1);
     const growth = SEASON_GROWTH[state.season] * (state.weather.kind === "rain" ? 1.5 : 1) * eraGrowth;
     for (const [x, z] of state._farmCells) {
-      const c = grid[x][z];
+      const c = cellAt(grid, x, z);
       const nearHouse = farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5);
       if (c.crop >= 0 && c.crop < 3) { c.cropGrow += dt * growth * (nearHouse ? 1.5 : 1); if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; } }
     }
@@ -1826,10 +2280,10 @@ export function step(state, grid, dt) {
   // Storms tear at the crops: one plot loses a growth stage.
   if (state.weather && state.weather.kind === "storm" && state.elapsed >= (state.stormAt || 0)) {
     state.stormAt = state.elapsed + 10;
-    const grown = state._farmCells.filter(([x, z]) => grid[x][z].crop > 0);
+    const grown = state._farmCells.filter(([x, z]) => cellAt(grid, x, z).crop > 0);
     if (grown.length) {
       const [x, z] = grown[Math.floor(state._rng() * grown.length)];
-      const c = grid[x][z]; c.crop--; c.cropGrow = 0;
+      const c = cellAt(grid, x, z); c.crop--; c.cropGrow = 0;
       if (state._rng() < 0.25) log(state, "The storm batters the fields.");
     }
   }
@@ -1837,12 +2291,18 @@ export function step(state, grid, dt) {
   // forever once the first clusters are mined out.
   if (state.elapsed >= (state.stoneAt || 30)) {
     state.stoneAt = state.elapsed + 30;
-    const [x, z] = state._stoneSpots[Math.floor(state._rng() * state._stoneSpots.length)];
-    if (grid[x][z].stone < 10) { grid[x][z].stone += 2; grid[x][z].blocked = true; }
+    ensureIndexes(grid);
+    const spots = grid._stoneSpots || [];
+    if (spots.length) {
+      const [x, z] = spots[Math.floor(state._rng() * spots.length)];
+      const c = cellAt(grid, x, z);
+      if (c && c.stone < 10) { c.stone += 2; c.blocked = true; noteMutation(grid, x, z); }
+    }
     // Ore weathers back slowly too, so a workshop stays reachable.
     if (state._oreSpots && state._oreSpots.length && state._rng() < 0.3) {
       const [ox, oz] = state._oreSpots[Math.floor(state._rng() * state._oreSpots.length)];
-      if (grid[ox][oz].ore < 6) { grid[ox][oz].ore++; grid[ox][oz].blocked = true; }
+      const oc = cellAt(grid, ox, oz);
+      if (oc && oc.ore < 6) { oc.ore++; oc.blocked = true; noteMutation(grid, ox, oz); }
     }
   }
 
@@ -1908,13 +2368,13 @@ export function step(state, grid, dt) {
       const [px, pz] = v.path[0];
       const dx = px + 0.5 - v.x, dz = pz + 0.5 - v.z, dist = Math.hypot(dx, dz);
       if (dist < 0.25) v.path.shift();
-      else { const onRoad = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)].road; const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1; const sp = (v.state === "flee" ? 3.4 : 2.2) * (onRoad ? 1.35 : 1) * moveFactor * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
+      else { const onRoad = cellAt(grid, clamp(Math.round(v.x), 0, SIZE - 1), clamp(Math.round(v.z), 0, SIZE - 1)).road; const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1; const sp = (v.state === "flee" ? 3.4 : 2.2) * (onRoad ? 1.35 : 1) * moveFactor * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
     } else if (v.target) {
       const dx = v.target[0] + 0.5 - v.x, dz = v.target[1] + 0.5 - v.z, dist = Math.hypot(dx, dz);
       // Don't walk into a blocked target cell: stop at working distance.
-      const stopAt = grid[v.target[0]][v.target[1]].blocked ? 1.0 : 0.4;
+      const stopAt = cellAt(grid, v.target[0], v.target[1]).blocked ? 1.0 : 0.4;
       if (dist > stopAt) {
-        const cell = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)];
+        const cell = cellAt(grid, clamp(Math.round(v.x), 0, SIZE - 1), clamp(Math.round(v.z), 0, SIZE - 1));
         void cell;
         const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1;
         const sp = (v.job === "hunter" && v.state === "work" ? 3.0 : 2.2) * moveFactor * dt; v.x += (dx / dist) * Math.min(sp, dist - stopAt + 0.05); v.z += (dz / dist) * Math.min(sp, dist - stopAt + 0.05); moving = true;
@@ -1940,7 +2400,7 @@ export function step(state, grid, dt) {
             s[eatKind]--;
             if (v.coins >= PRICES[eatKind]) { v.coins -= PRICES[eatKind]; state.fund += PRICES[eatKind]; }
           }
-        } else if (v.target && grid[v.target[0]][v.target[1]].farm && grid[v.target[0]][v.target[1]].crop === 3) { grid[v.target[0]][v.target[1]].crop = 0; }
+        } else if (v.target && cellAt(grid, v.target[0], v.target[1]).farm && cellAt(grid, v.target[0], v.target[1]).crop === 3) { cellAt(grid, v.target[0], v.target[1]).crop = 0; }
         v.hunger = clamp(v.hunger - 45, 0, 100);
         v.state = "idle"; v.target = null; v.rethinkAt = state.elapsed + 1;
       } else if (v.state === "haul") {
@@ -2055,19 +2515,22 @@ export function leader(state) {
 // --- save / load: only plain data, grid is rebuilt from the seed ---
 
 export function serialize(state, grid) {
+  ensureIndexes(grid);
   const crops = [], stones = [], buildings = [], roads = [];
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    const c = grid[x][z];
+  // Only generated chunks contribute: ungenerated land is the seed's
+  // business, and costs zero save bytes.
+  forEachGeneratedCell(grid, (x, z, c) => {
     if (c.crop >= 0) crops.push([x, z, c.crop, c.cropGrow]);
     if (c.stone > 0 || c.ore > 0) stones.push([x, z, c.stone, c.ore, c.blocked ? 1 : 0]);
     if (c.building) buildings.push([x, z, c.building]);
     if (c.road) roads.push([x, z]);
-  }
-  const { _rng, _farmCells, _stoneSpots, _oreSpots, _fire, _quake, raiders, _raidStats, ...rest } = state;
-  void _rng; void _farmCells; void _stoneSpots; void _oreSpots; void raiders; void _raidStats;
+  });
+  const chunks = [...grid.chunks.keys()].map((k) => k.split(",").map(Number));
+  const { _rng, _farmCells, _oreSpots, _fire, _quake, raiders, _raidStats, ...rest } = state;
+  void _rng; void _farmCells; void _oreSpots; void raiders; void _raidStats;
   // The save version is stamped here, not trusted to state, so every
   // file on disk carries the version its writer used.
-  return JSON.stringify({ ...rest, version: SAVE_VERSION, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
+  return JSON.stringify({ ...rest, version: SAVE_VERSION, crops, stones, buildings, roads, chunks, fire: _fire || null, quake: _quake || null });
 }
 
 export function deserialize(json) {
@@ -2077,7 +2540,8 @@ export function deserialize(json) {
   // Overlay saved dynamic state, keeping the regenerated grid's statics.
   const savedCrops = data.crops, savedStones = data.stones, savedBuildings = data.buildings;
   const savedFire = data.fire, savedQuake = data.quake, savedRoads = data.roads || [];
-  delete data.crops; delete data.stones; delete data.buildings; delete data.fire; delete data.quake; delete data.roads;
+  const savedChunks = data.chunks || null;
+  delete data.crops; delete data.stones; delete data.buildings; delete data.fire; delete data.quake; delete data.roads; delete data.chunks;
   Object.assign(state, data);
   // Migrations for saves made before a feature existed: a missing
   // delegateAt would stall delegation forever, and villagers saved
@@ -2124,6 +2588,28 @@ export function deserialize(json) {
     if (state.lastRaidDay == null) state.lastRaidDay = -1e9;
     if (state.raidUntil == null) state.raidUntil = -1;
   }
+  // v13 (fromVersion < 5): the chunked world, guards, neighbor
+  // villages. This build takes SAVE_VERSION 5; the leader design's
+  // own 4-to-5 step lands later and takes 6. Sites and records are
+  // deterministic from the seed, so a v4 save gains the same
+  // neighbors newWorld would have picked; a v5 save keeps its own.
+  // SAVE_VERSION coordination decision (build log, Nov 3, 2026).
+  if (fromVersion < 5) {
+    if (!state.villageSites || !state.villageSites.length) {
+      state.villageSites = pickVillageSites(data.seed, 2);
+    }
+    if (!state.villages || !state.villages.length) {
+      state.villages = state.villageSites.map((s, i) => makeVillageRecord(data.seed, i + 1, s, state.villageSites.map((_, j) => j + 1).filter((id) => id !== i + 1)));
+    }
+    if (!state.caravans) state.caravans = [];
+    if (!state.warParties) state.warParties = [];
+    if (state.nextCaravanId == null) state.nextCaravanId = 1;
+    if (state.nextWarPartyId == null) state.nextWarPartyId = 1;
+  }
+  grid._villageSites = state.villageSites || [];
+  // Regenerate every chunk the save had generated, so chunks with no
+  // deltas still count as generated (render + save round-trips).
+  if (savedChunks) for (const [cx, cz] of savedChunks) getChunk(grid, cx, cz);
   if (state.raidActive) log(state, "The raid scatters as the world is remade.");
   state.raidActive = false;
   state.raiders = [];
@@ -2139,22 +2625,23 @@ export function deserialize(json) {
     if (!v.goods) { v.goods = {}; for (const g of Object.keys(PRICES)) v.goods[g] = 0; }
     for (const g of Object.keys(PRICES)) if (v.goods[g] == null) v.goods[g] = 0;
     if (v.toolTick == null) v.toolTick = 0;
+    if (v.village == null) v.village = 0;
     // v11 fields: a migrated villager starts unschooled, with crude tools.
     if (v.education == null) v.education = 0;
     if (v.tool == null) v.tool = 0;
     if (!("home" in v)) v.home = null;
   }
-  for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
+  for (const b of state.buildings) { if (b.builtDay == null) b.builtDay = 1; if (b.village == null) b.village = 0; }
   assignHomes(state);
   state._rng = mulberry32((data.seed ^ 0x9e3779b9) + Math.floor(state.elapsed * 1000));
-  for (const [x, z, crop, grow] of savedCrops) { grid[x][z].farm = true; grid[x][z].crop = crop; grid[x][z].cropGrow = grow; }
-  for (const [x, z] of savedRoads) grid[x][z].road = true;
+  for (const [x, z, crop, grow] of savedCrops) { cellAt(grid, x, z).farm = true; cellAt(grid, x, z).crop = crop; cellAt(grid, x, z).cropGrow = grow; }
+  for (const [x, z] of savedRoads) cellAt(grid, x, z).road = true;
   // Rebuild the farm list from the grid so farms cleared by expansion
   // before the save keep growing after load.
   state._farmCells = [];
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) state._farmCells.push([x, z]);
-  for (const [x, z, stone, ore, blocked] of savedStones) { grid[x][z].stone = stone; grid[x][z].ore = ore; grid[x][z].blocked = !!blocked; }
-  for (const [x, z, type] of savedBuildings) grid[x][z].building = type;
+  forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) state._farmCells.push([x, z]); });
+  for (const [x, z, stone, ore, blocked] of savedStones) { cellAt(grid, x, z).stone = stone; cellAt(grid, x, z).ore = ore; cellAt(grid, x, z).blocked = !!blocked; }
+  for (const [x, z, type] of savedBuildings) cellAt(grid, x, z).building = type;
   // Rebuild the building list from the grid. serialize() stores
   // buildings as grid triples and deletes the object list before the
   // overlay, so a load that trusted the fresh founding list dropped
@@ -2163,19 +2650,19 @@ export function deserialize(json) {
   // all of it, then reassign homes to the full village.
   {
     const seen = new Set(state.buildings.map((b) => b.x + "," + b.z));
-    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-      const t = grid[x][z].building;
+    forEachGeneratedCell(grid, (x, z, c) => {
+      const t = c.building;
       if (t && !seen.has(x + "," + z)) {
-        state.buildings.push({ type: t, x, z, done: true, builtDay: 1 });
+        state.buildings.push({ type: t, x, z, done: true, builtDay: 1, village: 0 });
         seen.add(x + "," + z);
       }
-    }
+    });
   }
   assignHomes(state);
   // Older saves were founded without a plaza: lay it once so the
   // old village gains the same visible square and farm road.
   let roadCount = 0;
-  for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].road) roadCount++;
+  forEachGeneratedCell(grid, (x, z, c) => { if (c.road) roadCount++; });
   if (roadCount < 10) pavePlaza(grid, state._cx, state._cz);
   state._fire = savedFire || null; state._quake = savedQuake || null;
   return { state, grid };
