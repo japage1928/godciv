@@ -1,6 +1,6 @@
 /* GodCiv service worker: cache-first app shell so the game works offline
    after the first load. Version the cache name when the shell changes. */
-const CACHE = "godciv-v10";
+const CACHE = "godciv-v11";
 const PRECACHE = [
   "./",
   "./index.html",
@@ -25,6 +25,9 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
+  // The always-on village API is never cached: /api/* is network-only,
+  // so polls always read the live server world.
+  if (url.pathname.startsWith("/api/")) return;
   // Only cache same-origin GETs. Ollama and any other API calls go to the network.
   if (event.request.method !== "GET" || url.origin !== location.origin) return;
   // Navigations are network-first: a cached old shell must never hide a

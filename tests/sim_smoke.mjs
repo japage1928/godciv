@@ -229,6 +229,20 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
   assert.ok(demands2.some((d) => d.type === "shrine"), "a 14-person village must demand a shrine, got " + demands2.map((d) => d.type).join(","));
 }
 
+// Save/load keeps every finished building, not just the founding
+// three. (Pre-v11, deserialize trusted the fresh founding list and
+// dropped granaries, markers, and later huts from state on every
+// load, though they survived on the grid.)
+{
+  const { state: s, grid: g } = newWorld(31);
+  for (let i = 0; i < 4320; i++) step(s, g, 0.25);
+  assert.ok(s.buildings.length > 3, "a 6-day village must have raised buildings past founding, got " + s.buildings.length);
+  const types = s.buildings.map((b) => b.type).sort().join(",");
+  const loaded = deserialize(serialize(s, g));
+  assert.equal(loaded.state.buildings.map((b) => b.type).sort().join(","), types, "all building types must survive save/load, before=" + types + " after=" + loaded.state.buildings.map((b) => b.type).sort().join(","));
+  assert.equal(loaded.state.buildings.length, s.buildings.length, "building count must survive save/load");
+}
+
 // Fishers: with a shore and mouths to feed, the leader delegates a
 // fisher, and fish reach the stockpile.
 {

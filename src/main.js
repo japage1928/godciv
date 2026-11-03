@@ -1,12 +1,21 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, TECH_THRESHOLD, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v10";
+const APP_VERSION = "v11";
+const PAGES_ORIGIN = "https://japage1928.github.io";
+// The always-on village lives on the same origin as this page when the
+// page is served by the server. Any other origin (GitHub Pages, a local
+// file) defaults to the local village; the toggle on the start screen
+// can still switch modes.
+let serverMode = location.origin !== PAGES_ORIGIN;
+let serverPollAt = 0;
+let serverFetching = false;
+let serverDown = false;
 
 let world = null; // {state, grid}
 let renderer = null;
@@ -30,6 +39,9 @@ function fmtTime(state) {
   return String(Math.floor(mins / 60)).padStart(2, "0") + ":" + String(mins % 60).padStart(2, "0");
 }
 
+const WEATHER_LABEL = { clear: "☀️ Clear", rain: "🌧️ Rain", storm: "⛈️ Storm", snow: "❄️ Snow", heat: "🔥 Heat" };
+const SEASON_EMOJI = { spring: "🌱", summer: "☀️", autumn: "🍂", winter: "❄️" };
+
 function renderHUD() {
   const s = world.state;
   const edible = s.stockpile.food + s.stockpile.fish + s.stockpile.meat;
@@ -39,8 +51,16 @@ function renderHUD() {
   $("stat-ore").textContent = s.stockpile.ore;
   $("stat-faith").textContent = Math.round(s.faith);
   $("faith-fill").style.width = s.faith + "%";
-  $("stat-day").textContent = "Day " + s.day + " · " + fmtTime(s);
+  $("stat-day").textContent = "Day " + s.day + " · " + fmtTime(s) + " · " + phaseOf(s.time);
   $("stat-pop").textContent = s.villagers.length + "/" + s.populationCap;
+  $("stat-season").textContent = SEASON_EMOJI[s.season] + " " + SEASON_NAMES[s.season] + " Yr " + yearOf(s.day) + " · " + WEATHER_LABEL[s.weather ? s.weather.kind : "clear"];
+  $("stat-morale").textContent = "💛 " + Math.round(s.morale ?? 60);
+  $("stat-morale").title = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(", ") || "Morale";
+  $("stat-tech").textContent = "⚒️ " + TECH_TIERS[s.tech ? s.tech.level : 0].name;
+  const fest = nextFestival(s.day);
+  const celebrating = s.celebration && s.elapsed < s.celebration.until;
+  $("stat-festival").textContent = celebrating ? "🎉 " + s.celebration.name + "!" : "🎉 " + fest.name + " in " + fest.inDays + "d";
+  $("stat-mode").textContent = serverMode ? "Always-on village" : "This village";
   if (renderer) $("stat-view").textContent = "View " + Math.round(renderer.target.x) + "," + Math.round(renderer.target.z);
   $("version-chip").textContent = APP_VERSION;
   const effects = [];
@@ -66,6 +86,7 @@ function villagerCard(v) {
   return `<h3>${v.name}${v.leader ? " · Leader" : ""}</h3>
     <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}</p>
     <p>Coins: <b>${v.coins}</b> · Personal goods: ${goods}</p>
+    <p>Education: <b>${v.education || 0}/10</b> · Tools: <b>${TOOL_NAMES[v.tool || 0]}</b>${v.job === "student" ? " · at school" : ""}${v.sick ? " · sick" : ""}</p>
     <p>Delegated by the leader: <b>${v.assignedJob || "none yet"}</b>${v.delegated ? " · following it" : v.assignedJob ? " · chose own work" : ""}</p>
     <p>Traits: ${v.traits.join(", ")}</p>
     <div class="bars">
@@ -107,13 +128,29 @@ function renderPanel() {
     const farmhouses = s.buildings.filter((b) => b.type === "farmhouse").length;
     const farmPlots = world.grid.flat().filter((c) => c.farm).length;
     const roadCells = world.grid.flat().filter((c) => c.road).length;
+    const moraleLine = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(" · ");
+    const tech = s.tech || { level: 0, progress: 0 };
+    const nextTier = TECH_TIERS[tech.level + 1];
+    const fest = nextFestival(s.day);
+    const celebrating = s.celebration && s.elapsed < s.celebration.until;
+    const school = s.buildings.find((b) => b.type === "school");
+    const students = s.villagers.filter((o) => isStudent(s, o));
+    const teacher = s.villagers.find((o) => o.assignedJob === "teacher");
+    const educated = s.villagers.filter((o) => (o.education || 0) >= 5).length;
+    const healer = s.buildings.find((b) => b.type === "healer");
     $("panel-body").innerHTML = `
       <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p>${SEASON_EMOJI[s.season]} ${SEASON_NAMES[s.season]}, Year ${yearOf(s.day)} · ${WEATHER_LABEL[s.weather ? s.weather.kind : "clear"]} · ${phaseOf(s.time)}</p>
+      <p>Morale: <b>${Math.round(s.morale ?? 60)}/100</b>${moraleLine ? ": " + moraleLine : ""}</p>
+      <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> (${tech.progress}/${TECH_THRESHOLD})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
+      <p>${celebrating ? "🎉 <b>" + s.celebration.name + "!</b> The village feasts at the town center." : "🎉 Next festival: <b>" + fest.name + "</b> in " + fest.inDays + "d, needs " + FESTIVAL_MIN_EDIBLE + " food in store and faith " + FESTIVAL_MIN_FAITH + ". A feast costs 10 food and lifts morale."}</p>
+      ${school ? `<p>School: <b>${students.length} student${students.length === 1 ? "" : "s"}</b>${teacher ? " · teacher " + teacher.name : " · no teacher yet"} · ${educated} educated adult${educated === 1 ? "" : "s"}</p>` : ""}
+      ${healer ? `<p>A healer's hut stands. The sick mend faster near it.</p>` : ""}
       <p>Farms: <b>${farmPlots} plots</b> in the west fields${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") + " (plots near one grow faster)" : " · no farmhouse yet"} · Food sources: farmers ${counts.farmer || 0} · fishers ${counts.fisher || 0} · hunters ${counts.hunter || 0} · Roads: ${roadCells} cells from the plaza to every district</p>
-      <p>Market: fund <b>${s.fund}</b> coins · ${s.stats.trades || 0} trades · prices: ${Object.keys(PRICES).map((g) => g + " " + PRICES[g]).join(" · ")} — villagers trade personal goods at the town center; a broke villager still eats from the stockpile.</p>
+      <p>Market: fund <b>${s.fund}</b> coins · ${s.stats.trades || 0} trades · prices: ${Object.keys(PRICES).map((g) => g + " " + PRICES[g]).join(" · ")}: villagers trade personal goods at the town center; a broke villager still eats from the stockpile.</p>
       <p>Births: <b>${rates.birthRate.toFixed(1)}%/day</b> · Deaths: <b>${rates.deathRate.toFixed(1)}%/day</b> (${rates.birthsPerDay.toFixed(1)} births, ${rates.deathsPerDay.toFixed(1)} deaths per day, last ${s.rateHistory.length || 0} dawns · ${s.stats.births} born, ${s.stats.deaths} died all time)</p>
-      <p>Builders need: <b>${demands.length ? demands[0].type + " — " + demands[0].reason : "nothing pressing"}</b></p>
-      <p>Leader: <b>${l ? l.name : "none"}</b> — delegates: ${JOBS.map((j) => j + " " + (assigned[j] || 0)).join(" · ")}</p>
+      <p>Builders need: <b>${demands.length ? demands[0].type + ": " + demands[0].reason : "nothing pressing"}</b></p>
+      <p>Leader: <b>${l ? l.name : "none"}</b> delegates: ${JOBS.map((j) => j + " " + (assigned[j] || 0)).join(" · ")}</p>
       <p class="muted">Buildings: ${s.buildings.map((b) => b.type).join(", ")}. Town center, granary, roads, and markers are all raised by villagers, never by the god. Huts build themselves when crowded, farms spread when food is short.</p>
       <p>Jobs: ${JOBS.map((j) => j + " " + (counts[j] || 0)).join(" · ")}</p>
       <label for="directive-select">Leader directive (a nudge, villagers can disobey)</label>
@@ -122,23 +159,54 @@ function renderPanel() {
         ${JOBS.map((j) => `<option value="${j}" ${s.directive?.focusJob === j ? "selected" : ""}>Focus: ${j}</option>`).join("")}
       </select>
       <div class="row"><button id="apply-directive">Set directive</button><button id="center-village">Center on village</button></div>
-      <div id="council-card" class="council"><h4>Council</h4><p id="council-text">The elder is quiet. Enable Ollama in Settings for model advice, or use the utility council below.</p>
+      ${serverMode
+        ? `<div class="council"><h4>Council</h4><p class="muted">The council rests while the village runs on the server. The utility brain keeps the village going.</p></div>`
+        : `<div id="council-card" class="council"><h4>Council</h4><p id="council-text">The elder is quiet. Enable Ollama in Settings for model advice, or use the utility council below.</p>
       <p class="muted" id="council-source"></p>
-      <div class="row"><button id="ask-council">Ask council now</button></div></div>
+      <div class="row"><button id="ask-council">Ask council now</button></div></div>`}
       <h4>God log</h4><div id="log">${s.log.map((e) => `<p><span class="muted">Day ${e.day}</span> ${e.text}</p>`).join("")}</div>`;
     $("apply-directive").addEventListener("click", () => {
       const val = $("directive-select").value;
-      const r = applyGod(s, world.grid, "directive", null, null, { focusJob: val || null });
-      if (!r.ok) toast(r.reason); renderHUD(); renderPanel();
+      doGod("directive", null, null, { focusJob: val || null });
     });
     $("center-village").addEventListener("click", () => renderer.centerOn(24, 24));
-    $("ask-council").addEventListener("click", () => runCouncil(true));
+    $("ask-council")?.addEventListener("click", () => runCouncil(true));
   }
 }
 
-function doGod(action, x, z) {
+async function postGod(action, x, z, opts = {}) {
+  const res = await fetch("./api/god", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action, x, z, ...opts }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+function applyServerState(stateJson) {
+  const w = deserialize(typeof stateJson === "string" ? stateJson : JSON.stringify(stateJson));
+  world = w;
+  renderHUD();
+  if ($("panel").classList.contains("open")) renderPanel();
+}
+
+async function doGod(action, x, z, opts = {}) {
+  if (serverMode) {
+    try {
+      const r = await postGod(action, x, z, opts);
+      if (!r.ok) { toast(r.reason || "The god action was refused."); return false; }
+      armed = null; $("arm-banner").style.display = "none";
+      if (r.state) applyServerState(r.state);
+      return true;
+    } catch (e) {
+      toast("The server did not answer. The village keeps going without you.");
+      return false;
+    }
+  }
   const s = world.state;
-  const r = applyGod(s, world.grid, action, x, z);
+  const r = applyGod(s, world.grid, action, x, z, opts);
   if (!r.ok) { toast(r.reason); return false; }
   armed = null; $("arm-banner").style.display = "none";
   renderHUD(); renderPanel();
@@ -152,6 +220,9 @@ function armGod(action) {
 }
 
 function saveGame(silent = false) {
+  // The always-on village saves itself on the server. Local saves
+  // stay untouched in server mode: switching back finds them as left.
+  if (serverMode) { if (!silent) toast("The always-on village saves itself on the server."); return; }
   try {
     localStorage.setItem(SAVE_KEY, serialize(world.state, world.grid));
     lastSave = performance.now();
@@ -166,6 +237,9 @@ function loadGame() {
 }
 
 async function runCouncil(manual = false) {
+  // The council is a local-village voice. It stays off in server mode:
+  // the server ticks on its own and the phone only watches and nudges.
+  if (serverMode) return;
   const s = world.state;
   const card = $("council-text"), src = $("council-source");
   try {
@@ -206,9 +280,8 @@ function logCouncilWhisper(advice) {
   }
 }
 
-function startWorld(seed, fromSave) {
-  world = fromSave || newWorld(seed);
-  world.state._rng = world.state._rng || null;
+function enterWorld(w, isServer) {
+  world = w;
   if (!renderer) {
     renderer = new Renderer($("scene"), (pick) => {
       if (pick.type === "villager") {
@@ -223,15 +296,61 @@ function startWorld(seed, fromSave) {
         }
       }
     });
-    renderer.buildStatic(world.grid);
     window.addEventListener("resize", () => renderer.resize());
-  } else {
-    renderer.buildStatic(world.grid);
   }
+  renderer.buildStatic(world.grid);
   renderer.centerOn(24, 24);
   $("start-overlay").style.display = "none";
+  // In server mode the server ticks at 1x: speed and pause are the
+  // server's business, not the phone's.
+  $("btn-speed").disabled = isServer;
+  $("btn-pause").disabled = isServer;
+  $("btn-speed").textContent = isServer ? "Server 1×" : world.state.speed + "×";
+  $("btn-pause").textContent = "⏸ Pause";
   renderHUD(); renderPanel();
   councilTimer = world.state.elapsed + (ollama.intervalSec || 90);
+  serverPollAt = 0;
+}
+
+function startWorld(seed, fromSave) {
+  const w = fromSave || newWorld(seed);
+  enterWorld(w, false);
+}
+
+// Join the always-on village: same origin, relative /api/* paths, no
+// URL baked in. The server owns the sim; the phone renders polls.
+async function startServerWorld() {
+  $("server-info").textContent = "Reaching the always-on village…";
+  try {
+    const res = await fetch("./api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const w = deserialize(await res.text());
+    serverDown = false;
+    enterWorld(w, true);
+    toast("Joined the always-on village. Day " + w.state.day + ".");
+  } catch (e) {
+    $("server-info").textContent = "Could not reach the always-on village. Check the connection and try again.";
+    toast("Server unreachable.");
+  }
+}
+
+// Poll the server world every 2s. Only the state swaps: buildings,
+// farms, and roads update through the renderer's normal paths, and
+// the static ground snapshot stays as first built, same as local play.
+async function pollServer() {
+  if (serverFetching || !world) return;
+  serverFetching = true;
+  try {
+    const res = await fetch("./api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const w = deserialize(await res.text());
+    world = w;
+    serverDown = false;
+    renderHUD();
+    if ($("panel").classList.contains("open")) renderPanel();
+  } catch (e) {
+    if (!serverDown) { serverDown = true; toast("Lost the always-on village. Retrying…"); }
+  } finally { serverFetching = false; }
 }
 
 function bindUI() {
@@ -247,10 +366,8 @@ function bindUI() {
   $("whisper-send").addEventListener("click", () => {
     const text = $("whisper-input").value.trim();
     if (!text) return;
-    const r = applyGod(world.state, world.grid, "whisper", null, null, { text });
-    if (!r.ok) toast(r.reason);
+    doGod("whisper", null, null, { text });
     $("whisper-input").value = ""; $("whisper-box").style.display = "none";
-    renderHUD(); renderPanel();
   });
   $("whisper-cancel").addEventListener("click", () => { $("whisper-box").style.display = "none"; });
   $("btn-pause").addEventListener("click", () => {
@@ -286,7 +403,7 @@ function bindUI() {
     try {
       const r = await testOllama(ollama);
       $("set-status").textContent = "Ollama reachable. Models: " + (r.models.join(", ") || "none") + ". " + (r.hasModel ? "Your model is installed." : "Your model is NOT in that list.");
-    } catch (e) { $("set-status").textContent = "Unreachable: " + e.message + " — on a phone this usually means the URL is localhost, or Ollama needs CORS / a LAN address."; }
+    } catch (e) { $("set-status").textContent = "Unreachable: " + e.message + ". On a phone this usually means the URL is localhost, or Ollama needs CORS / a LAN address."; }
   });
   $("btn-new").addEventListener("click", () => {
     if (!confirm("Start a new village? Your saved village will be replaced on the next save.")) return;
@@ -296,12 +413,28 @@ function bindUI() {
   document.addEventListener("visibilitychange", () => { if (document.hidden && world) saveGame(true); });
   window.addEventListener("beforeunload", () => { if (world) saveGame(true); });
 
-  // Start overlay.
+  // Start overlay: mode toggle, then the mode's own start buttons.
+  // A saved local village keeps going under the new rules when
+  // continued: seasons, weather, morale, schools, and tech arrive
+  // with defaults, and nothing already built is lost.
   const saved = loadGame();
   $("btn-continue").style.display = saved ? "" : "none";
-  $("save-info").textContent = saved ? "Saved village found: Day " + saved.state.day + ", " + saved.state.villagers.length + " villagers." : "No saved village on this device yet.";
+  $("save-info").textContent = saved
+    ? "Saved village found: Day " + saved.state.day + ", " + saved.state.villagers.length + " villagers. Continue, and it keeps going under the new rules."
+    : "No saved village on this device yet.";
+  const setMode = (server) => {
+    serverMode = server;
+    $("btn-mode-local").classList.toggle("active", !server);
+    $("btn-mode-server").classList.toggle("active", server);
+    $("local-start").style.display = server ? "none" : "";
+    $("server-start").style.display = server ? "" : "none";
+  };
+  $("btn-mode-local").addEventListener("click", () => setMode(false));
+  $("btn-mode-server").addEventListener("click", () => setMode(true));
+  setMode(serverMode);
   $("btn-new-game").addEventListener("click", () => startWorld((Math.random() * 1e9) | 0, null));
   $("btn-continue").addEventListener("click", () => { const s = loadGame(); if (s) startWorld(0, s); });
+  $("btn-join-server").addEventListener("click", () => startServerWorld());
 }
 
 let lastFrame = performance.now();
@@ -311,22 +444,28 @@ function loop(now) {
   const dtReal = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
   const s = world.state;
-  if (!s.paused) {
-    const simDt = dtReal * s.speed;
-    // Fixed substeps so the sim stays stable at 4x.
-    let remaining = simDt;
-    while (remaining > 0) { const h = Math.min(0.25, remaining); step(s, world.grid, h); remaining -= h; }
+  if (serverMode) {
+    // The server ticks. The phone polls, renders, and never steps,
+    // never autosaves, never councils.
+    if (now - serverPollAt > 2000) { serverPollAt = now; pollServer(); }
+  } else {
+    if (!s.paused) {
+      const simDt = dtReal * s.speed;
+      // Fixed substeps so the sim stays stable at 4x.
+      let remaining = simDt;
+      while (remaining > 0) { const h = Math.min(0.25, remaining); step(s, world.grid, h); remaining -= h; }
+    }
   }
   renderer.update(s, world.grid, dtReal, now / 1000);
   // HUD + panel refresh at ~4 Hz, not every frame.
   if (now - (loop._hudAt || 0) > 250) { loop._hudAt = now; renderHUD(); if ($("panel").classList.contains("open")) renderPanel(); }
-  // Council loop.
-  if (s.elapsed >= councilTimer) {
+  // Council loop (local villages only).
+  if (!serverMode && s.elapsed >= councilTimer) {
     councilTimer = s.elapsed + (ollama.intervalSec || 90);
     runCouncil(false);
   }
-  // Autosave every 15s.
-  if (now - lastSave > 15000) saveGame(true);
+  // Autosave every 15s (local villages only).
+  if (!serverMode && now - lastSave > 15000) saveGame(true);
 }
 
 bindUI();

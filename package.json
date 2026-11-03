@@ -1,1 +1,1 @@
-{"description":"GodCiv PWA: a tiny voxel civilization run by individual villagers.","name":"godciv-pwa","private":true,"scripts":{"test":"node tests/sim_smoke.mjs && node tests/pan_smoke.mjs"},"type":"module","version":"1.0.0"}
+{"description":"GodCiv PWA: a tiny voxel civilization run by individual villagers.","name":"godciv-pwa","private":true,"scripts":{"test":"node tests/sim_smoke.mjs && node tests/pan_smoke.mjs && node tests/society_smoke.mjs && node tests/server_smoke.mjs"},"type":"module","version":"1.0.0"}

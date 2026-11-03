@@ -57,6 +57,8 @@
   #start-card p { line-height: 1.5; }
   #start-card .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
   #start-card button { font-size: 16px; padding: 12px 16px; }
+  #mode-row button.active { background: #3a553a; border-color: var(--accent); }
+  button:disabled { opacity: .5; }
   dialog { background: #16241a; color: #eef5ee; border: 1px solid #3a523a; border-radius: 14px; max-width: min(480px, calc(100vw - 24px)); padding: 18px; }
   dialog label { display: block; font-size: 13px; margin: 10px 0 2px; }
   dialog input { width: 100%; }
@@ -79,9 +81,14 @@
     <span class="chip">⛏️ <b id="stat-ore">0</b></span>
     <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
     <span class="chip" id="stat-day">Day 1</span>
+    <span class="chip" id="stat-season">🌱 Spring</span>
+    <span class="chip" id="stat-morale" title="Morale">💛 60</span>
+    <span class="chip" id="stat-tech">⚒️ Stone tools</span>
+    <span class="chip" id="stat-festival">🎉 Spring Bloom</span>
     <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
     <span class="chip" id="stat-view">View 24,24</span>
-    <span class="chip" id="version-chip">v6</span>
+    <span class="chip" id="stat-mode">This village</span>
+    <span class="chip" id="version-chip">v11</span>
     <span class="chip" id="stat-effects" style="display:none"></span>
     <span id="top-actions">
       <button id="btn-panel" title="Village panel">🏛️</button>
@@ -131,12 +138,25 @@
     <h1>GodCiv</h1>
     <p>You are the god of a tiny voxel village. You never control a villager directly. Each one has traits, skills, hunger, and fear, and decides for themselves whether to farm, mine, fish, hunt, build, or haul.</p>
     <p>Your power is nudge and catastrophe: bless, whisper a directive through the leader, call drought, flood, fire, plague, or quake. Some villagers will disobey. Watch what they actually do.</p>
-    <p class="muted">Drag to look around · pinch to zoom · tap a villager to inspect them · tap the ground for cell info. Works offline after the first load. Progress saves on this device.</p>
-    <p class="muted" id="save-info"></p>
-    <div class="row">
-      <button id="btn-continue">Continue saved village</button>
-      <button id="btn-new-game">Found a new village</button>
-      <button id="btn-new" style="display:none"></button>
+    <p class="muted">Drag to look around · pinch to zoom · tap a villager to inspect them · tap the ground for cell info. This village works offline after the first load, and progress saves on this device. The always-on village needs a connection.</p>
+    <div class="row" id="mode-row">
+      <button id="btn-mode-local">This village</button>
+      <button id="btn-mode-server">Always-on village</button>
+    </div>
+    <div id="local-start">
+      <p class="muted" id="save-info"></p>
+      <div class="row">
+        <button id="btn-continue">Continue saved village</button>
+        <button id="btn-new-game">Found a new village</button>
+        <button id="btn-new" style="display:none"></button>
+      </div>
+    </div>
+    <div id="server-start" style="display:none">
+      <p class="muted">The always-on village lives on the server and keeps going while no one watches. Your god actions reach it from here. Speed and council stay with the local village, and your local saves stay untouched.</p>
+      <p class="muted" id="server-info"></p>
+      <div class="row">
+        <button id="btn-join-server">Join the always-on village</button>
+      </div>
     </div>
     <p class="muted">A port of the Luanti GodCiv mod. The sim owns the truth; a local AI model, if enabled, only advises.</p>
   </div>
@@ -147,7 +167,7 @@
     <h3 style="margin-top:0">Settings · Ollama council</h3>
     <p class="muted">The council is advisory only. The model suggests a goal and a focus job; villagers can still disobey. Off by default.</p>
     <label><input type="checkbox" id="set-enabled"> Enable Ollama council</label>
-    <label for="set-url">Ollama URL (on a phone, localhost will not work — use a LAN/server address)</label>
+    <label for="set-url">Ollama URL (on a phone, localhost will not work: use a LAN/server address)</label>
     <input id="set-url" type="url" placeholder="http://192.168.1.10:11434/api/chat">
     <label for="set-model">Model</label>
     <input id="set-model" type="text" placeholder="qwen3:0.6b">
@@ -159,7 +179,7 @@
       <button id="set-test" type="button">Test Ollama</button>
       <button type="submit">Close</button>
     </div>
-    <p class="muted">Ollama needs CORS for browser calls from another device. If the test fails from your phone, run Ollama with <code>OLLAMA_ORIGINS=*</code> on the host, or keep the council off — the game runs fully on its utility brain.</p>
+    <p class="muted">Ollama needs CORS for browser calls from another device. If the test fails from your phone, run Ollama with <code>OLLAMA_ORIGINS=*</code> on the host, or keep the council off: the game runs fully on its utility brain.</p>
   </form>
 </dialog>
 

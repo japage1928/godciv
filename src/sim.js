@@ -4,9 +4,12 @@
 // villager, the god never directly controls a villager, a local model only
 // ever advises the leader. The model never writes state directly.
 
+// Save format version. v10 wrote version 2; v11 writes 3.
+// See migrateSave in deserialize() for the migration pattern.
+export const SAVE_VERSION = 3;
 export const SIZE = 48;
 export const DAY_LENGTH = 180; // sim seconds per day: 45 real seconds at 4x, 22.5 at 8x
-export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler"];
+export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher"];
 export const TRAITS = ["devout", "skeptic", "brave", "cautious", "industrious", "lazy", "kind", "greedy"];
 export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "Hob", "Ilsa", "Jory", "Kessa", "Lorn", "Mira", "Nils", "Odessa", "Perrin", "Quill", "Rosa", "Soren", "Tilda", "Ulric", "Vera", "Wren", "Yannick"];
 
@@ -25,9 +28,69 @@ export const BUILD_COSTS = {
   longhouse: { wood: 20, stone: 10 },
   greathall: { wood: 30, stone: 15 },
   farmhouse: { wood: 15, stone: 6 },
+  school: { wood: 18, stone: 12 },
+  healer: { wood: 14, stone: 10 },
 };
 export const CHILD_DAYS = 3; // a newborn works after 3 dawns
 export const ELDER_DAYS = 45; // old-age death rolls start here
+export const SCHOOL_MAX_AGE = 8; // students are 3..8 dawns old, then workers
+export const SEASON_DAYS = 10; // days per season, 4 seasons per year
+export const YEAR_DAYS = SEASON_DAYS * 4;
+export const SEASONS = ["spring", "summer", "autumn", "winter"];
+export const SEASON_NAMES = { spring: "Spring", summer: "Summer", autumn: "Autumn", winter: "Winter" };
+export const SEASON_GROWTH = { spring: 1.2, summer: 1.3, autumn: 0.9, winter: 0.25 };
+export const SEASON_HUNGER = { spring: 0, summer: 0.04, autumn: 0, winter: 0.08 };
+export const SEASON_KEEP = { spring: 60, summer: 45, autumn: 60, winter: 80 }; // spoilage cap without a granary
+// Festival days are days of the year (1-based): bloom, games, harvest, feast.
+export const FESTIVALS = { 5: "Spring Bloom", 15: "Midsummer Games", 28: "Harvest Festival", 35: "Midwinter Feast" };
+export const FESTIVAL_COST_FOOD = 10;
+export const FESTIVAL_MIN_EDIBLE = 20;
+export const FESTIVAL_MIN_FAITH = 25; // a village that has lost its faith does not feast
+export const WEATHER_KINDS = ["clear", "rain", "storm", "snow", "heat"];
+// Chance of each weather kind by season. Rows sum to 1.
+export const WEATHER_BY_SEASON = {
+  spring: { clear: 0.45, rain: 0.35, storm: 0.10, heat: 0.05, snow: 0.05 },
+  summer: { clear: 0.45, rain: 0.25, storm: 0.15, heat: 0.15, snow: 0 },
+  autumn: { clear: 0.45, rain: 0.30, storm: 0.15, heat: 0.05, snow: 0.05 },
+  winter: { clear: 0.40, rain: 0.10, storm: 0.10, heat: 0, snow: 0.40 },
+};
+export const TOOL_NAMES = ["crude", "sturdy", "fine"];
+export const TOOL_COSTS = [null, { coins: 6, ore: 1 }, { coins: 12, ore: 2 }];
+export const TECH_TIERS = [
+  { name: "Stone tools", blurb: "Crude tools and open fires." },
+  { name: "Bronze craft", blurb: "Better harvests, steadier workshop work." },
+  { name: "Iron craft", blurb: "Fine tools, a healer's hut, richer harvests." },
+];
+export const TECH_THRESHOLD = 80; // progress points per tier
+
+export function seasonOf(day) { return SEASONS[Math.floor((day - 1) / SEASON_DAYS) % 4]; }
+export function yearOf(day) { return Math.floor((day - 1) / YEAR_DAYS) + 1; }
+export function yearDayOf(day) { return ((day - 1) % YEAR_DAYS) + 1; }
+// Night is 0.00-0.22 and 0.84-1.00; dawn 0.22-0.32, day 0.32-0.72, dusk 0.72-0.84.
+export function phaseOf(time) {
+  if (time < 0.22 || time >= 0.84) return "night";
+  if (time < 0.32) return "dawn";
+  if (time < 0.72) return "day";
+  return "dusk";
+}
+export function nextFestival(day) {
+  const yd = yearDayOf(day);
+  for (let d = yd; d <= YEAR_DAYS; d++) if (FESTIVALS[d]) return { name: FESTIVALS[d], inDays: d - yd };
+  const first = Number(Object.keys(FESTIVALS)[0]);
+  return { name: FESTIVALS[first], inDays: YEAR_DAYS - yd + first };
+}
+export function rollWeather(state) {
+  const table = WEATHER_BY_SEASON[seasonOf(state.day)];
+  let r = state._rng();
+  let kind = "clear";
+  for (const k of WEATHER_KINDS) { r -= table[k] || 0; if (r <= 0) { kind = k; break; } }
+  const until = state.elapsed + 30 + state._rng() * 60;
+  return { kind, until };
+}
+export function isStudent(state, v) {
+  const school = state.buildings.some((b) => b.type === "school");
+  return school && (v.ageDays ?? 25) >= CHILD_DAYS && (v.ageDays ?? 25) <= SCHOOL_MAX_AGE;
+}
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -138,9 +201,13 @@ export function newWorld(seed) {
   }
 
   const state = {
-    version: 1, seed, day: 1, time: 0.3, speed: 1, paused: false,
+    version: SAVE_VERSION, seed, day: 1, time: 0.3, speed: 1, paused: false,
     stockpile: { food: 24, wood: 24, stone: 12, ore: 0, fish: 0, meat: 0 },
-    faith: 55, populationCap: 12, expandAt: 10, delegateAt: 5,
+    faith: 55, morale: 60, moraleReasons: [], populationCap: 12, expandAt: 10, delegateAt: 5,
+    season: "spring", weather: { kind: "clear", until: 60 },
+    celebration: null, celebrationBoostUntil: -1,
+    tech: { level: 0, progress: 0 },
+    lowMoraleDawns: 0, lastLeaveAt: -1e9, stormAt: -1e9,
     directive: null, // { focusJob } — a nudge, not an order
     buildQueue: [], // {type,x,z,progress,needWood,needStone}
     buildings: [
@@ -150,7 +217,7 @@ export function newWorld(seed) {
     ],
     villagers: [], deer: [], log: [],
     effects: { droughtUntil: -1, floodUntil: -1, plagueUntil: -1 },
-    cooldowns: {}, stats: { births: 0, deaths: 0, blessings: 0, trades: 0 },
+    cooldowns: {}, stats: { births: 0, deaths: 0, blessings: 0, trades: 0, leaves: 0, celebrations: 0 },
     fund: 20, marketAt: 30, rateHistory: [], spoiled: 0,
     nextVillagerId: 1, nextDeerId: 1, elapsed: 0,
   };
@@ -189,6 +256,9 @@ export function makeVillager(state, x, z, leader = false, opts = {}) {
     ageDays: opts.ageDays ?? (18 + Math.floor(rng() * 22)),
     sex: rng() < 0.5 ? "F" : "M",
     coins: opts.coins ?? 5, goods, home: null, toolTick: 0,
+    // Adults arrive with some schooling; newborns start unschooled.
+    education: opts.education ?? (opts.ageDays === 0 ? 0 : 2 + Math.floor(rng() * 4)),
+    tool: opts.tool ?? 0, // 0 crude, 1 sturdy, 2 fine
     hunger: 15 + rng() * 20, energy: 75 + rng() * 20, health: 100, fear: 0,
     carry: null, carryCap: 5, state: "idle", workTimer: 0, target: null,
     sick: false, rethinkAt: 0, stuckAt: 0, lastX: x, lastZ: z, personalFocus: null,
@@ -267,6 +337,9 @@ function refusesAssignment(state, v) {
   if (v.traits.includes("greedy")) p += 0.06;
   if (state.faith < 40) p += 0.12;
   if (v.fear > 40) p += 0.08;
+  // Low morale makes villagers balk; high morale makes them follow.
+  if ((state.morale ?? 60) < 35) p += 0.12;
+  if ((state.morale ?? 60) > 75) p -= 0.04;
   return state._rng() < clamp(p, 0, 0.5);
 }
 
@@ -286,7 +359,8 @@ export function hasShore(grid) {
 // assigns jobs; only the leader does, and only the leader is advised by
 // the council/Ollama layer.
 export function delegateRoles(state, grid = null) {
-  const villagers = state.villagers.filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS);
+  // Students go to school, not to work; toddlers stay home.
+  const villagers = state.villagers.filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v));
   if (!villagers.length) return;
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
@@ -295,6 +369,7 @@ export function delegateRoles(state, grid = null) {
   const demands = grid ? computeDemands(state, grid) : [];
   const farmCells = state._farmCells ? state._farmCells.length : 18;
   const shore = grid ? hasShore(grid) : true;
+  const hasSchool = state.buildings.some((b) => b.type === "school");
   const desired = {
     // Farmers scale with the fields, not just mouths: the labor force
     // has to keep up as farm beds are added.
@@ -312,8 +387,9 @@ export function delegateRoles(state, grid = null) {
     // open, or from day 2 while the village still has only its founding hut.
     builder: state.buildQueue.length ? Math.min(2, pop) : (demands.length || (state.day >= 2 && hutCount < 2) ? 1 : 0),
     hauler: pop >= 8 ? 1 : 0,
+    teacher: hasSchool && pop >= 6 ? 1 : 0,
   };
-  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler"];
+  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler", "teacher"];
   let total = order.reduce((a, j) => a + desired[j], 0);
   while (total > pop) {
     for (let i = order.length - 1; i >= 0; i--) {
@@ -339,7 +415,7 @@ export function delegateRoles(state, grid = null) {
     if (v.assignedJob && v.assignedJob !== next) changes.push(v.name + " to " + next);
     v.assignedJob = next;
   }
-  for (const v of state.villagers) if ((v.ageDays ?? 25) < CHILD_DAYS) v.assignedJob = null;
+  for (const v of state.villagers) if ((v.ageDays ?? 25) < CHILD_DAYS || isStudent(state, v)) v.assignedJob = null;
   if (changes.length) {
     const l = leader(state);
     log(state, (l ? l.name + " delegates: " : "Delegation: ") + changes.slice(0, 3).join(", ") + (changes.length > 3 ? " and " + (changes.length - 3) + " more." : "."));
@@ -360,6 +436,10 @@ function scoreJob(state, v, job) {
   if (job === "miner") score += deficit(s.stone, 24) * 0.25 + deficit(s.ore, 6) * 0.3;
   if (job === "builder") score += state.buildQueue.length ? 8 : -4;
   if (job === "hauler") score += v.carry ? 7 : 1.5;
+  if (job === "teacher") {
+    // No school, no teaching: the score stays far below real work.
+    score += state.buildings.some((b) => b.type === "school") ? 5 : -30;
+  }
   if (v.assignedJob === job) score += 12; // leader delegation: strong nudge, still refuseable
   if (job === "fisher" && v.assignedJob === "fisher") score += 6; // a standing post: the delegated fisher stays at the shore instead of drifting to building/hauling while fish are plentiful
   if (state.directive && state.directive.focusJob === job) score += refusesDirective(state, v, job) ? -6 : 6;
@@ -436,7 +516,56 @@ export function runMarket(state) {
   }
   // One log line per market round, so trades don't crowd births,
   // deaths, and building news out of the god log.
+  // Tool buying: one upgrade per market round at most. A sturdy tool
+  // needs a workshop; a fine tool needs a workshop and Bronze craft.
+  // Coins go to the village fund, ore comes out of the stockpile.
+  const hasWorkshop = state.buildings.some((b) => b.type === "workshop");
+  if (hasWorkshop) {
+    const buyer = state.villagers.find((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v)
+      && (v.tool || 0) < 2 && v.coins >= (TOOL_COSTS[(v.tool || 0) + 1].coins)
+      && state.stockpile.ore >= TOOL_COSTS[(v.tool || 0) + 1].ore
+      && ((v.tool || 0) + 1 < 2 || (state.tech && state.tech.level >= 1)));
+    if (buyer) {
+      const next = (buyer.tool || 0) + 1;
+      const cost = TOOL_COSTS[next];
+      buyer.coins -= cost.coins; state.fund += cost.coins; state.stockpile.ore -= cost.ore;
+      buyer.tool = next;
+      summaries.push(buyer.name + " buys " + TOOL_NAMES[next] + " tools");
+    }
+  }
   if (summaries.length) log(state, "At the market: " + summaries.join("; ") + ".");
+}
+
+// --- morale: how the village feels, and what it costs ---
+
+// Morale drifts toward a target set by food, housing, variety, recent
+// deaths, weather, and faith. Recomputed at dawn; celebrations and
+// blessings bump it at once. It moves work speed, birth willingness,
+// and refusals — never enough on its own to kill a village.
+export function recomputeMorale(state) {
+  const s = state.stockpile;
+  const edible = s.food + s.fish + s.meat;
+  const pop = Math.max(1, state.villagers.length);
+  const perMouth = edible / pop;
+  const homeless = homelessCount(state);
+  const kinds = ["food", "fish", "meat"].filter((k) => s[k] > 0).length;
+  const recentDeaths = (state.rateHistory || []).reduce((a, r) => a + r.deaths, 0);
+  const parts = [];
+  const foodDelta = perMouth >= 8 ? 15 : perMouth >= 4 ? 5 : perMouth < 2 ? -15 : -25;
+  parts.push({ label: perMouth >= 4 ? "Full stores" : "Empty stores", delta: foodDelta });
+  parts.push({ label: homeless ? homeless + " homeless" : "Everyone housed", delta: homeless ? -Math.min(18, homeless * 6) : 10 });
+  parts.push({ label: kinds >= 3 ? "Varied diet" : kinds === 2 ? "Two foods" : "One food", delta: kinds >= 3 ? 8 : kinds === 2 ? 5 : 0 });
+  if (recentDeaths) parts.push({ label: recentDeaths + " recent deaths", delta: -Math.min(12, recentDeaths * 4) });
+  const w = state.weather ? state.weather.kind : "clear";
+  if (w === "storm" || w === "snow") parts.push({ label: w === "storm" ? "Storm overhead" : "Snow on the ground", delta: -5 });
+  else if (w === "clear") parts.push({ label: "Clear skies", delta: 3 });
+  if (state.faith >= 70) parts.push({ label: "Strong faith", delta: 5 });
+  if (state.faith < 30) parts.push({ label: "Faith shaken", delta: -8 });
+  if (state.elapsed < (state.celebrationBoostUntil || -1)) parts.push({ label: "Festival cheer", delta: 8 });
+  const target = clamp(50 + parts.reduce((a, p) => a + p.delta, 0), 5, 95);
+  state.morale = clamp((state.morale ?? 60) + clamp(target - (state.morale ?? 60), -4, 4), 0, 100);
+  state.moraleReasons = parts.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 3);
+  return { target, parts };
 }
 
 // --- demographics: age-based birth and death rates ---
@@ -464,7 +593,9 @@ export function dawnDemographics(state, birthNeed) {
   const housingFactor = state.villagers.length >= state.populationCap ? 0
     : state.villagers.length < state.populationCap * 0.7 ? 1.2 : 0.9;
   const faithFactor = 0.7 + state.faith / 200;
-  const pBirth = Math.min(0.9, 0.10 * foodFactor * housingFactor * faithFactor);
+  // Morale moves willingness: a hopeful village has more babies.
+  const moraleFactor = 0.7 + ((state.morale ?? 60) / 100) * 0.6;
+  const pBirth = Math.min(0.9, 0.10 * foodFactor * housingFactor * faithFactor * moraleFactor);
   const maxBirths = 1 + Math.floor(state.villagers.length / 12);
   for (let i = 0; i < pairs && births < maxBirths; i++) {
     if (state.villagers.length >= state.populationCap) break;
@@ -478,6 +609,36 @@ export function dawnDemographics(state, birthNeed) {
   // no one is locked out of the market forever for being broke.
   for (const v of state.villagers) if (v.ageDays >= CHILD_DAYS) v.coins = Math.min(20, v.coins + 1);
   assignHomes(state);
+  // The teacher is paid from the village fund for the day's lessons.
+  const hasSchool = state.buildings.some((b) => b.type === "school");
+  const teacher = state.villagers.find((v) => v.assignedJob === "teacher");
+  if (hasSchool && teacher && state.fund >= 1) { state.fund -= 1; teacher.coins += 1; }
+  // Schooling: students gain education at dawn, faster with a teacher.
+  // Education caps at 10 and stays with the villager for life.
+  if (hasSchool) {
+    for (const v of state.villagers) {
+      if (isStudent(state, v)) v.education = Math.min(10, (v.education || 0) + (teacher ? 2 : 1));
+    }
+  }
+  // Tech: educated adults push the village forward. Founders arrive
+  // with some schooling, so the first tier can come from them; later
+  // tiers need school graduates. Progress caps each dawn so one
+  // crowded dawn cannot skip a tier.
+  if (!state.tech) state.tech = { level: 0, progress: 0 };
+  if (state.tech.level < TECH_TIERS.length - 1) {
+    let gain = 0;
+    for (const v of state.villagers) {
+      if ((v.ageDays ?? 25) <= SCHOOL_MAX_AGE) continue;
+      if ((v.education || 0) >= 5) gain += 4;
+      else if ((v.education || 0) >= 3) gain += 2;
+    }
+    state.tech.progress += Math.min(12, gain);
+    if (state.tech.progress >= TECH_THRESHOLD) {
+      state.tech.level++;
+      state.tech.progress = 0;
+      log(state, "The village learns " + TECH_TIERS[state.tech.level].name + ". " + TECH_TIERS[state.tech.level].blurb);
+    }
+  }
   state.rateHistory.push({ day: state.day, births, deaths });
   if (state.rateHistory.length > 10) state.rateHistory.shift();
   return { births, deaths };
@@ -515,7 +676,7 @@ export function computeDemands(state, grid) {
     const spot = grid ? !!findHutSpot(state, grid) : true;
     demands.push(spot
       ? { type: "hut", score: hutScore, reason: homeless ? homeless + " homeless villager" + (homeless > 1 ? "s" : "") + " need" + (homeless > 1 ? "" : "s") + " a home." : "The village is outgrowing its huts." }
-      : { type: "longhouse", score: hutScore, reason: "No room for new huts — an old hut must grow." });
+      : { type: "longhouse", score: hutScore, reason: "No room for new huts: an old hut must grow." });
   }
   // Housing evolution: as demand rises and the village spreads, growing
   // an existing dwelling beats sprawling further. A hut becomes a
@@ -529,7 +690,7 @@ export function computeDemands(state, grid) {
   const oldestHutAge = huts.length ? state.day - Math.min(...huts.map((b) => b.builtDay || 1)) : 0;  const prosperous = s.wood >= 40 && s.stone >= 20 && oldestHutAge >= 8;
   const nearCrowded = pop >= state.populationCap - 4;
   if ((nearCrowded || prosperous) && dwellings.length >= 4 && huts.length && !queued("longhouse")) {
-    demands.push({ type: "longhouse", score: 5 + dwellings.length * 0.5 + (prosperous ? 2 : 0), reason: "The village is spreading — grow a hut into a longhouse instead." });
+    demands.push({ type: "longhouse", score: 5 + dwellings.length * 0.5 + (prosperous ? 2 : 0), reason: "The village is spreading: grow a hut into a longhouse instead." });
   }
   if ((nearCrowded || prosperous) && longhouses.length && !queued("greathall")) {
     demands.push({ type: "greathall", score: 6 + dwellings.length * 0.5 + (prosperous ? 2 : 0), reason: "A longhouse must grow into a great hall for the growing village." });
@@ -550,10 +711,20 @@ export function computeDemands(state, grid) {
     demands.push({ type: "well", score: 3, reason: "The village needs water close at hand." });
   }
   if (!built("workshop") && !queued("workshop") && s.ore >= 4) {
-    demands.push({ type: "workshop", score: 3, reason: "Ore is piling up — tools are needed." });
+    demands.push({ type: "workshop", score: 3, reason: "Ore is piling up: tools are needed." });
   }
   if (!built("shrine") && !queued("shrine") && (state.faith < 45 || pop >= 14)) {
-    demands.push({ type: "shrine", score: 3, reason: state.faith < 45 ? "Faith is low — the people need a shrine." : "The village has grown — it needs a gathering shrine." });
+    demands.push({ type: "shrine", score: 3, reason: state.faith < 45 ? "Faith is low: the people need a shrine." : "The village has grown: it needs a gathering shrine." });
+  }
+  // A school teaches the children, and schooled adults push the
+  // village toward new tools. One school is enough for this village.
+  if (!built("school") && !queued("school") && pop >= 8) {
+    demands.push({ type: "school", score: 4, reason: "The children need a school." });
+  }
+  // A healer's hut, once the village knows iron craft: the sick
+  // recover near it instead of fading.
+  if (state.tech && state.tech.level >= 2 && !built("healer") && !queued("healer") && pop >= 10) {
+    demands.push({ type: "healer", score: 4, reason: "Iron craft brings medicine: the village needs a healer's hut." });
   }
   demands.sort((a, b) => b.score - a.score);
   return demands;
@@ -585,11 +756,32 @@ function think(state, grid, v) {
   }
   if (v.carry && v.carry.amt >= v.carryCap) { v.state = "haul"; setTarget(state, grid, v, cx, cz); return; }
 
+  // A festival gathers everyone at the town center: work pauses while
+  // the village celebrates together.
+  if (state.celebration && state.elapsed < state.celebration.until) {
+    v.state = "celebrate"; setTarget(state, grid, v, cx, cz); return;
+  }
+  // Night is for sleep. Urgent needs above still win; everyone else
+  // goes home until dawn.
+  if (phaseOf(state.time) === "night") {
+    v.state = "rest";
+    const home = v.home ? v.home.split(",").map(Number) : [cx - 2, cz - 3];
+    setTarget(state, grid, v, home[0], home[1]); return;
+  }
+
   // Children stay near home and do no work yet.
   if ((v.ageDays ?? 25) < CHILD_DAYS) {
     v.job = "child"; v.state = "idle"; v.assignedJob = null;
     const home = v.home ? v.home.split(",").map(Number) : [cx, cz];
     if (Math.hypot(v.x - (home[0] + 0.5), v.z - (home[1] + 0.5)) > 3) setTarget(state, grid, v, home[0], home[1]);
+    return;
+  }
+
+  // Students walk to the school and learn there instead of working.
+  if (isStudent(state, v)) {
+    v.job = "student"; v.state = "school"; v.assignedJob = null;
+    const school = state.buildings.find((b) => b.type === "school");
+    if (school) setTarget(state, grid, v, school.x, school.z);
     return;
   }
 
@@ -632,6 +824,9 @@ function think(state, grid, v) {
   } else if (job === "builder") {
     const q = state.buildQueue[0];
     if (q) setTarget(state, grid, v, q.x, q.z); else v.state = "idle";
+  } else if (job === "teacher") {
+    const school = state.buildings.find((b) => b.type === "school");
+    if (school) setTarget(state, grid, v, school.x, school.z); else v.state = "idle";
   } else if (job === "hauler") {
     // Haulers shuttle: go to the nearest productive cell, fill up, deposit.
     const ripe = nearestCell(grid, v.x, v.z, (c) => c.farm && c.crop === 3);
@@ -641,45 +836,67 @@ function think(state, grid, v) {
   }
 }
 
+function workNeed(state, v, base) {
+  // How long one work action takes. Morale, tools, and weather all
+  // move it: a hopeful villager with fine tools in clear skies works
+  // fastest; a miserable one in a snowstorm is slow.
+  let n = base;
+  if (v.job === "fisher" && state.weather && state.weather.kind === "rain") n = 6.5;
+  const moraleEff = 0.85 + ((state.morale ?? 60) / 100) * 0.3;
+  n /= moraleEff * (1 + 0.25 * (v.tool || 0));
+  if (state.weather) {
+    if (state.weather.kind === "storm") n *= 1.25;
+    if (state.weather.kind === "snow") n *= 1.5;
+  }
+  return n;
+}
+
 function doWork(state, grid, v, dt) {
   const [tx, tz] = v.target || [];
   const cell = tx != null ? grid[tx][tz] : null;
   v.workTimer += dt;
-  const need = v.job === "builder" ? 2.5 : v.job === "fisher" ? 9.0 : 1.6;
+  const baseNeed = v.job === "builder" ? 2.5 : v.job === "fisher" ? 9.0 : v.job === "teacher" ? 2.0 : 1.6;
+  const need = workNeed(state, v, baseNeed);
   if (v.workTimer < need) return;
   v.workTimer = 0;
+  const tech = state.tech || { level: 0, progress: 0 };
+  const fineBonus = (v.tool || 0) >= 2 ? 1 : 0;
   const addCarry = (type, amt = 1) => {
     if (!v.carry) v.carry = { type, amt: 0 };
     if (v.carry.type !== type) return;
     v.carry.amt = Math.min(v.carryCap, v.carry.amt + amt);
   };
   const hasWorkshop = state.buildings.some((b) => b.type === "workshop");
-  if (v.job === "farmer" && cell && cell.farm) {
-    if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2); }
+  const workshopEvery = tech.level >= 1 ? 2 : 3;
+  if (v.job === "teacher") {
+    // Lessons land at dawn (see dawnDemographics). The teacher just
+    // needs to be at the school, visible to the village.
+  } else if (v.job === "farmer" && cell && cell.farm) {
+    if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2 + (tech.level >= 1 ? 1 : 0) + (tech.level >= 2 ? 1 : 0) + fineBonus); }
     else if (state.elapsed >= state.effects.droughtUntil) { cell.crop = Math.min(3, cell.crop + 1); }
   } else if (v.job === "woodcutter" && cell && cell.tree) {
-    cell.tree = false; cell.blocked = false; addCarry("wood", 2);
-    if (hasWorkshop) { v.toolTick++; if (v.toolTick % 3 === 0) addCarry("wood", 1); }
+    cell.tree = false; cell.blocked = false; addCarry("wood", 2 + fineBonus);
+    if (hasWorkshop) { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("wood", 1); }
   } else if ((v.job === "miner" || v.job === "hauler") && cell && (cell.stone > 0 || cell.ore > 0)) {
     if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); }
-    else if (cell.stone > 0) { cell.stone--; addCarry("stone"); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
+    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; }
     else addCarry("wood"); // hauler fallback at a spent node: gather firewood nearby
     if (v.job === "hauler" && !cell.stone && !cell.ore) addCarry("wood");
-    if (hasWorkshop && v.job === "miner") { v.toolTick++; if (v.toolTick % 3 === 0) addCarry("stone", 1); }
+    if (hasWorkshop && v.job === "miner") { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("stone", 1); }
   } else if (v.job === "fisher") {
-    addCarry("fish");
+    addCarry("fish", 1 + fineBonus);
   } else if (v.job === "hunter") {
     const deer = state.deer.find((d) => Math.hypot(d.x - v.x, d.z - v.z) < 2.2);
     if (deer) {
       state.deer = state.deer.filter((d) => d !== deer);
-      addCarry("meat", 3);
+      addCarry("meat", 3 + fineBonus);
       log(state, v.name + " brings down a deer.");
     }
   } else if (v.job === "builder") {
     const q = state.buildQueue[0];
     if (q) {
       q.progress += 1;
-      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7 }[q.type] || 6;
+      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7, school: 8, healer: 6 }[q.type] || 6;
       if (q.progress >= needProgress) {
         state.buildQueue.shift();
         const cost = BUILD_COSTS[q.type] || { wood: 0, stone: 0, ore: 0 };
@@ -723,6 +940,12 @@ function doWork(state, grid, v, dt) {
               state.populationCap += 2;
               const added = clearFarmBed(state, grid, q.x, q.z);
               log(state, "A farmhouse rises in the west fields, with " + added + " new field plots around it. It houses 2 farmhands.");
+            } else if (type === "school") {
+              grid[q.x][q.z].blocked = true;
+              log(state, "A school opens its doors. The children will learn their letters.");
+            } else if (type === "healer") {
+              grid[q.x][q.z].blocked = true;
+              log(state, "A healer's hut opens. The sick will mend faster near it.");
             }
           }
           assignHomes(state);
@@ -811,6 +1034,9 @@ export function scoreSpot(state, grid, x, z, type) {
     for (const [sx, sz] of state._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
     score -= nearestStone * 0.8;
     score -= Math.abs(dist - 7) * 0.5;
+  } else if (type === "school" || type === "healer") {
+    // Civic buildings sit near the center, within easy reach of homes.
+    score -= Math.abs(dist - 5) * 1.0;
   }
   return score;
 }
@@ -989,15 +1215,37 @@ export function expandFarms(state, grid) {
   }
 }
 
+// Weather rolls when its timer runs out. A god-sent drought or flood
+// holds its own weather until it passes, then the sky rolls fresh.
+function updateWeather(state) {
+  if (!state.weather) state.weather = { kind: "clear", until: 0 };
+  if (state.elapsed < state.effects.droughtUntil) {
+    if (state.weather.kind !== "heat") state.weather = { kind: "heat", until: state.effects.droughtUntil };
+    return;
+  }
+  if (state.elapsed < state.effects.floodUntil) {
+    if (state.weather.kind !== "storm") state.weather = { kind: "storm", until: state.effects.floodUntil };
+    return;
+  }
+  if (state.elapsed >= state.weather.until) {
+    const prev = state.weather.kind;
+    state.weather = rollWeather(state);
+    if (state.weather.kind !== prev) log(state, "The sky changes: " + state.weather.kind + ".");
+  }
+}
+
 export function step(state, grid, dt) {
   if (state.paused) return;
   state.elapsed += dt;
+  updateWeather(state);
   if (state.elapsed >= state.expandAt) { state.expandAt = state.elapsed + 20; expandVillage(state, grid); }
   if (state.elapsed >= state.delegateAt) { state.delegateAt = state.elapsed + 15; delegateRoles(state, grid); }
   if (state.elapsed >= (state.marketAt || 30)) { state.marketAt = state.elapsed + 30; runMarket(state); }
   if (state.elapsed >= (state.treeAt || 60)) {
     state.treeAt = state.elapsed + 30;
-    for (let i = 0; i < 3; i++) {
+    // Trees regrow in spring, rest in summer, and not at all in winter.
+    const attempts = state.season === "winter" ? 0 : state.season === "spring" ? 6 : 3;
+    for (let i = 0; i < attempts; i++) {
       const x = Math.floor(state._rng() * SIZE), z = Math.floor(state._rng() * SIZE);
       const c = grid[x][z];
       if (!c.water && !c.blocked && !c.tree && !c.farm && !c.building && c.stone <= 0 && Math.hypot(x - state._cx, z - state._cz) > 8) { c.tree = true; c.blocked = true; }
@@ -1006,10 +1254,20 @@ export function step(state, grid, dt) {
   state.time += dt / DAY_LENGTH;
   if (state.time >= 1) {
     state.time -= 1; state.day += 1;
-    // Dawn: surplus food spoils in the open air unless a granary holds it.
-    // A granary doubles the kept surplus and lowers the birth threshold.
+    // The year turns: seasons change the village, and a new year is
+    // worth a line in the log.
+    const prevDay = state.day - 1;
+    if (yearOf(state.day) !== yearOf(prevDay)) log(state, "Year " + yearOf(state.day) + " begins.");
+    const newSeason = seasonOf(state.day);
+    if (newSeason !== state.season) {
+      state.season = newSeason;
+      log(state, SEASON_NAMES[newSeason] + " arrives" + (newSeason === "winter" ? ". The cold bites; food keeps longer, but hunger grows." : newSeason === "summer" ? ". The heat is heavy; water and food needs rise." : "."));
+    }
+    // Dawn: surplus food spoils in the open air unless a granary holds
+    // it. A granary doubles the kept surplus and lowers the birth
+    // threshold. Winter cold preserves more; summer heat spoils more.
     const hasGranary = state.buildings.some((b) => b.type === "granary");
-    const keepCap = hasGranary ? 120 : 60;
+    const keepCap = SEASON_KEEP[state.season] * (hasGranary ? 2 : 1);
     const birthNeed = hasGranary ? 10 : 14;
     const s = state.stockpile;
     let edible = s.food + s.fish + s.meat;
@@ -1024,20 +1282,61 @@ export function step(state, grid, dt) {
     // Age-based births and deaths, then a shrine's dawn blessing.
     dawnDemographics(state, birthNeed);
     if (state.buildings.some((b) => b.type === "shrine")) state.faith = clamp(state.faith + 3, 0, 100);
-    // Deer top-up, as in world.lua.
-    while (state.deer.length < 4) state.deer.push(makeDeer(state, state._cx + 8, state._cz + 8));
+    // Calendar: a festival fires when the village can afford it.
+    const fest = FESTIVALS[yearDayOf(state.day)];
+    if (fest) {
+      const edibleNow = s.food + s.fish + s.meat;
+      if (edibleNow >= FESTIVAL_MIN_EDIBLE && state.faith >= FESTIVAL_MIN_FAITH) {
+        let costLeft = FESTIVAL_COST_FOOD;
+        for (const k of ["food", "fish", "meat"]) { const take = Math.min(s[k], costLeft); s[k] -= take; costLeft -= take; if (!costLeft) break; }
+        state.celebration = { name: fest.name, until: state.elapsed + 0.25 * DAY_LENGTH };
+        state.celebrationBoostUntil = state.elapsed + 3 * DAY_LENGTH;
+        state.morale = clamp((state.morale ?? 60) + 10, 0, 100);
+        state.faith = clamp(state.faith + 5, 0, 100);
+        state.stats.celebrations = (state.stats.celebrations || 0) + 1;
+        log(state, fest.name + "! The village gathers at the town center and feasts. Morale soars.");
+      } else {
+        log(state, fest.name + " passes quietly. The stores cannot spare a feast.");
+      }
+    }
+    // Morale is felt at dawn, then acted on.
+    recomputeMorale(state);
+    if ((state.morale ?? 60) < 20) {
+      state.lowMoraleDawns = (state.lowMoraleDawns || 0) + 1;
+      if (state.lowMoraleDawns >= 3 && state.villagers.length > 4 && state.elapsed - (state.lastLeaveAt || -Infinity) > 5 * DAY_LENGTH) {
+        const leaver = [...state.villagers].sort((a, b) => (a.hunger + (100 - a.energy)) - (b.hunger + (100 - b.energy)))[0];
+        removeVillager(state, leaver, "walks away, seeking a kinder village");
+        state.lastLeaveAt = state.elapsed;
+        state.lowMoraleDawns = 0;
+      }
+    } else state.lowMoraleDawns = 0;
+    // Deer top-up, as in world.lua. Winter herds are thinner.
+    const deerCap = state.season === "winter" ? 2 : 4;
+    while (state.deer.length < deerCap) state.deer.push(makeDeer(state, state._cx + 8, state._cz + 8));
     if (state.elapsed >= state.effects.droughtUntil && state.effects.droughtUntil > 0) log(state, "The drought breaks. Rain returns to the fields.");
     state.effects.droughtUntil = Math.min(state.effects.droughtUntil, state.elapsed);
   }
 
   // Crops grow. Plots within 5 cells of a farmhouse grow half again
-  // as fast — the farmhouse anchors the district.
-  if (state.elapsed >= state.effects.droughtUntil) {
+  // as fast — the farmhouse anchors the district. Rain feeds the
+  // fields; snow stops growth; the season sets the pace.
+  if (state.elapsed >= state.effects.droughtUntil && state.weather.kind !== "snow") {
     const farmhouses = state.buildings.filter((b) => b.type === "farmhouse");
+    const growth = SEASON_GROWTH[state.season] * (state.weather.kind === "rain" ? 1.5 : 1);
     for (const [x, z] of state._farmCells) {
       const c = grid[x][z];
       const nearHouse = farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5);
-      if (c.crop >= 0 && c.crop < 3) { c.cropGrow += dt * (nearHouse ? 1.5 : 1); if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; } }
+      if (c.crop >= 0 && c.crop < 3) { c.cropGrow += dt * growth * (nearHouse ? 1.5 : 1); if (c.cropGrow > 28) { c.cropGrow = 0; c.crop++; } }
+    }
+  }
+  // Storms tear at the crops: one plot loses a growth stage.
+  if (state.weather && state.weather.kind === "storm" && state.elapsed >= (state.stormAt || 0)) {
+    state.stormAt = state.elapsed + 10;
+    const grown = state._farmCells.filter(([x, z]) => grid[x][z].crop > 0);
+    if (grown.length) {
+      const [x, z] = grown[Math.floor(state._rng() * grown.length)];
+      const c = grid[x][z]; c.crop--; c.cropGrow = 0;
+      if (state._rng() < 0.25) log(state, "The storm batters the fields.");
     }
   }
   // Stone slowly weathers back, on a timer, so building never stalls
@@ -1070,15 +1369,29 @@ export function step(state, grid, dt) {
 
   // Villagers.
   const hasWell = state.buildings.some((b) => b.type === "well");
+  const healer = state.buildings.find((b) => b.type === "healer");
+  const phase = phaseOf(state.time);
+  const wkind = state.weather ? state.weather.kind : "clear";
   for (const v of [...state.villagers]) {
-    const hungerRate = (v.ageDays ?? 25) < CHILD_DAYS ? 0.23 : hasWell ? 0.34 : 0.38;
+    // Hunger rises faster in winter cold and summer heat; water from a
+    // well and rain both take the edge off. Snow and storms slow feet.
+    let hungerRate = (v.ageDays ?? 25) < CHILD_DAYS ? 0.23 : hasWell ? 0.34 : 0.38;
+    hungerRate += SEASON_HUNGER[state.season] || 0;
+    if (wkind === "heat") hungerRate += 0.05;
+    if (wkind === "rain") hungerRate -= 0.03;
+    if (phase === "night" && v.state === "rest") hungerRate *= 0.4;
     v.hunger = clamp(v.hunger + dt * hungerRate, 0, 100);
-    if (v.state === "rest") v.energy = clamp(v.energy + dt * 6, 0, 100);
+    if (v.state === "rest") v.energy = clamp(v.energy + dt * (phase === "night" ? 10 : 6), 0, 100);
     else v.energy = clamp(v.energy - dt * 0.4, 0, 100);
-    if (v.sick) { v.hunger = clamp(v.hunger + dt * 0.4, 0, 100); v.health = clamp(v.health - dt * 0.8, 0, 100); }
+    const nearHealer = healer && Math.hypot(v.x - (healer.x + 0.5), v.z - (healer.z + 0.5)) <= 8;
+    if (v.sick) {
+      v.hunger = clamp(v.hunger + dt * (nearHealer ? 0.2 : 0.4), 0, 100);
+      v.health = clamp(v.health - dt * (nearHealer ? 0.2 : 0.8) + (nearHealer ? dt * 1.5 : 0), 0, 100);
+    }
     if (v.hunger >= 100) v.health = clamp(v.health - dt * 1.2, 0, 100);
     if (state.elapsed >= state.effects.plagueUntil && v.sick) v.sick = false;
     v.fear = clamp(v.fear - dt * 3, 0, 100);
+    if (wkind === "storm") v.fear = clamp(v.fear + dt * 0.5, 0, 100);
     if (v.health <= 0) {
       removeVillager(state, v, "hunger and hardship");
       continue;
@@ -1095,7 +1408,7 @@ export function step(state, grid, dt) {
       const [px, pz] = v.path[0];
       const dx = px + 0.5 - v.x, dz = pz + 0.5 - v.z, dist = Math.hypot(dx, dz);
       if (dist < 0.25) v.path.shift();
-      else { const onRoad = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)].road; const sp = (v.state === "flee" ? 3.4 : 2.2) * (onRoad ? 1.35 : 1) * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
+      else { const onRoad = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)].road; const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1; const sp = (v.state === "flee" ? 3.4 : 2.2) * (onRoad ? 1.35 : 1) * moveFactor * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); moving = true; }
     } else if (v.target) {
       const dx = v.target[0] + 0.5 - v.x, dz = v.target[1] + 0.5 - v.z, dist = Math.hypot(dx, dz);
       // Don't walk into a blocked target cell: stop at working distance.
@@ -1103,7 +1416,8 @@ export function step(state, grid, dt) {
       if (dist > stopAt) {
         const cell = grid[clamp(Math.round(v.x), 0, SIZE - 1)][clamp(Math.round(v.z), 0, SIZE - 1)];
         void cell;
-        const sp = (v.job === "hunter" && v.state === "work" ? 3.0 : 2.2) * dt; v.x += (dx / dist) * Math.min(sp, dist - stopAt + 0.05); v.z += (dz / dist) * Math.min(sp, dist - stopAt + 0.05); moving = true;
+        const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1;
+        const sp = (v.job === "hunter" && v.state === "work" ? 3.0 : 2.2) * moveFactor * dt; v.x += (dx / dist) * Math.min(sp, dist - stopAt + 0.05); v.z += (dz / dist) * Math.min(sp, dist - stopAt + 0.05); moving = true;
       }
     }
     v._moving = moving;
@@ -1144,7 +1458,8 @@ export function step(state, grid, dt) {
         doWork(state, grid, v, dt * 3); // work ticks faster once in place
       } else if (v.state === "rest") {
         v.energy = clamp(v.energy + dt * 4, 0, 100);
-        if (v.energy > 80 && !v.sick) { v.state = "idle"; v.target = null; }
+        // At night, rest holds until dawn even at full energy.
+        if (v.energy > 80 && !v.sick && phaseOf(state.time) !== "night") { v.state = "idle"; v.target = null; }
       } else if (v.state === "flee") {
         v.fear = clamp(v.fear - dt * 8, 0, 100);
         if (v.fear < 20) { v.state = "idle"; v.target = null; }
@@ -1170,7 +1485,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
   const setCd = (s) => { state.cooldowns[action] = state.elapsed + s; };
   switch (action) {
     case "bless":
-      state.stockpile.food += 10; state.faith = clamp(state.faith + 5, 0, 100); state.stats.blessings++;
+      state.stockpile.food += 10; state.faith = clamp(state.faith + 5, 0, 100); state.morale = clamp((state.morale ?? 60) + 2, 0, 100); state.stats.blessings++;
       log(state, "A blessing falls. +10 food, the people take heart."); setCd(20); break;
     case "drought":
       state.effects.droughtUntil = state.elapsed + 60;
@@ -1246,11 +1561,14 @@ export function serialize(state, grid) {
   }
   const { _rng, _farmCells, _stoneSpots, _oreSpots, _fire, _quake, ...rest } = state;
   void _rng; void _farmCells; void _stoneSpots; void _oreSpots;
-  return JSON.stringify({ ...rest, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
+  // The save version is stamped here, not trusted to state, so every
+  // file on disk carries the version its writer used.
+  return JSON.stringify({ ...rest, version: SAVE_VERSION, crops, stones, buildings, roads, fire: _fire || null, quake: _quake || null });
 }
 
 export function deserialize(json) {
   const data = JSON.parse(json);
+  const fromVersion = data.version == null ? 1 : data.version;
   const { state, grid } = newWorld(data.seed);
   // Overlay saved dynamic state, keeping the regenerated grid's statics.
   const savedCrops = data.crops, savedStones = data.stones, savedBuildings = data.buildings;
@@ -1266,7 +1584,32 @@ export function deserialize(json) {
   if (state.marketAt == null) state.marketAt = 30;
   if (!state.rateHistory) state.rateHistory = [];
   if (state.stats && state.stats.trades == null) state.stats.trades = 0;
+  if (state.stats && state.stats.celebrations == null) state.stats.celebrations = 0;
   if (state.spoiled == null) state.spoiled = 0;
+  // MIGRATION PATTERN. Read this before v12. Updates must never
+  // restart the world: serialize() stamps SAVE_VERSION, and
+  // deserialize() migrates older saves forward in place, one step
+  // per release, oldest first. Every new field gets a sensible
+  // default in its step. Existing state (seed, elapsed, day,
+  // villagers with goods/coins/homes, buildings, stockpile, roads,
+  // farms, faith, cooldowns, log) is never dropped or reset. Never
+  // add a new save key, never wipe or ignore an old save: migrate it.
+  // v11 (fromVersion < 3): seasons, weather, morale, celebrations,
+  // schools/tech arrive. A v10 world keeps its day count, and the
+  // season is derived from it.
+  if (fromVersion < 3) {
+    state.season = seasonOf(state.day);
+    state.weather = { kind: "clear", until: state.elapsed + 60 };
+    state.morale = 55;
+    state.moraleReasons = [];
+    state.celebration = null;
+    state.celebrationBoostUntil = -1;
+    state.tech = { level: 0, progress: 0 };
+    state.lowMoraleDawns = 0;
+    state.lastLeaveAt = -1e9;
+    state.stormAt = -1e9;
+  }
+  state.version = SAVE_VERSION;
   for (const v of state.villagers) {
     for (const j of JOBS) if (v.skills[j] == null) v.skills[j] = 1;
     if (v.assignedJob == null) v.assignedJob = null;
@@ -1277,6 +1620,9 @@ export function deserialize(json) {
     if (!v.goods) { v.goods = {}; for (const g of Object.keys(PRICES)) v.goods[g] = 0; }
     for (const g of Object.keys(PRICES)) if (v.goods[g] == null) v.goods[g] = 0;
     if (v.toolTick == null) v.toolTick = 0;
+    // v11 fields: a migrated villager starts unschooled, with crude tools.
+    if (v.education == null) v.education = 0;
+    if (v.tool == null) v.tool = 0;
     if (!("home" in v)) v.home = null;
   }
   for (const b of state.buildings) if (b.builtDay == null) b.builtDay = 1;
@@ -1290,6 +1636,23 @@ export function deserialize(json) {
   for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) if (grid[x][z].farm) state._farmCells.push([x, z]);
   for (const [x, z, stone, ore, blocked] of savedStones) { grid[x][z].stone = stone; grid[x][z].ore = ore; grid[x][z].blocked = !!blocked; }
   for (const [x, z, type] of savedBuildings) grid[x][z].building = type;
+  // Rebuild the building list from the grid. serialize() stores
+  // buildings as grid triples and deletes the object list before the
+  // overlay, so a load that trusted the fresh founding list dropped
+  // every building raised after founding (granaries, markers, later
+  // huts) from state on every load. The grid is the truth: restore
+  // all of it, then reassign homes to the full village.
+  {
+    const seen = new Set(state.buildings.map((b) => b.x + "," + b.z));
+    for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
+      const t = grid[x][z].building;
+      if (t && !seen.has(x + "," + z)) {
+        state.buildings.push({ type: t, x, z, done: true, builtDay: 1 });
+        seen.add(x + "," + z);
+      }
+    }
+  }
+  assignHomes(state);
   // Older saves were founded without a plaza: lay it once so the
   // old village gains the same visible square and farm road.
   let roadCount = 0;
