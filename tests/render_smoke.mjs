@@ -76,6 +76,29 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   assert.ok(glow >= 2, "hut with a chimney must have window glow and a chimney flame, got " + glow);
 }
 
+// Facing: a house turns its door toward its street, and a doorstep
+// joins the door to the street, so lots read as lots facing streets
+// instead of boxes all facing the same way.
+{
+  const { state, grid } = newWorld(42);
+  state.buildings = [{ type: "hut", x: 30, z: 30, done: true, builtDay: 1 }];
+  state.villagers = [];
+  grid[30][30].building = "hut";
+  grid[31][30].road = true; // street to the east, and no other road beside the hut
+  const fake = Object.create(Renderer.prototype);
+  fake.buildingsGroup = new THREE.Group();
+  fake.dressingGroup = new THREE.Group();
+  fake._nightMeshes = []; fake._chimneys = []; fake._season = "spring";
+  fake._buildSignature = undefined; fake._wasNight = null;
+  fake._syncBuildings(state, grid);
+  const hut = fake.buildingsGroup.children.find((m) => Math.abs(m.position.x - 30.5) < 0.01 && Math.abs(m.position.z - 30.5) < 0.01);
+  assert.ok(hut, "hut mesh must exist");
+  assert.ok(Math.abs(hut.rotation.y - Math.PI / 2) < 1e-6, "hut must face its eastern street, rotation=" + hut.rotation.y);
+  const stepMesh = fake.dressingGroup.children.find((m) => m.userData.doorstep);
+  assert.ok(stepMesh, "a doorstep must join the hut door to its street");
+  assert.ok(stepMesh.position.x > 30.5, "the doorstep must sit on the street side of the hut");
+}
+
 // render.js must never fetch: all textures are procedural canvases,
 // and the module must not reference the network at all.
 {

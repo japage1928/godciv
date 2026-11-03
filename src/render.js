@@ -8,7 +8,7 @@
 // Buildings are merged vertex-colored geometry: one draw call per
 // building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, phaseOf, eraStageOf, WALL_RING_R } from "./sim.js";
+import { SIZE, phaseOf, eraStageOf, WALL_RING_R, streetFrontage } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
@@ -308,6 +308,8 @@ function ensureTexMaterials() {
 // is the grounding cue.
 const SHADOW_GEO = new THREE.PlaneGeometry(1, 1);
 const MAT_SHADOW = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false });
+const STEP_GEO = new THREE.BoxGeometry(0.62, 0.07, 0.62);
+const MAT_STEP = new THREE.MeshLambertMaterial({ color: 0x8a7a5e });
 
 // One timber house, parameterized: walls, timber frame, pitched or
 // flat roof, chimney, door, windows, shutters and flower boxes at
@@ -742,9 +744,13 @@ export class Renderer {
   // snow caps (winter only), plus round parts as shared-geometry
   // meshes where a box will not do. Era stage picks the palette and
   // the roof shape; tech level adds workshop detail.
-  _buildingMesh(type, x, z, techLevel = 0, era = 0, groundY = 0.45) {
+  _buildingMesh(type, x, z, techLevel = 0, era = 0, groundY = 0.45, facingAngle = 0) {
     const g = new THREE.Group();
     g.position.set(x + 0.5, 0.3, z + 0.5);
+    // Houses turn their door toward their street. The door is built
+    // on the +z side, so rotating by atan2 of the street direction
+    // faces it. Symmetric types are unaffected in practice.
+    g.rotation.y = facingAngle;
     const pal = ERA_PALETTE[era] || ERA_PALETTE[0];
     const flat = era >= 3;
     let chimneyTop = null;
@@ -769,7 +775,13 @@ export class Renderer {
       }
       if (extra) for (const e of extra) g.add(e);
       if (chimneyTop) {
-        this._chimneys.push([x + 0.5 + chimneyTop[0], 0.3 + chimneyTop[1], z + 0.5 + chimneyTop[2]]);
+        // The chimney's stored world position must follow the same
+        // rotation as the group, or smoke would rise from where the
+        // chimney stood before the house turned to face its street.
+        const c = Math.cos(facingAngle), s = Math.sin(facingAngle);
+        const wx = chimneyTop[0] * c + chimneyTop[2] * s;
+        const wz = -chimneyTop[0] * s + chimneyTop[2] * c;
+        this._chimneys.push([x + 0.5 + wx, 0.3 + chimneyTop[1], z + 0.5 + wz]);
         // Fire glowing on the chimney top at dusk and night, as in
         // the mockup. A night mesh: hidden by day, lit after dark.
         const flame = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.26, 6), MAT_FLAME);
@@ -970,8 +982,13 @@ export class Renderer {
     const safeMesh = (type, x, z) => {
       const cell = grid && grid[x] && grid[x][z];
       const groundY = cell ? cell.h * 0.9 : 0.45;
-      try { return this._buildingMesh(type, x, z, techLevel, era, groundY); }
-      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY); } catch (e2) { return null; } }
+      // Face the nearest street: the door side turns toward it. A
+      // house with no street beside it keeps the default facing, as
+      // grandfathered scatter-built houses did.
+      const front = grid ? streetFrontage(grid, x, z) : null;
+      const facingAngle = front ? Math.atan2(front[0], front[1]) : 0;
+      try { return this._buildingMesh(type, x, z, techLevel, era, groundY, facingAngle); }
+      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY, facingAngle); } catch (e2) { return null; } }
     };
     const built = [];
     for (const b of state.buildings) { const m = safeMesh(b.type, b.x, b.z); if (m) built.push(m); }
@@ -1069,6 +1086,18 @@ export class Renderer {
       const yard = new THREE.Mesh(mergeParts(parts), MAT_BODY);
       yard.position.set(nx + 0.5, 0.3, nz + 0.5);
       this.dressingGroup.add(yard);
+    }
+    // Doorsteps: a worn step from each house door to its street, so
+    // lots read as lots facing the street, not boxes on grass.
+    for (const b of state.buildings) {
+      if (!["hut", "longhouse", "greathall", "farmhouse", "workshop", "school", "healer", "granary", "shrine"].includes(b.type)) continue;
+      const front = grid ? streetFrontage(grid, b.x, b.z) : null;
+      if (!front) continue;
+      const cell = grid[b.x][b.z];
+      const step = new THREE.Mesh(STEP_GEO, MAT_STEP);
+      step.position.set(b.x + 0.5 + front[0] * 0.95, (cell ? cell.h * 0.9 : 0.45) + 0.05, b.z + 0.5 + front[1] * 0.95);
+      step.userData.doorstep = true;
+      this.dressingGroup.add(step);
     }
     this._wasNight = null;
     this._buildSignature = sig;

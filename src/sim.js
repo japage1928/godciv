@@ -1051,26 +1051,142 @@ function doWork(state, grid, v, dt) {
 // version let the cluster bonus and road bonus pull huts into a
 // 2-cell clump, which read as no organization at all.
 const DWELLING_TYPES = ["hut", "longhouse", "greathall", "farmhouse"];
-export function scoreSpot(state, grid, x, z, type) {
+// --- settlement layout: streets, lots, and zones ---
+// The village grows like a place, not a scatter. A street plan —
+// plaza ring, spokes, outer rings — carries lots along its edges;
+// houses stand on lots facing their street; farm fields live in
+// their own western block; the center stays civic. The plan is
+// DERIVED from the grid every time it is needed, never saved, so
+// old worlds load unchanged and the new rules govern only new
+// construction. Grandfathered buildings, roads, and fields are
+// never moved, deleted, or rebuilt: a road laid through a field
+// by the old scatter rules stays, and no new one ever joins it.
+
+// Street rings (Chebyshev distance from the town center). The plaza
+// ring at 2 exists from founding; outer rings open as the village
+// grows. The wall ring sits at 9, between rings 8 and 11.
+export const STREET_RINGS = [2, 5, 8, 11, 14, 17, 20, 23];
+const RING_STEP = 3;
+
+// The farm district: the western block. Streets never enter it, and
+// farm beds never leave it.
+export function isFieldZone(state, x, z) {
+  const cx = state._cx, cz = state._cz;
+  return x <= cx - 4 && Math.hypot(x - cx, z - cz) <= 14;
+}
+
+// How far the street plan reaches: the smallest ring that contains
+// every settled building (plus one), so the plan always wraps the
+// village as it stands. Walls, towers, and boundary markers do not
+// count: they are the edge, not the settlement.
+export function streetExtent(state) {
+  const cx = state._cx, cz = state._cz;
+  let maxD = 2;
+  const settled = (b) => b.type !== "wall" && b.type !== "tower" && b.type !== "marker";
+  for (const b of state.buildings) if (settled(b)) maxD = Math.max(maxD, Math.max(Math.abs(b.x - cx), Math.abs(b.z - cz)));
+  for (const q of state.buildQueue) if (settled(q)) maxD = Math.max(maxD, Math.max(Math.abs(q.x - cx), Math.abs(q.z - cz)));
+  for (const r of STREET_RINGS) if (r >= maxD + 1) return r;
+  return STREET_RINGS[STREET_RINGS.length - 1];
+}
+
+// A cell is on the street plan when it sits on a ring or a spoke,
+// outside the farm district. Spokes are the four axes; the west
+// spoke stops at the field-zone edge, so no street ever leads into
+// the fields — the farm road ends at the plaza ring.
+export function isPlanStreet(state, x, z, extent = streetExtent(state)) {
+  const cx = state._cx, cz = state._cz;
+  const dx = x - cx, dz = z - cz;
+  const d = Math.max(Math.abs(dx), Math.abs(dz));
+  if (d > extent || d < 2) return false;
+  if (isFieldZone(state, x, z)) return false;
+  if (STREET_RINGS.includes(d)) return true;
+  return dx === 0 || dz === 0;
+}
+
+// Plan cells in paving order: nearest first, spokes before ring
+// cells at the same distance, so a new ring is always reached by
+// its spokes and streets extend outward from the plaza.
+export function planStreetCells(state, extent = streetExtent(state)) {
+  const cx = state._cx, cz = state._cz;
+  const seen = new Set();
+  const cells = [];
+  const push = (x, z) => {
+    if (!inBounds(x, z)) return;
+    if (!isPlanStreet(state, x, z, extent)) return;
+    const k = key(x, z);
+    if (seen.has(k)) return;
+    seen.add(k);
+    cells.push([x, z]);
+  };
+  for (let d = 2; d <= extent; d++) {
+    for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) push(cx + dx * d, cz + dz * d);
+    if (STREET_RINGS.includes(d)) {
+      for (let dx = -d; dx <= d; dx++) { push(cx + dx, cz - d); push(cx + dx, cz + d); }
+      for (let dz = -d + 1; dz <= d - 1; dz++) { push(cx - d, cz + dz); push(cx + d, cz + dz); }
+    }
+  }
+  return cells;
+}
+
+// Street frontage: the direction from a cell to a paved street next
+// door, or null. Fixed neighbour order (N, E, S, W) so facing is
+// deterministic. Grandfathered roads count: a house beside an old
+// road faces it, same as a new street.
+export function streetFrontage(grid, x, z) {
+  for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+    const nx = x + dx, nz = z + dz;
+    if (inBounds(nx, nz) && grid[nx][nz].road) return [dx, dz];
+  }
+  return null;
+}
+
+// A lot is a free cell with street frontage, off the street plan
+// itself and out of the fields. Dwellings keep their old spacing:
+// no dwelling within 2 cells (Chebyshev) of another.
+function lotFree(state, grid, x, z, type, extent) {
+  if (!inBounds(x, z)) return false;
+  const c = grid[x][z];
+  if (c.blocked || c.water || c.farm || c.building || c.tree || c.road) return false;
+  if (c.stone > 0 || c.ore > 0) return false;
+  if (isPlanStreet(state, x, z, extent)) return false;
+  if (isFieldZone(state, x, z)) return false;
+  if (state.buildQueue.some((q) => q.x === x && q.z === z)) return false;
+  if (DWELLING_TYPES.includes(type)) {
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+      if (!dx && !dz) continue;
+      const nx = x + dx, nz = z + dz;
+      const n = inBounds(nx, nz) ? grid[nx][nz] : null;
+      if (n && n.building && DWELLING_TYPES.includes(n.building)) return false;
+      // A queued dwelling counts too: the grid is only marked when
+      // a build completes, so without this two huts queued on
+      // successive ticks could land cheek by jowl.
+      if (state.buildQueue.some((q) => q.x === nx && q.z === nz && DWELLING_TYPES.includes(q.type))) return false;
+    }
+  }
+  if (type === "farmhouse") {
+    // A farmhouse anchors the farm district: it stands on the
+    // western half, within reach of worked fields. Without this
+    // hard rule the lot system could site one anywhere, and the
+    // field bed cleared around it on completion would scatter
+    // farm plots across the map — the old farmhouse scoring kept
+    // them west, and the lot system must keep that promise.
+    if (x >= state._cx) return false;
+    let nearFarm = false;
+    for (let dx = -3; dx <= 3 && !nearFarm; dx++) for (let dz = -3; dz <= 3; dz++) {
+      if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) nearFarm = true;
+    }
+    if (!nearFarm) return false;
+  }
+  return streetFrontage(grid, x, z) !== null;
+}
+
+export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) {
+  if (!lotFree(state, grid, x, z, type, extent)) return -Infinity;
   const cx = state._cx, cz = state._cz;
   const dist = Math.hypot(x - cx, z - cz);
-  const c = grid[x][z];
-  if (c.blocked || c.water || c.farm || c.building || c.tree) return -Infinity;
-  // Hard spacing: no dwelling within 2 cells (Chebyshev) of another.
-  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
-    if (!dx && !dz) continue;
-    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
-    if (n && n.building && DWELLING_TYPES.includes(n.building)) return -Infinity;
-  }
-  if ((type === "hut" || type === "longhouse" || type === "greathall") && x < cx - 3) return -Infinity;
-  if (type === "farmhouse" && x > cx - 5) return -Infinity;
-  let score = 0;
-  // Road access: a road right next door is worth building beside.
-  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
-    if (!dx && !dz) continue;
-    const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
-    if (n && n.road) score += 2;
-  }
+  // Infill first: distance dominates, so empty lots near the center
+  // fill before the village sprawls outward.
+  let score = -dist * 10;
   // Cluster, at arm's length: buildings three to four cells away are
   // good neighbours; closer than that is already hard-rejected above.
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
@@ -1079,15 +1195,19 @@ export function scoreSpot(state, grid, x, z, type) {
     if (n && n.building) score += 1.0;
   }
   if (type === "hut" || type === "longhouse" || type === "greathall") {
-    score -= Math.abs(dist - 7) * 2.0; // housing ring, radius ~7
+    if (dist < 4) score -= 6; // the civic core stays civic
   } else if (type === "farmhouse") {
+    // District anchors sit at the field edge, not in the civic
+    // core: cancel the infill pull, prefer the western edge at
+    // middle distance, and stay near worked ground.
+    score += dist * 10;
+    score -= Math.abs(dist - 7) * 2.0;
     score += x < cx ? 4 : -4; // farm district is west
     let farmsNear = 0;
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
       if (inBounds(x + dx, z + dz) && grid[x + dx][z + dz].farm) farmsNear++;
     }
-    score += farmsNear * 1.2;
-    score -= Math.abs(dist - 10) * 0.6;
+    score += farmsNear * 0.4;
   } else if (type === "granary") {
     score -= Math.abs(dist - 4) * 1.0;
     let farmsNear = 0;
@@ -1112,16 +1232,22 @@ export function scoreSpot(state, grid, x, z, type) {
   return score;
 }
 
-export function findPlannedSpot(state, grid, type, minR = 3, maxR = 14) {
-  const cx = state._cx, cz = state._cz;
+export function findLotSpot(state, grid, type) {
+  const extent = streetExtent(state);
   let best = null, bestScore = -Infinity;
   for (let x = 0; x < SIZE; x++) for (let z = 0; z < SIZE; z++) {
-    if (Math.hypot(x - cx, z - cz) < minR || Math.hypot(x - cx, z - cz) > maxR) continue;
-    const sc = scoreSpot(state, grid, x, z, type);
+    const sc = lotScore(state, grid, x, z, type, extent);
     if (sc > bestScore) { bestScore = sc; best = [x, z]; }
   }
   return bestScore > -Infinity ? best : null;
 }
+
+// Compatibility: older code and tests asked for a scored spot in a
+// radius band. Lots now bound placement instead of radii, so the
+// radius arguments are accepted and ignored, and the score of a
+// cell is its lot score: unusable cells score -Infinity, as before.
+export function scoreSpot(state, grid, x, z, type) { return lotScore(state, grid, x, z, type); }
+export function findPlannedSpot(state, grid, type) { return findLotSpot(state, grid, type); }
 
 // --- walls and towers: a ring with gates, not a sprawl ---
 // The wall ring sits 9 cells out from the town center. The four axis
@@ -1206,39 +1332,40 @@ export function pavePlaza(grid, cx, cz) {
   return laid;
 }
 
-function findBuildSpot(state, grid, minR, maxR) {
-  return findPlannedSpot(state, grid, "granary", minR, maxR);
-}
-
-function paveRoads(state, grid) {
-  const targets = state.buildings.filter((b) => ["hut", "longhouse", "greathall", "farmhouse", "workshop", "granary"].includes(b.type));
-  if (!targets.length) return;
-  const cx = state._cx, cz = state._cz;
-  // Finish one road at a time: pave the whole path to the target
-  // with the fewest unpaved cells left, instead of scattering short
-  // stubs. The old version picked the path with the fewest road
-  // cells, which paved new ground every check and never completed
-  // a single road.
-  const allTargets = [...targets];
-  if (state._farmCells.length) allTargets.push({ x: state._farmCells[0][0], z: state._farmCells[0][1] });
-  let bestPath = null, bestUnpaved = Infinity;
-  for (const t of allTargets) {
-    const path = findPath(grid, cx, cz, t.x, t.z, 4000, true); // roads route around fields, never through them
-    if (!path) continue;
-    const unpaved = path.filter(([x, z]) => { const c = grid[x][z]; return !c.road && !c.building && !c.water && !c.farm; }).length;
-    if (unpaved > 0 && unpaved < bestUnpaved) { bestUnpaved = unpaved; bestPath = path; }
-  }
-  if (!bestPath) return;
+// Streets grow just in time: pave the next stretch of the street
+// plan, in order, clearing trees and stone the way the founding
+// plaza did. Never paves over water, buildings, or farm plots, and
+// never paves a cell that is not on the plan — so a road can never
+// again cut through a field. The working extent runs one ring past
+// the settled village, so streets always lead and houses follow;
+// the order plus the must-touch-pavement rule keeps growth
+// contiguous instead of leapfrogging outward.
+export function paveStreets(state, grid) {
+  const extent = Math.min(STREET_RINGS[STREET_RINGS.length - 1], streetExtent(state) + RING_STEP);
+  const plan = planStreetCells(state, extent);
   let paved = 0;
-  for (const [x, z] of bestPath) {
-    if (paved >= 16) break;
+  for (const [x, z] of plan) {
+    if (paved >= 8) break;
     const c = grid[x][z];
-    if (c.road || c.building || c.water || c.farm) continue;
+    if (c.road) continue;
+    if (c.water || c.building || c.farm) continue;
+    let touchesRoad = false;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = inBounds(x + dx, z + dz) ? grid[x + dx][z + dz] : null;
+      if (n && n.road) { touchesRoad = true; break; }
+    }
+    if (!touchesRoad) continue;
+    if (c.tree) c.tree = false;
+    if (c.stone > 0) { c.stone = 0; c.ore = 0; }
+    c.blocked = false;
     c.road = true;
-    if (c.tree) { c.tree = false; c.blocked = false; }
     paved++;
   }
-  if (paved) log(state, "Villagers lay a dirt road toward the " + (bestPath ? "village districts." : "huts."));
+  if (paved && (state._streetLogAt == null || state.elapsed - state._streetLogAt > 120)) {
+    state._streetLogAt = state.elapsed;
+    log(state, "Villagers extend the street through the growing village.");
+  }
+  return paved;
 }
 
 export function expandVillage(state, grid) {
@@ -1258,7 +1385,7 @@ export function expandVillage(state, grid) {
       } else if (top.type === "wall") spot = findWallSpot(state, grid);
       else if (top.type === "tower") spot = findTowerSpot(state, grid);
       else if (top.type === "hut") spot = findHutSpot(state, grid);
-      else spot = findPlannedSpot(state, grid, top.type, 2, 14);
+      else spot = findLotSpot(state, grid, top.type);
       if (spot) {
         // Never queue two builds on the same cell: the grid is only
         // marked when a build completes, so a second demand would
@@ -1284,7 +1411,7 @@ export function expandVillage(state, grid) {
       log(state, "The villagers raise a boundary marker.");
     }
   }
-  paveRoads(state, grid);
+  paveStreets(state, grid);
   expandFarms(state, grid);
 }
 
@@ -1300,11 +1427,21 @@ export function findFarmBed(state, grid) {
     if (x + 1 > cx - 3) continue; // the whole bed stays west of the plaza
     let free = 0, farmsNear = 0, trees = 0;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
-      const c = grid[x + dx][z + dz];
+      const bx = x + dx, bz = z + dz;
+      // Beds stay inside the field blocks and off the street plan.
+      if (!isFieldZone(state, bx, bz) || isPlanStreet(state, bx, bz)) { free = -99; break; }
+      const c = grid[bx][bz];
       if (c.water || c.building || c.road) { free = -99; break; }
       if (c.farm) farmsNear++;
       else if (!c.blocked) free++;
       else if (c.tree) trees++;
+    }
+    if (free < 0) continue;
+    // A bed keeps one cell clear of roads on every side, so fields
+    // read as blocks and no road ever threads between the beds.
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
+      if (grid[x + dx][z + dz].road) { free = -99; break; }
     }
     if (free < 0) continue;
     const newCells = free + trees;
@@ -1327,6 +1464,11 @@ export function clearFarmBed(state, grid, cx0, cz0) {
     if (!inBounds(x, z)) continue;
     const c = grid[x][z];
     if (c.water || c.building || c.road || c.farm) continue;
+    if (isPlanStreet(state, x, z)) continue;
+    // Fields belong in the field blocks: a bed cleared around a
+    // farmhouse at the district edge farms only its western cells,
+    // never the street side or the open village.
+    if (!isFieldZone(state, x, z)) continue;
     if (c.tree) { c.tree = false; }
     if (c.stone > 0) { c.stone = 0; c.ore = 0; }
     c.blocked = false; c.farm = true; c.crop = 0; c.cropGrow = 0;
@@ -1903,7 +2045,7 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
 }
 
 function findHutSpot(state, grid) {
-  return findPlannedSpot(state, grid, "hut", 4, 12);
+  return findLotSpot(state, grid, "hut");
 }
 
 export function leader(state) {
