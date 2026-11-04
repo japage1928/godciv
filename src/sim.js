@@ -1346,13 +1346,20 @@ export function computeDemands(state, grid) {
   }
   // Defenses: a wall ring once the village knows iron craft and has
   // the hands to hold it; towers once a wall line exists to anchor.
-  // Walls are capped so the ring never paves the whole map.
+  // Walls are capped so the ring never paves the whole map. Once the
+  // inner ring is established, a bigger village raises a second ring
+  // at OUTER_WALL_RING_R; a third ring is one more demand rule away.
+  const ringCount = (R) => state.buildings.filter((b) => b.type === "wall" && Math.max(Math.abs(b.x - state._cx), Math.abs(b.z - state._cz)) === R).length
+    + state.buildQueue.filter((q) => q.type === "wall" && Math.max(Math.abs(q.x - state._cx), Math.abs(q.z - state._cz)) === R).length;
   const wallCount = state.buildings.filter((b) => b.type === "wall").length
     + state.buildQueue.filter((q) => q.type === "wall").length;
   const towerCount = state.buildings.filter((b) => b.type === "tower").length
     + state.buildQueue.filter((q) => q.type === "tower").length;
-  if (state.tech && state.tech.level >= 2 && pop >= 12 && wallCount < 40 && !queued("wall")) {
-    demands.push({ type: "wall", score: 3.5, reason: "Iron craft brings wariness: the village needs a wall ring." });
+  if (state.tech && state.tech.level >= 2 && pop >= 12 && ringCount(WALL_RING_R) < 40 && !queued("wall")) {
+    demands.push({ type: "wall", ring: WALL_RING_R, score: 3.5, reason: "Iron craft brings wariness: the village needs a wall ring." });
+  }
+  if (state.tech && state.tech.level >= 2 && pop >= 18 && ringCount(WALL_RING_R) >= 40 && ringCount(OUTER_WALL_RING_R) < 60 && !queued("wall")) {
+    demands.push({ type: "wall", ring: OUTER_WALL_RING_R, score: 3.4, reason: "The village has outgrown its wall: a second ring will hold the fields." });
   }
   if (state.tech && state.tech.level >= 2 && pop >= 14 && wallCount >= 6 && towerCount < 4 && !queued("tower")) {
     demands.push({ type: "tower", score: 4, reason: "The wall needs towers to watch the gates." });
@@ -1896,6 +1903,7 @@ export function findPlannedSpot(state, grid, type) { return findLotSpot(state, g
 // in. Walls block movement through the grid blocked mechanism, so
 // villagers path through the gates like everyone else.
 export const WALL_RING_R = 9;
+export const OUTER_WALL_RING_R = 18;
 
 function ringCellFree(state, grid, x, z) {
   if (!inBounds(x, z)) return false;
@@ -1903,8 +1911,8 @@ function ringCellFree(state, grid, x, z) {
   return !c.blocked && !c.water && !c.farm && !c.building && !c.tree && c.stone <= 0 && c.ore <= 0 && !c.road;
 }
 
-export function findWallSpot(state, grid) {
-  const cx = state._cx, cz = state._cz, R = WALL_RING_R;
+export function findWallSpot(state, grid, R = WALL_RING_R) {
+  const cx = state._cx, cz = state._cz;
   let best = null, bestScore = -Infinity;
   for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
     if (Math.max(Math.abs(dx), Math.abs(dz)) !== R) continue;
@@ -2020,7 +2028,7 @@ export function expandVillage(state, grid) {
       } else if (top.type === "greathall") {
         const lh = [...state.buildings].filter((b) => b.type === "longhouse").sort((a, b) => (a.builtDay || 1) - (b.builtDay || 1))[0];
         if (lh) spot = [lh.x, lh.z];
-      } else if (top.type === "wall") spot = findWallSpot(state, grid);
+      } else if (top.type === "wall") spot = findWallSpot(state, grid, top.ring || WALL_RING_R);
       else if (top.type === "tower") spot = findTowerSpot(state, grid);
       else if (top.type === "hut") spot = findHutSpot(state, grid);
       else spot = findLotSpot(state, grid, top.type);
@@ -2191,7 +2199,10 @@ export function makeRaider(state, x, z) {
 
 export function spawnRaid(state, grid, size = null) {
   const pop = state.villagers.length;
-  const n = size ?? Math.min(6, 2 + Math.floor(pop / 12));
+  // Raid size scales with the village and the era, capped: bigger
+  // villages with better tools draw bigger raids, never more than
+  // RAID_SIZE_CAP at once.
+  const n = size ?? Math.min(RAID_SIZE_CAP, 2 + Math.floor(pop / 10) + eraStageOf(state.tech ? state.tech.level : 0));
   const dirs = ["north", "south", "east", "west"];
   const dir = dirs[Math.floor(state._rng() * 4)];
   // Original spawn pattern: the old block's edge, one draw per
