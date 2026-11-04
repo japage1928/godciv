@@ -1,6 +1,6 @@
 /* GodCiv service worker: cache-first app shell so the game works offline
    after the first load. Version the cache name when the shell changes. */
-const CACHE = "godciv-v13-war";
+const CACHE = "godciv-v14-split";
 const PRECACHE = [
   "./",
   "./index.html",
@@ -8,6 +8,16 @@ const PRECACHE = [
   "./icon.svg",
   "./src/main.js",
   "./src/sim.js",
+  "./src/sim/core.js",
+  "./src/sim/terrain.js",
+  "./src/sim/diplomacy.js",
+  "./src/sim/grid.js",
+  "./src/sim/world.js",
+  "./src/sim/brain.js",
+  "./src/sim/planning.js",
+  "./src/sim/combat.js",
+  "./src/sim/step.js",
+  "./src/sim/actions.js",
   "./src/render.js",
   "./src/ollama.js",
   "./vendor/three.module.js",
