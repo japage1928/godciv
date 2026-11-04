@@ -7,7 +7,7 @@
 import assert from "node:assert";
 import {
   newWorld, step, serialize, deserialize, applyGod, expandFarms,
-  findLotSpot, lotScore, isPlanStreet, isFieldZone, streetExtent, streetFrontage,
+  findLotSpot, lotScore, isPlanStreet, isFieldZone, farmDistrictOf, streetExtent, streetFrontage,
   paveStreets, planStreetCells, findPlannedSpot, scoreSpot, clearFarmBed, findFarmBed,
   SIZE, cellAt, peekCell, forEachGeneratedCell,
 } from "../src/sim.js";
@@ -91,15 +91,16 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   }
 }
 
-// Farms grow in western blocks only, off the street plan, and a new
-// bed keeps one cell clear of roads on every side.
+// Farms grow in the farm districts (west founding district plus
+// satellite districts since Phase 3), off the street plan, and a
+// new bed keeps one cell clear of roads on every side.
 {
   const { state: s, grid: g } = newWorld(45);
   s.stockpile.food = 0; s.stockpile.fish = 0; s.stockpile.meat = 0;
   for (let i = 0; i < 30; i++) expandFarms(s, g);
   assert.ok(s._farmCells.length > 18, "fields must grow under hunger, got " + s._farmCells.length);
   for (const [x, z] of s._farmCells) {
-    assert.ok(isFieldZone(s, x, z), "every farm cell must stay in the western field blocks, at " + x + "," + z);
+    assert.ok(farmDistrictOf(s, x, z) !== null, "every farm cell must stay in a farm district, at " + x + "," + z);
     assert.ok(!cellAt(g, x, z).road, "no farm cell may be a road cell, at " + x + "," + z);
     assert.ok(!isPlanStreet(s, x, z, 23), "no farm cell may sit on the street plan, at " + x + "," + z);
   }
@@ -117,14 +118,14 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   for (const [x, z] of s._farmCells) assert.ok(!isPlanStreet(s, x, z, 23), "clearFarmBed must not farm a street cell, at " + x + "," + z);
 }
 
-// Farmhouses anchor the fields: their lots sit on the western half
-// within reach of worked ground, and the bed cleared when one
-// completes never farms outside the field blocks.
+// Farmhouses anchor the fields: their lots sit outside every farm
+// district within reach of worked ground, and the bed cleared when
+// one completes never farms outside the farm districts.
 {
   const { state: s, grid: g } = newWorld(47);
   const spot = findLotSpot(s, g, "farmhouse");
   assert.ok(spot, "a farmhouse lot must exist at the field edge");
-  assert.ok(spot[0] < s._cx, "a farmhouse lot must sit on the western half");
+  assert.ok(farmDistrictOf(s, spot[0], spot[1]) === null, "a farmhouse lot must sit outside the farm districts");
   let nearFarm = false;
   for (let dx = -3; dx <= 3 && !nearFarm; dx++) for (let dz = -3; dz <= 3; dz++) {
     const nc = peekCell(g, spot[0] + dx, spot[1] + dz);
@@ -133,7 +134,7 @@ const cheb = (ax, az, bx, bz) => Math.max(Math.abs(ax - bx), Math.abs(az - bz));
   assert.ok(nearFarm, "a farmhouse lot must sit within reach of worked fields");
   const added = clearFarmBed(s, g, s._cx - 4, s._cz + 8);
   assert.ok(added >= 3, "clearing a bed at the field edge must add plots, added=" + added);
-  for (const [x, z] of s._farmCells) assert.ok(isFieldZone(s, x, z), "field clearing must stay in the field blocks, at " + x + "," + z);
+  for (const [x, z] of s._farmCells) assert.ok(farmDistrictOf(s, x, z) !== null, "field clearing must stay in the farm districts, at " + x + "," + z);
 }
 
 function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < SIZE && !!peekCell(grid, x, z); }

@@ -139,9 +139,33 @@ export function drainGenQueue(grid, max = 1) {
 // Call after mutating a cell: marks the chunk dirty for render/save
 // and invalidates the tree/stone indexes and the shore flag.
 export function noteMutation(grid, x, z) {
-  grid._indexDirty = true;
   const ch = peekChunk(grid, Math.floor(x / CHUNK), Math.floor(z / CHUNK));
   if (ch) { ch.dirty = true; ch.shore = null; }
+  // Incremental index upkeep (v14 perf fix): when the indexes are
+  // fresh, refresh just this cell's entries instead of flagging a
+  // full rebuild — the rebuild scans every generated cell (50k+ on
+  // a 194-chunk world) and was firing on ~20% of steps, pushing
+  // p95 to ~10ms. Every runtime tree/stone/ore mutation calls here
+  // AFTER the change, so reading the cell's current state is
+  // correct. While a rebuild is already pending (a chunk was just
+  // generated, or a save just loaded) the rebuild covers this cell
+  // and the incremental work is skipped; ensureIndexes stays the
+  // fallback for loads and for grids whose sets were never built.
+  if (grid._indexDirty || !ch) return;
+  if (!grid._treeSet || !grid._stoneSet || !grid._oreSet || !grid._stoneSpots) { grid._indexDirty = true; return; }
+  const c = ch.cells[x % CHUNK] && ch.cells[x % CHUNK][z % CHUNK];
+  if (!c) return;
+  const k = key(x, z);
+  if (c.tree) grid._treeSet.add(k); else grid._treeSet.delete(k);
+  if (c.ore > 0) grid._oreSet.add(k); else grid._oreSet.delete(k);
+  const hadStone = grid._stoneSet.has(k);
+  if (c.stone > 0) {
+    if (!hadStone) { grid._stoneSet.add(k); grid._stoneSpots.push([x, z]); }
+  } else if (hadStone) {
+    grid._stoneSet.delete(k);
+    const i = grid._stoneSpots.findIndex(([sx, sz]) => sx === x && sz === z);
+    if (i >= 0) grid._stoneSpots.splice(i, 1);
+  }
 }
 
 // Spatial indexes, rebuilt lazily from generated chunks only. The

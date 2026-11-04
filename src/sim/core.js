@@ -31,6 +31,39 @@ export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "
 // from the communal stockpile. Nobody starves for poverty: a villager
 // with no coins still gets a communal ration.
 export const PRICES = { food: 2, fish: 2, meat: 3, wood: 1, stone: 1, ore: 4, furniture: 6, pottery: 4, ironware: 8, wares: 10 };
+
+// --- class + housing ladder (v14): produced goods raise standing,
+// standing raises class, class raises the occupant's home tier. No
+// new currency: standing counts only goods the production jobs make
+// plus the coins and education the sim already tracks. Thresholds
+// and tiers ratchet — neither ever decreases.
+export const PRODUCT_GOODS = ["furniture", "pottery", "ironware", "wares"];
+export const CLASS_NAMES = ["commoner", "artisan", "merchant", "gentry"];
+export const CLASS_THRESHOLDS = [0, 4, 10, 18];
+export const DWELLING_TYPES = ["hut", "longhouse", "greathall", "farmhouse"];
+export const HOUSING_BASE_VALUE = { hut: 10, farmhouse: 8, longhouse: 24, greathall: 40 };
+
+export function standingOf(v) {
+  const goods = v.goods || {};
+  let products = 0;
+  for (const g of PRODUCT_GOODS) products += goods[g] || 0;
+  return products + Math.floor((v.coins || 0) / 10) + Math.floor((v.education || 0) / 2);
+}
+
+export function classOfStanding(standing) {
+  let c = 0;
+  for (let i = 0; i < CLASS_THRESHOLDS.length; i++) if (standing >= CLASS_THRESHOLDS[i]) c = i;
+  return c;
+}
+
+export function tierOfClass(c) {
+  return c >= 3 ? 2 : c >= 1 ? 1 : 0;
+}
+
+export function housingValue(b) {
+  const base = HOUSING_BASE_VALUE[b.type] || 0;
+  return base * ((b.tier || 0) + 1);
+}
 export const BUILD_COSTS = {
   hut: { wood: 12, stone: 6 },
   granary: { wood: 20, stone: 10 },
@@ -181,7 +214,8 @@ export function makeVillager(state, x, z, leader = false, opts = {}) {
     hunger: 15 + rng() * 20, energy: 75 + rng() * 20, health: 100, fear: 0,
     carry: null, carryCap: 5, state: "idle", workTimer: 0, target: null,
     sick: false, rethinkAt: 0, stuckAt: 0, lastX: x, lastZ: z, personalFocus: null,
-    assignedJob: null, delegated: false,
+    assignedJob: null, delegated: false, restUntil: 0,
+    class: 0, // v14 standing ladder: ratchets up, never down
   };
 }
 

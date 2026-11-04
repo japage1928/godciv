@@ -1,12 +1,12 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, CHUNK, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary, ownVillagers, ownBuildings, relationBand, getRelation, allied, warWith } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, CHUNK, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary, ownVillagers, ownBuildings, relationBand, getRelation, allied, warWith, farmDistrictOf, CLASS_NAMES, DWELLING_TYPES, housingValue, standingOf } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
 const $ = (id) => document.getElementById(id);
 const SAVE_KEY = "godciv-pwa-save-v1";
-const APP_VERSION = "v13";
+const APP_VERSION = "v14";
 const PAGES_ORIGIN = "https://japage1928.github.io";
 // The always-on village lives on the same origin as this page when the
 // page is served by the server. Any other origin (GitHub Pages, a local
@@ -98,14 +98,16 @@ function renderHUD() {
   $("directive-label").textContent = s.directive && s.directive.focusJob ? "Directive: " + s.directive.focusJob : "No directive";
 }
 
-function villagerCard(v) {
+function villagerCard(v, s) {
   if (!v) return "";
   const carry = v.carry ? v.carry.amt + " " + v.carry.type : "empty hands";
   const goods = Object.keys(PRICES).filter((g) => (v.goods[g] || 0) > 0).map((g) => g + " " + v.goods[g]).join(" · ") || "no personal goods";
   const age = v.ageDays < 3 ? "child" : v.ageDays >= 45 ? "elder, " + v.ageDays + "d" : v.ageDays + "d old";
+  const homeB = s && v.home ? ownBuildings(s).find((b) => b.x + "," + b.z === v.home) : null;
+  const homeLine = homeB ? " · home: " + homeB.type + (DWELLING_TYPES.includes(homeB.type) ? " · tier " + (homeB.tier || 0) + " (value " + housingValue(homeB) + ")" : "") : "";
   return `<h3>${v.name}${v.leader ? " · Leader" : ""}</h3>
-    <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}${v.job === "guard" && v.post ? " · post " + v.post.x + "," + v.post.z + (v.post.kind === "gate" ? " (" + (v.post.dir || "gate") + ")" : " (tower)") : ""}</p>
-    <p>Coins: <b>${v.coins}</b> · Personal goods: ${goods}</p>
+    <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}${homeLine}${v.job === "guard" && v.post ? " · post " + v.post.x + "," + v.post.z + (v.post.kind === "gate" ? " (" + (v.post.dir || "gate") + ")" : " (tower)") : ""}</p>
+    <p>Class: <b>${CLASS_NAMES[v.class || 0]}</b> (standing ${standingOf(v)}) · Coins: <b>${v.coins}</b> · Personal goods: ${goods}</p>
     <p>Education: <b>${v.education || 0}/10</b> · Tools: <b>${TOOL_NAMES[v.tool || 0]}</b>${v.job === "student" ? " · at school" : ""}${v.sick ? " · sick" : ""}</p>
     <p>Delegated by the leader: <b>${v.assignedJob || "none yet"}</b>${v.delegated ? " · following it" : v.assignedJob ? " · chose own work" : ""}</p>
     <p>Traits: ${v.traits.join(", ")}</p>
@@ -172,7 +174,7 @@ function renderPanel() {
   const v = s.villagers.find((o) => o.id === selectedId);
   if (v) {
     $("panel-title").textContent = "Villager";
-    $("panel-body").innerHTML = villagerCard(v);
+    $("panel-body").innerHTML = villagerCard(v, s);
     renderer.setSelected(v);
     const focusBtn = document.querySelector("[data-focus]");
     focusBtn?.addEventListener("click", () => {
@@ -198,6 +200,8 @@ function renderPanel() {
     const longhouses = ownBuildings(s).filter((b) => b.type === "longhouse").length;
     const greathalls = ownBuildings(s).filter((b) => b.type === "greathall").length;
     const farmhouses = ownBuildings(s).filter((b) => b.type === "farmhouse").length;
+    const farmDistricts = new Set((s.farmBeds || []).map(([x, z]) => farmDistrictOf(s, x, z)).filter(Boolean));
+    const farmWhere = farmDistricts.size ? "across " + farmDistricts.size + " farm district" + (farmDistricts.size > 1 ? "s" : "") : "in the west fields";
     let farmPlots = 0, roadCells = 0;
     forEachGeneratedCell(world.grid, (x, z, c) => { if (c.farm) farmPlots++; if (c.road) roadCells++; });
     const moraleLine = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(" · ");
@@ -211,8 +215,15 @@ function renderPanel() {
     const educated = ownVillagers(s).filter((o) => (o.education || 0) >= 5).length;
     const healer = ownBuildings(s).find((b) => b.type === "healer");
     const def = defenseSummary(s);
+    const classCounts = CLASS_NAMES.map((n, i) => ownVillagers(s).filter((o) => (o.class || 0) === i).length);
+    const classLine = "Classes: " + CLASS_NAMES.map((n, i) => n + " " + classCounts[i]).join(" · ");
+    const dwellings = ownBuildings(s).filter((b) => DWELLING_TYPES.includes(b.type));
+    const tierCounts = [0, 1, 2].map((t) => dwellings.filter((b) => (b.tier || 0) === t).length);
+    const housingTotal = dwellings.reduce((a, b) => a + housingValue(b), 0);
+    const homesLine = "Homes: " + dwellings.length + " dwellings · tier 0: " + tierCounts[0] + " · tier 1: " + tierCounts[1] + " · tier 2: " + tierCounts[2] + " · total value " + housingTotal;
     $("panel-body").innerHTML = `
       <p class="muted">${ownVillagers(s).length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p>${classLine} · ${homesLine}</p>
       <p>${SEASON_EMOJI[s.season]} ${SEASON_NAMES[s.season]}, Year ${yearOf(s.day)} · ${WEATHER_LABEL[s.weather ? s.weather.kind : "clear"]} · ${phaseOf(s.time)}</p>
       <p>Morale: <b>${Math.round(s.morale ?? 60)}/100</b>${moraleLine ? ": " + moraleLine : ""}</p>
       <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> · ${TECH_TIERS[tech.level].era} (${tech.progress}/${techThresholdFor(tech.level)})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
@@ -221,7 +232,7 @@ function renderPanel() {
       <p>${celebrating ? "🎉 <b>" + s.celebration.name + "!</b> The village feasts at the town center." : "🎉 Next festival: <b>" + fest.name + "</b> in " + fest.inDays + "d, needs " + FESTIVAL_MIN_EDIBLE + " food in store and faith " + FESTIVAL_MIN_FAITH + ". A feast costs 10 food and lifts morale."}</p>
       ${school ? `<p>School: <b>${students.length} student${students.length === 1 ? "" : "s"}</b>${teacher ? " · teacher " + teacher.name : " · no teacher yet"} · ${educated} educated adult${educated === 1 ? "" : "s"}</p>` : ""}
       ${healer ? `<p>A healer's hut stands. The sick mend faster near it.</p>` : ""}
-      <p>Farms: <b>${farmPlots} plots</b> in the west fields${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") + " (plots near one grow faster)" : " · no farmhouse yet"} · Food sources: farmers ${counts.farmer || 0} · fishers ${counts.fisher || 0} · hunters ${counts.hunter || 0} · Roads: ${roadCells} cells from the plaza to every district</p>
+      <p>Farms: <b>${farmPlots} plots</b> ${farmWhere}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") + " (plots near one grow faster)" : " · no farmhouse yet"} · Food sources: farmers ${counts.farmer || 0} · fishers ${counts.fisher || 0} · hunters ${counts.hunter || 0} · Roads: ${roadCells} cells from the plaza to every district</p>
       <p>Market: fund <b>${s.fund}</b> coins · ${s.stats.trades || 0} trades · prices: ${Object.keys(PRICES).map((g) => g + " " + PRICES[g]).join(" · ")}: villagers trade personal goods at the town center; a broke villager still eats from the stockpile.</p>
       <p>Births: <b>${rates.birthRate.toFixed(1)}%/day</b> · Deaths: <b>${rates.deathRate.toFixed(1)}%/day</b> (${rates.birthsPerDay.toFixed(1)} births, ${rates.deathsPerDay.toFixed(1)} deaths per day, last ${s.rateHistory.length || 0} dawns · ${s.stats.births} born, ${s.stats.deaths} died all time)</p>
       <p>Builders need: <b>${demands.length ? demands[0].type + ": " + demands[0].reason : "nothing pressing"}</b></p>

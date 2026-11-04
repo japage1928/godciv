@@ -159,6 +159,45 @@ export function isFieldZone(state, x, z) {
   return x <= cx - 4 && Math.hypot(x - cx, z - cz) <= 14;
 }
 
+// Farm districts: the old west block plus satellite wedges N/E/S at
+// radius 16-30, +/-35 degrees of the cardinal axis. Returns "west" |
+// "north" | "east" | "south" | null. West beyond radius 14 is not a
+// district: the old fields end there, and the wedges spread farms
+// around the other three sides instead of sprawling further west.
+export function farmDistrictOf(state, x, z) {
+  const cx = state._cx, cz = state._cz;
+  if (isFieldZone(state, x, z)) return "west";
+  const dx = x - cx, dz = z - cz;
+  const d = Math.hypot(dx, dz);
+  if (d < 16 || d > 30) return null;
+  const s = Math.sin((35 * Math.PI) / 180);
+  if (dz < 0 && Math.abs(dx) / d <= s) return "north";
+  if (dx > 0 && Math.abs(dz) / d <= s) return "east";
+  if (dz > 0 && Math.abs(dx) / d <= s) return "south";
+  return null;
+}
+
+export function inFarmDistrict(state, x, z) {
+  return farmDistrictOf(state, x, z) !== null;
+}
+
+// Recover bed centers from a flat farm-cell list: greedy 3x3
+// grouping. Used at founding (beds come from the old block, not
+// from clearFarmBed) and as the load backfill for saves written
+// before farmBeds existed. Centers are spacing anchors, not exact
+// history: grouping is approximate where beds touch.
+export function clusterFarmBeds(farmCells) {
+  const beds = [];
+  const rest = new Set(farmCells.map(([x, z]) => x + "," + z));
+  for (const [x, z] of farmCells) {
+    const k = x + "," + z;
+    if (!rest.has(k)) continue;
+    beds.push([x, z]);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) rest.delete((x + dx) + "," + (z + dz));
+  }
+  return beds;
+}
+
 // How far the street plan reaches: the smallest ring that contains
 // every settled building (plus one), so the plan always wraps the
 // village as it stands. Walls, towers, and boundary markers do not
@@ -174,15 +213,16 @@ export function streetExtent(state) {
 }
 
 // A cell is on the street plan when it sits on a ring or a spoke,
-// outside the farm district. Spokes are the four axes; the west
-// spoke stops at the field-zone edge, so no street ever leads into
-// the fields — the farm road ends at the plaza ring.
+// outside the farm districts. Spokes are the four axes; the west
+// spoke stops at the field-zone edge, and the other three stop at
+// their satellite wedge, so no street ever leads into the fields —
+// the farm road ends at the plaza ring.
 export function isPlanStreet(state, x, z, extent = streetExtent(state)) {
   const cx = state._cx, cz = state._cz;
   const dx = x - cx, dz = z - cz;
   const d = Math.max(Math.abs(dx), Math.abs(dz));
   if (d > extent || d < 2) return false;
-  if (isFieldZone(state, x, z)) return false;
+  if (inFarmDistrict(state, x, z)) return false;
   if (STREET_RINGS.includes(d)) return true;
   return dx === 0 || dz === 0;
 }
@@ -234,7 +274,7 @@ function lotFree(state, grid, x, z, type, extent) {
   if (c.blocked || c.water || c.farm || c.building || c.tree || c.road) return false;
   if (c.stone > 0 || c.ore > 0) return false;
   if (isPlanStreet(state, x, z, extent)) return false;
-  if (isFieldZone(state, x, z)) return false;
+  if (inFarmDistrict(state, x, z)) return false;
   if (state.buildQueue.some((q) => q.x === x && q.z === z)) return false;
   if (DWELLING_TYPES.includes(type)) {
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
@@ -249,13 +289,12 @@ function lotFree(state, grid, x, z, type, extent) {
     }
   }
   if (type === "farmhouse") {
-    // A farmhouse anchors the farm district: it stands on the
-    // western half, within reach of worked fields. Without this
-    // hard rule the lot system could site one anywhere, and the
-    // field bed cleared around it on completion would scatter
-    // farm plots across the map — the old farmhouse scoring kept
-    // them west, and the lot system must keep that promise.
-    if (x >= state._cx) return false;
+    // A farmhouse anchors a farm district: it stands just outside
+    // the fields, within reach of worked ground, in ANY district —
+    // the old west-only rule is gone, so satellite districts gain
+    // farmhouses too. Without this hard rule the lot system could
+    // site one anywhere, and the field bed cleared around it on
+    // completion would scatter farm plots across the map.
     let nearFarm = false;
     for (let dx = -3; dx <= 3 && !nearFarm; dx++) for (let dz = -3; dz <= 3; dz++) {
       if (inBounds(x + dx, z + dz)) { const fc = peekCell(grid, x + dx, z + dz); if (fc && fc.farm) nearFarm = true; }
@@ -283,11 +322,11 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
     if (dist < 4) score -= 6; // the civic core stays civic
   } else if (type === "farmhouse") {
     // District anchors sit at the field edge, not in the civic
-    // core: cancel the infill pull, prefer the western edge at
-    // middle distance, and stay near worked ground.
+    // core: cancel the infill pull, prefer the district edge at
+    // middle distance, and stay near worked ground, in any
+    // direction — the old west bias is gone with the west-only rule.
     score += dist * 10;
     score -= Math.abs(dist - 7) * 2.0;
-    score += x < cx ? 4 : -4; // farm district is west
     let farmsNear = 0;
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
       if (inBounds(x + dx, z + dz)) { const fc = peekCell(grid, x + dx, z + dz); if (fc && fc.farm) farmsNear++; }
@@ -522,43 +561,83 @@ export function expandVillage(state, grid) {
 }
 
 // Farms grow in beds, not single cells: a 3x3 bed cleared next to the
-// existing farm district, biased west, as mouths to feed grow. A bed
-// near a farmhouse grows faster (see the crop loop in step()).
+// existing farm districts, as mouths to feed grow. New beds keep a
+// minimum separation of 7 (Chebyshev) from every recorded bed center,
+// and scoring prefers the district with fewest beds, so farms spread
+// around the settlement instead of piling into one zone. The west
+// district keeps its strict road-free buffer ring; satellite beds use
+// the lighter rule (3x3 in-wedge and off streets, no buffer ring).
+// A bed near a farmhouse grows faster (see the crop loop in step()).
 export function findFarmBed(state, grid) {
   const cx = state._cx, cz = state._cz;
+  // Farm-cell counts per axis, computed once: the row bonus used to
+  // rescan every farm cell per candidate.
+  const countByZ = new Array(SIZE).fill(0), countByX = new Array(SIZE).fill(0);
+  for (const [fx, fz] of state._farmCells) {
+    if (fz >= 0 && fz < SIZE) countByZ[fz]++;
+    if (fx >= 0 && fx < SIZE) countByX[fx]++;
+  }
+  const bedCounts = {};
+  for (const [bx, bz] of state.farmBeds || []) {
+    const d = farmDistrictOf(state, bx, bz);
+    if (d) bedCounts[d] = (bedCounts[d] || 0) + 1;
+  }
+  const tooClose = (x, z) => (state.farmBeds || []).some(([bx, bz]) => Math.max(Math.abs(bx - x), Math.abs(bz - z)) < 7);
   let best = null, bestScore = -Infinity;
-  for (let x = Math.max(2, cx - 20); x <= cx - 4; x++) for (let z = Math.max(2, cz - 20); z <= Math.min(SIZE - 3, cz + 20); z++) {
-    if (Math.hypot(x - cx, z - cz) > 14) continue;
-    if (x > cx - 5) continue; // farm beds stay in the western district
-    if (x + 1 > cx - 3) continue; // the whole bed stays west of the plaza
+  const consider = (x, z, satellite) => {
+    if (tooClose(x, z)) return;
     let free = 0, farmsNear = 0, trees = 0;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       const bx = x + dx, bz = z + dz;
-      // Beds stay inside the field blocks and off the street plan.
-      if (!isFieldZone(state, bx, bz) || isPlanStreet(state, bx, bz)) { free = -99; break; }
+      // Beds stay inside the farm districts and off the street plan.
+      if (!inFarmDistrict(state, bx, bz) || isPlanStreet(state, bx, bz)) { free = -99; break; }
       const c = cellAt(grid, bx, bz);
       if (c.water || c.building || c.road) { free = -99; break; }
       if (c.farm) farmsNear++;
       else if (!c.blocked) free++;
       else if (c.tree) trees++;
     }
-    if (free < 0) continue;
-    // A bed keeps one cell clear of roads on every side, so fields
-    // read as blocks and no road ever threads between the beds.
-    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
-      if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
-      if (cellAt(grid, x + dx, z + dz).road) { free = -99; break; }
+    if (free < 0) return;
+    if (!satellite) {
+      // West beds keep one cell clear of roads on every side, so
+      // fields read as blocks and no road ever threads between beds.
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
+        if (cellAt(grid, x + dx, z + dz).road) { free = -99; break; }
+      }
+      if (free < 0) return;
     }
-    if (free < 0) continue;
     const newCells = free + trees;
-    if (newCells < 3) continue; // a bed must add ground, not re-pick existing fields
-    if (free + farmsNear + trees < 9) continue;
+    if (newCells < 3) return; // a bed must add ground, not re-pick existing fields
+    if (free + farmsNear + trees < 9) return;
     // Rows: a bed that lines up with an existing bed row reads as
-    // fields, not scattered plots.
+    // fields, not scattered plots. Rows run east-west in the west
+    // and east districts, north-south in the north and south ones.
+    const district = farmDistrictOf(state, x, z);
     let rowBonus = 0;
-    for (const [fx, fz] of state._farmCells) if (Math.abs(fz - z) <= 1 && fx < cx) rowBonus += 0.4;
-    const score = farmsNear * 3 + newCells * 1.5 + rowBonus - Math.hypot(x - cx, z - cz) * 0.3 - trees * 0.5;
+    if (district === "north" || district === "south") {
+      for (let dx = -1; dx <= 1; dx++) rowBonus += (countByX[x + dx] || 0) * 0.4;
+    } else {
+      for (let dz = -1; dz <= 1; dz++) rowBonus += (countByZ[z + dz] || 0) * 0.4;
+    }
+    // District balance: a district with fewer beds scores higher.
+    const balance = -2 * (bedCounts[district] || 0);
+    const score = farmsNear * 3 + newCells * 1.5 + rowBonus - Math.hypot(x - cx, z - cz) * 0.3 - trees * 0.5 + balance;
     if (score > bestScore) { bestScore = score; best = [x, z]; }
+  };
+  // West district scan, bounds unchanged from the old rule.
+  for (let x = Math.max(2, cx - 20); x <= cx - 4; x++) for (let z = Math.max(2, cz - 20); z <= Math.min(SIZE - 3, cz + 20); z++) {
+    if (Math.hypot(x - cx, z - cz) > 14) continue;
+    if (x > cx - 5) continue; // farm beds stay in the western district
+    if (x + 1 > cx - 3) continue; // the whole bed stays west of the plaza
+    consider(x, z, false);
+  }
+  // Satellite scan: the N/E/S wedges at radius 16-30.
+  for (let x = Math.max(1, cx - 30); x <= Math.min(SIZE - 2, cx + 30); x++) for (let z = Math.max(1, cz - 30); z <= Math.min(SIZE - 2, cz + 30); z++) {
+    const d = Math.hypot(x - cx, z - cz);
+    if (d < 16 || d > 30) continue;
+    if (!farmDistrictOf(state, x, z)) continue;
+    consider(x, z, true);
   }
   return best;
 }
@@ -571,16 +650,29 @@ export function clearFarmBed(state, grid, cx0, cz0) {
     const c = cellAt(grid, x, z);
     if (c.water || c.building || c.road || c.farm) continue;
     if (isPlanStreet(state, x, z)) continue;
-    // Fields belong in the field blocks: a bed cleared around a
-    // farmhouse at the district edge farms only its western cells,
+    // Fields belong in the farm districts: a bed cleared around a
+    // farmhouse at a district edge farms only its district cells,
     // never the street side or the open village.
-    if (!isFieldZone(state, x, z)) continue;
+    if (!inFarmDistrict(state, x, z)) continue;
+    // Hard cap 144 cells (16 beds), enforced here so the farmhouse
+    // completion path cannot overshoot the expandFarms gate either.
+    if (state._farmCells.length >= 144) continue;
     if (c.tree) { c.tree = false; }
     if (c.stone > 0) { c.stone = 0; c.ore = 0; }
     c.blocked = false; c.farm = true; c.crop = 0; c.cropGrow = 0;
     state._farmCells.push([x, z]);
     noteMutation(grid, x, z);
     added++;
+  }
+  // Record the bed so later beds keep their distance (spacing rule,
+  // v14). Founding beds arrive via clusterFarmBeds instead. Only a
+  // clearing centered IN a district records a bed: a farmhouse
+  // completion at a district edge clears a partial fringe whose
+  // center sits outside every district, and recording it would
+  // plant a spacing anchor in the middle of the settlement.
+  if (added > 0 && inFarmDistrict(state, cx0, cz0)) {
+    if (!state.farmBeds) state.farmBeds = [];
+    if (!state.farmBeds.some(([bx, bz]) => bx === cx0 && bz === cz0)) state.farmBeds.push([cx0, cz0]);
   }
   return added;
 }
@@ -590,7 +682,9 @@ export function expandFarms(state, grid) {
   const edible = s.food + s.fish + s.meat;
   const pop = state.villagers.length;
   const plotsPerPerson = state._farmCells.length / Math.max(1, pop);
-  if ((edible < 20 || edible < pop * 4 || plotsPerPerson < 2) && state._farmCells.length < 54) {
+  // Cap 144 cells (16 beds): a bed adds up to 9 cells, so the gate
+  // leaves room for a whole bed instead of overshooting the cap.
+  if ((edible < 20 || edible < pop * 4 || plotsPerPerson < 2) && state._farmCells.length + 9 <= 144) {
     const bed = findFarmBed(state, grid);
     if (bed) {
       const added = clearFarmBed(state, grid, bed[0], bed[1]);

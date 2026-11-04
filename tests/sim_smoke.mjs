@@ -1,6 +1,6 @@
 // Headless smoke test for src/sim.js. Run: npm test  (or: node tests/sim_smoke.mjs)
 import assert from "node:assert";
-import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES, findPlannedSpot, scoreSpot, clearFarmBed, expandFarms, cellAt, peekCell, forEachGeneratedCell, generatedChunks } from "../src/sim.js";
+import { newWorld, step, applyGod, serialize, deserialize, SIZE, makeVillager, delegateRoles, expandVillage, runMarket, computeDemands, dawnDemographics, demographicRates, homelessCount, assignHomes, PRICES, findPlannedSpot, scoreSpot, clearFarmBed, expandFarms, cellAt, peekCell, forEachGeneratedCell, generatedChunks, farmDistrictOf } from "../src/sim.js";
 
 const { state, grid } = newWorld(12345);
 assert.equal(state.villagers.length, 6, "starts with 6 villagers");
@@ -187,7 +187,7 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 }
 
 // Zoning (v10): the village is founded with a road plaza and a farm
-// road, dwellings keep 3 cells apart, and farm beds stay west.
+// road, dwellings keep 3 cells apart, and farm beds stay in farm districts.
 {
   const { state: s, grid: g } = newWorld(19);
   let roads = 0; forEachGeneratedCell(g, (x, z, c) => { if (c.road) roads++; });
@@ -199,11 +199,13 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
       assert.ok(scoreSpot(s, g, x, z, "hut") === -Infinity, "hut spot too close to founding hut at " + x + "," + z);
     }
   }
-  // 30 days on: every farm plot west, dwellings spaced, roads grown.
+  // 30 days on: every farm plot in a farm district (west founding
+  // district or a satellite district since Phase 3), dwellings
+  // spaced, roads grown.
   // The settlement bar covers the player's own village: neighbor
   // villages (Phase F) have no road network by design.
   for (let i = 0; i < 21600; i++) step(s, g, 0.25);
-  for (const [x] of s._farmCells) assert.ok(x <= s._cx - 3, "farm plot must stay in the western district, x=" + x);
+  for (const [x, z] of s._farmCells) assert.ok(farmDistrictOf(s, x, z) !== null, "farm plot must stay in a farm district, " + x + "," + z);
   const dwellings = s.buildings.filter((b) => (b.village ?? 0) === 0 && ["hut", "longhouse", "greathall"].includes(b.type));
   for (let i = 0; i < dwellings.length; i++) for (let j = i + 1; j < dwellings.length; j++) {
     const d = Math.max(Math.abs(dwellings[i].x - dwellings[j].x), Math.abs(dwellings[i].z - dwellings[j].z));

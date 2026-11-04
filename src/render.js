@@ -327,6 +327,13 @@ function timberHouse(o) {
   const era = o.era || 0;
   const pal = o.pal || ERA_PALETTE[era] || ERA_PALETTE[0];
   const flat = o.flat ?? era >= 3;
+  // Housing tiers (v14): a taller wall at tier 2, brass trim at
+  // tier 1, gold trim and ridge at tier 2. Callers pass fresh
+  // literals, so adjusting o.wallH here is safe; non-dwellings
+  // never pass tier and render exactly as before.
+  const tier = o.tier || 0;
+  if (tier >= 2) o.wallH = (o.wallH || 1) + 0.15;
+  const trimColor = tier >= 2 ? 0xffd700 : tier >= 1 ? 0xd7a94e : null;
   partBox(body, o.w + 0.3, 0.18, o.d + 0.3, 0, 0.09, 0, 0x8d8d8d);
   if (era >= 1) partBox(body, o.w + 0.1, 0.3, o.d + 0.1, 0, 0.15, 0, 0x7a7a7a);
   partBox(body, o.w, o.wallH, o.d, 0, o.wallH / 2 + 0.18, 0, pal.wall, 0, 0, 0, "wall");
@@ -342,8 +349,8 @@ function timberHouse(o) {
   let chimneyTop = null;
   if (flat) {
     partBox(body, o.w + 0.2, 0.15, o.d + 0.2, 0, wallTop + 0.07, 0, pal.roof, 0, 0, 0, "roof");
-    for (const sz of [-1, 1]) partBox(body, o.w + 0.2, 0.22, 0.08, 0, wallTop + 0.2, sz * (hd + 0.06), pal.trim);
-    for (const sx of [-1, 1]) partBox(body, 0.08, 0.22, o.d + 0.2, sx * (hw + 0.06), wallTop + 0.2, 0, pal.trim);
+    for (const sz of [-1, 1]) partBox(body, o.w + 0.2, 0.22, 0.08, 0, wallTop + 0.2, sz * (hd + 0.06), trimColor ?? pal.trim);
+    for (const sx of [-1, 1]) partBox(body, 0.08, 0.22, o.d + 0.2, sx * (hw + 0.06), wallTop + 0.2, 0, trimColor ?? pal.trim);
     partBox(win, o.w * 0.7, 0.3, 0.06, 0, wallTop - 0.2, hd + 0.03, 0xffffff);
     // Snow dusting: a thin inset cap, never edge to edge, so the
     // roof color reads through in winter.
@@ -351,7 +358,7 @@ function timberHouse(o) {
     partBox(snow, o.w * 0.3, 0.03, o.d * 0.3, o.w * 0.18, wallTop + 0.17, -o.d * 0.15, 0xffffff);
   } else {
     partPrism(body, o.w + 0.3, o.roofH, o.d + 0.3, 0, wallTop, 0, pal.roof, 0, "roof");
-    partBox(body, 0.12, 0.1, o.d + 0.34, 0, wallTop + o.roofH + 0.02, 0, pal.timber);
+    partBox(body, 0.12, 0.1, o.d + 0.34, 0, wallTop + o.roofH + 0.02, 0, trimColor ?? pal.timber);
     // Snow dusting, winter only: thin slabs hugging the ridge plus
     // one patch lower down each slope. The lower slope stays bare so
     // the red tile shows through instead of a full white blanket.
@@ -376,6 +383,13 @@ function timberHouse(o) {
       partBox(body, 0.4, 0.12, 0.12, w.x, w.y - 0.26, hd + 0.06, 0x4caf50);
       partBox(body, 0.4, 0.1, 0.1, w.x, w.y - 0.18, hd + 0.06, 0xc62828);
     }
+  }
+  if (tier >= 1) {
+    // Extra window on the +x side: the front face already carries
+    // the door and the caller's windows, so the upgrade reads from
+    // an angle instead of colliding with the door.
+    const wy = (o.windows && o.windows[0] ? o.windows[0].y : 0.8);
+    partBox(win, 0.06, 0.34, 0.32, hw + 0.03, wy, 0, 0xffffff);
   }
   if (o.chimney) {
     const chx = o.w * 0.28;
@@ -901,7 +915,7 @@ export class Renderer {
   // snow caps (winter only), plus round parts as shared-geometry
   // meshes where a box will not do. Era stage picks the palette and
   // the roof shape; tech level adds workshop detail.
-  _buildingMesh(type, x, z, techLevel = 0, era = 0, groundY = 0.45, facingAngle = 0) {
+  _buildingMesh(type, x, z, techLevel = 0, era = 0, groundY = 0.45, facingAngle = 0, tier = 0) {
     const g = new THREE.Group();
     g.position.set(x + 0.5, 0.3, z + 0.5);
     // Houses turn their door toward their street. The door is built
@@ -1006,9 +1020,9 @@ export class Renderer {
       flame.position.y = 1.75; extra.push(flame);
       return finish(body, [], [], extra, [1.2, 1.2]);
     } else if (type === "hut") {
-      return house({ w: 1.7, d: 1.7, wallH: 1.0, roofH: 0.9, chimney: true, windows: [{ x: 0.55, y: 0.75 }] });
+      return house({ w: 1.7, d: 1.7, wallH: 1.0, roofH: 0.9, chimney: true, windows: [{ x: 0.55, y: 0.75 }], tier });
     } else if (type === "longhouse") {
-      return house({ w: 2.6, d: 1.8, wallH: 1.1, roofH: 0.9, chimney: true, windows: [{ x: -0.85, y: 0.8 }, { x: 0.85, y: 0.8 }] });
+      return house({ w: 2.6, d: 1.8, wallH: 1.1, roofH: 0.9, chimney: true, windows: [{ x: -0.85, y: 0.8 }, { x: 0.85, y: 0.8 }], tier });
     } else if (type === "well") {
       const body = [];
       partCyl(body, 0.55, 0.6, 0.7, 8, 0, 0.35, 0, 0x9e9e9e);
@@ -1037,14 +1051,14 @@ export class Renderer {
       flame.position.y = 2.0; extra.push(flame);
       return finish(body, [], [], extra, [1.3, 1.3]);
     } else if (type === "greathall") {
-      const r = timberHouse({ pal, era, flat, w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }] });
+      const r = timberHouse({ pal, era, flat, w: 3.2, d: 2.0, wallH: 1.3, roofH: 1.0, chimney: true, windows: [{ x: -1.1, y: 0.9 }, { x: 1.1, y: 0.9 }], tier });
       chimneyTop = r.chimneyTop;
       const body = r.body;
       partBox(body, 0.6, 1.6, 0.6, 1.4, 0.8, -0.7, 0x8a8a8a);
       partBox(body, 0.7, 0.9, 0.06, 0, 1.2, 1.05, 0xb71c1c);
       return finish(body, r.win, r.snow, null, [3.2, 2.0]);
     } else if (type === "farmhouse") {
-      const r = timberHouse({ pal, era, flat, w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }] });
+      const r = timberHouse({ pal, era, flat, w: 1.8, d: 1.5, wallH: 1.0, roofH: 0.8, chimney: false, windows: [{ x: 0.6, y: 0.7 }], tier });
       const body = r.body;
       partCyl(body, 0.3, 0.3, 1.3, 8, 1.05, 0.65, -0.4, 0x9e9e9e);
       return finish(body, r.win, r.snow, null, [1.8, 1.5]);
@@ -1164,7 +1178,7 @@ export class Renderer {
     const era = eraStageOf(techLevel);
     const popBucket = Math.floor(state.villagers.length / 5);
     const hasWalls = state.buildings.some((b) => b.type === "wall" || b.type === "tower");
-    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#m" + state.buildings.filter((b) => b.type === "tower").map((t) => towerManned(state, t) ? 1 : 0).join("") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
+    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z + "t" + (b.tier || 0)).join("|") + "#m" + state.buildings.filter((b) => b.type === "tower").map((t) => towerManned(state, t) ? 1 : 0).join("") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
     if (sig === this._buildSignature) return;
     // Build every mesh BEFORE touching the live groups: a single bad
     // building type must never blank the village (the v12 launch bug:
@@ -1174,7 +1188,7 @@ export class Renderer {
     // after a full successful rebuild at the end of this method.
     this._nightMeshes = [];
     this._chimneys = [];
-    const safeMesh = (type, x, z) => {
+    const safeMesh = (type, x, z, tier = 0) => {
       const cell = grid ? cellAt(grid, x, z) : null;
       const groundY = cell ? cell.h * 0.9 : 0.45;
       // Face the nearest street: the door side turns toward it. A
@@ -1182,12 +1196,12 @@ export class Renderer {
       // grandfathered scatter-built houses did.
       const front = grid ? streetFrontage(grid, x, z) : null;
       const facingAngle = front ? Math.atan2(front[0], front[1]) : 0;
-      try { return this._buildingMesh(type, x, z, techLevel, era, groundY, facingAngle); }
-      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY, facingAngle); } catch (e2) { return null; } }
+      try { return this._buildingMesh(type, x, z, techLevel, era, groundY, facingAngle, tier); }
+      catch (e) { try { return this._buildingMesh("unknown:" + type, x, z, techLevel, era, groundY, facingAngle, tier); } catch (e2) { return null; } }
     };
     const built = [];
     for (const b of state.buildings) {
-      const m = safeMesh(b.type, b.x, b.z);
+      const m = safeMesh(b.type, b.x, b.z, b.tier || 0);
       if (m) { m.userData.chunkKey = chunkKey(Math.floor(b.x / CHUNK), Math.floor(b.z / CHUNK)); built.push(m); }
     }
     for (const q of state.buildQueue) {

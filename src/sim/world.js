@@ -1,9 +1,9 @@
 // GodCiv sim world: founding, serialization, and migration.
 // Updates must never restart the world: see deserialize().
-import { delegateRoles } from "./brain.js";
+import { delegateRoles, updateHousingTiers } from "./brain.js";
 import { JOBS, PRICES, SAVE_VERSION, assignHomes, log, makeDeer, makeVillager, mulberry32, seasonOf } from "./core.js";
 import { cellAt, createGrid, ensureIndexes, forEachGeneratedCell, getChunk } from "./grid.js";
-import { pavePlaza } from "./planning.js";
+import { clusterFarmBeds, pavePlaza } from "./planning.js";
 import { hash01, makeVillageRecord, oldBlockFor, pickVillageSites } from "./terrain.js";
 
 export function newWorld(seed) {
@@ -38,6 +38,7 @@ export function newWorld(seed) {
       { type: "hut", x: cx - 2, z: cz - 3, done: true, builtDay: 1 },
     ],
     villagers: [], deer: [], log: [],
+    farmBeds: clusterFarmBeds(farmCells),
     // Raiders are transient: they live only in a running world, never
     // in a save. raidActive persists so a load mid-raid can log that
     // the raid scattered; the raiders themselves do not survive it.
@@ -219,7 +220,12 @@ export function deserialize(json) {
     if (!v.goods) { v.goods = {}; for (const g of Object.keys(PRICES)) v.goods[g] = 0; }
     for (const g of Object.keys(PRICES)) if (v.goods[g] == null) v.goods[g] = 0;
     if (v.toolTick == null) v.toolTick = 0;
+    if (v.restUntil == null) v.restUntil = 0;
     if (v.village == null) v.village = 0;
+    // v14 class: a save written before the ladder existed has no
+    // class field; start at commoner and let the next dawn promote
+    // on current holdings. No bump — the field backfills.
+    if (v.class == null) v.class = 0;
     // v11 fields: a migrated villager starts unschooled, with crude tools.
     if (v.education == null) v.education = 0;
     if (v.tool == null) v.tool = 0;
@@ -235,6 +241,14 @@ export function deserialize(json) {
   // before the save keep growing after load.
   state._farmCells = [];
   forEachGeneratedCell(grid, (x, z, c) => { if (c.farm) state._farmCells.push([x, z]); });
+  // v14 farm districts: a save that did not record farmBeds (any
+  // save written before v14) recovers bed centers by clustering the
+  // rebuilt farm cells. The founding world's clusters must NOT
+  // survive the overlay, so the check reads the saved data, not the
+  // overlaid state. A save that already records beds keeps them.
+  if ((data.farmBeds == null || !data.farmBeds.length) && state._farmCells.length) {
+    state.farmBeds = clusterFarmBeds(state._farmCells);
+  }
   for (const [x, z, stone, ore, blocked] of savedStones) { cellAt(grid, x, z).stone = stone; cellAt(grid, x, z).ore = ore; cellAt(grid, x, z).blocked = !!blocked; }
   for (const [x, z, type] of savedBuildings) cellAt(grid, x, z).building = type;
   // Rebuild the building list from the grid. serialize() stores
@@ -254,6 +268,10 @@ export function deserialize(json) {
     });
   }
   assignHomes(state);
+  // v14 housing tiers are derived, not saved (buildings serialize
+  // as grid triples): recompute them from occupant classes now so
+  // a loaded world shows correct tiers before its first dawn.
+  updateHousingTiers(state);
   // Older saves were founded without a plaza: lay it once so the
   // old village gains the same visible square and farm road.
   let roadCount = 0;

@@ -387,11 +387,23 @@ function nearestWallCell(state, r) {
 }
 
 function moveRaider(state, grid, r, tx, tz, dt) {
-  if (state.elapsed >= r.retargetAt || (!r.path && !r.direct)) {
+  // Retarget at most every 3s — and slower after a failed search.
+  // A failed search used to retry EVERY step (the no-path/no-direct
+  // bypass): on a village with no walls to batter, the search burns
+  // its whole 4000-step budget failing (~4ms) on every step per
+  // raider until the frontier chunks generate. Waiting lets the
+  // generation queue (one chunk per tick) open the route before
+  // the next attempt; a fresh raider still searches at once
+  // (retargetAt starts at 0), and the raid always resolves via
+  // raidUntil even if a route never opens.
+  if (r.retargetAt == null || state.elapsed >= r.retargetAt) {
     r.retargetAt = state.elapsed + 3;
     const path = findPath(grid, Math.round(r.x), Math.round(r.z), clamp(Math.round(tx), 0, SIZE - 1), clamp(Math.round(tz), 0, SIZE - 1), 4000);
     if (path && path.length) { r.path = path; r.direct = null; }
-    else { r.path = null; r.direct = nearestWallCell(state, r); }
+    else {
+      r.path = null; r.direct = nearestWallCell(state, r);
+      if (!r.direct) r.retargetAt = state.elapsed + 6;
+    }
   }
   let dest = null;
   if (r.path && r.path.length) dest = r.path[0];

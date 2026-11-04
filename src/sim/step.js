@@ -1,11 +1,12 @@
 // GodCiv sim step: the main tick. Weather, dawn, crops, deer,
 // villagers, raiders, caravans, war.
-import { dawnDemographics, delegateRoles, doWork, recomputeMorale, runMarket, think } from "./brain.js";
+import { dawnDemographics, delegateRoles, doWork, recomputeMorale, runMarket, think, updateClasses, updateHousingTiers } from "./brain.js";
 import { dawnVillages, dawnWars, nearestEnemyFighter, nearestRaider, spawnRaid, stepCaravans, stepForeignVillager, stepRaiders, stepWarCombat, stepWarFighter, stepWarParties } from "./combat.js";
 import { CHILD_DAYS, CHUNK, DAY_LENGTH, FESTIVALS, FESTIVAL_COST_FOOD, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, OLD_SIZE, PRICES, RAID_GAP_DAYS, RAID_MIN_DAY, RAID_MIN_POP, RAID_MIN_TECH, SEASON_GROWTH, SEASON_HUNGER, SEASON_KEEP, SEASON_NAMES, SIZE, clamp, log, makeDeer, ownBuildings, ownVillagers, phaseOf, rollWeather, seasonOf, yearDayOf, yearOf } from "./core.js";
 import { removeVillager } from "./diplomacy.js";
 import { cellAt, chunkKey, drainGenQueue, ensureIndexes, noteMutation, updateActiveChunks } from "./grid.js";
 import { expandVillage } from "./planning.js";
+import { hash01 } from "./terrain.js";
 
 function updateWeather(state) {
   if (!state.weather) state.weather = { kind: "clear", until: 0 };
@@ -83,6 +84,10 @@ export function step(state, grid, dt) {
     }
     // Age-based births and deaths, then a shrine's dawn blessing.
     dawnDemographics(state, birthNeed);
+    // Standing, class, and housing tiers refresh at dawn, before
+    // morale is felt: the housing part of morale reads fresh tiers.
+    updateClasses(state);
+    updateHousingTiers(state);
     // Neighbor villages live their own dawn: abstract ticks,
     // envoy arrivals, first traders, season drift, deactivation.
     dawnVillages(state, grid);
@@ -320,6 +325,17 @@ export function step(state, grid, dt) {
           v.carry = null;
         }
         v.state = "idle"; v.target = null; v.rethinkAt = state.elapsed + 0.5;
+      } else if (v.state === "wander") {
+        // Reached the stroll's end: pause here a while (4-9
+        // sim-seconds, per villager) before the next rethink sends
+        // the villager onward or back to work.
+        v.state = "idle"; v.target = null;
+        v.restUntil = state.elapsed + 4 + hash01(state.seed, v.id, (v._wanderN || 1), 912) * 5;
+      } else if (v.state === "idle" && v.target) {
+        // Arrived with no work state (a stroll think() interrupted,
+        // a child reaching home): the journey is over, drop the
+        // stale target instead of standing on it.
+        v.target = null;
       } else if (v.state === "work") {
         doWork(state, grid, v, dt * 3); // work ticks faster once in place
       } else if (v.state === "rest") {

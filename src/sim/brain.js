@@ -3,10 +3,11 @@
 // a villager.
 import { leader } from "./actions.js";
 import { assignGuardPosts, disasterKillCap, dispatchCaravan, guardPosts, nearestEnemyFighter, nearestRaider, pairKey } from "./combat.js";
-import { ALLIANCE_MIN_RELATION, ALLIANCE_OFFER_DAWNS, BUILD_COSTS, CHILD_DAYS, DISASTER_PLAGUE_DAWN_DEATH, ELDER_DAYS, ERA_POP_GATE, GUARD_BREAK_HEALTH, GUARD_CAP, GUARD_POST_RADIUS, JOBS, PRICES, SCHOOL_MAX_AGE, SIZE, TECH_TIERS, TOOL_COSTS, TOOL_NAMES, assignHomes, clamp, homelessCount, inBounds, isStudent, key, log, makeVillager, ownBuildings, ownVillagers, phaseOf, techThresholdFor } from "./core.js";
+import { ALLIANCE_MIN_RELATION, ALLIANCE_OFFER_DAWNS, BUILD_COSTS, CHILD_DAYS, CLASS_NAMES, DISASTER_PLAGUE_DAWN_DEATH, DWELLING_TYPES, ELDER_DAYS, ERA_POP_GATE, GUARD_BREAK_HEALTH, GUARD_CAP, GUARD_POST_RADIUS, JOBS, PRICES, SCHOOL_MAX_AGE, SIZE, TECH_TIERS, TOOL_COSTS, TOOL_NAMES, assignHomes, classOfStanding, clamp, homelessCount, inBounds, isStudent, key, log, makeVillager, ownBuildings, ownVillagers, phaseOf, standingOf, techThresholdFor, tierOfClass } from "./core.js";
 import { allianceCooldownOk, allied, getRelation, removeVillager, seasonKey, villageRecord } from "./diplomacy.js";
 import { cellAt, hasShore, nearestCell, noteMutation, peekCell, setTarget } from "./grid.js";
-import { clearFarmBed, computeDemands } from "./planning.js";
+import { clearFarmBed, computeDemands, farmDistrictOf } from "./planning.js";
+import { hash01 } from "./terrain.js";
 
 // --- brain: utility scoring, ported from brain.lua ---
 
@@ -347,6 +348,38 @@ export function runMarket(state) {
 // deaths, weather, and faith. Recomputed at dawn; celebrations and
 // blessings bump it at once. It moves work speed, birth willingness,
 // and refusals — never enough on its own to kill a village.
+// --- class + housing ladder (v14): standing is recomputed from
+// current holdings at dawn; class ratchets up and never falls, so a
+// spent fortune costs comfort, not standing. Housing tier follows
+// the highest-class occupant and ratchets the same way: a house
+// never downgrades when its best occupant moves out. Tiers are
+// derived, not saved — deserialize() recomputes them from occupant
+// classes, so the save format does not change.
+export function updateClasses(state) {
+  for (const v of ownVillagers(state)) {
+    if (v.class == null) v.class = 0;
+    const next = classOfStanding(standingOf(v));
+    if (next > v.class) {
+      v.class = next;
+      log(state, v.name + "'s craft earns standing: now " + CLASS_NAMES[next] + ".");
+    }
+  }
+}
+
+export function updateHousingTiers(state) {
+  const homes = ownBuildings(state).filter((b) => DWELLING_TYPES.includes(b.type));
+  for (const b of homes) {
+    if (b.tier == null) b.tier = 0;
+    const k = key(b.x, b.z);
+    let best = 0;
+    for (const v of ownVillagers(state)) {
+      if (v.home === k && (v.class || 0) > best) best = v.class;
+    }
+    const tier = tierOfClass(best);
+    if (tier > b.tier) b.tier = tier;
+  }
+}
+
 export function recomputeMorale(state) {
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
@@ -367,6 +400,11 @@ export function recomputeMorale(state) {
   if (state.faith >= 70) parts.push({ label: "Strong faith", delta: 5 });
   if (state.faith < 30) parts.push({ label: "Faith shaken", delta: -8 });
   if (state.elapsed < (state.celebrationBoostUntil || -1)) parts.push({ label: "Festival cheer", delta: 8 });
+  // Comfortable homes: a quarter or more of dwellings upgraded.
+  const dwellings = ownBuildings(state).filter((b) => DWELLING_TYPES.includes(b.type));
+  if (dwellings.length && dwellings.filter((b) => (b.tier || 0) >= 1).length / dwellings.length >= 0.25) {
+    parts.push({ label: "Comfortable homes", delta: 4 });
+  }
   const target = clamp(50 + parts.reduce((a, p) => a + p.delta, 0), 5, 95);
   state.morale = clamp((state.morale ?? 60) + clamp(target - (state.morale ?? 60), -4, 4), 0, 100);
   state.moraleReasons = parts.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 3);
@@ -485,6 +523,52 @@ export function demographicRates(state) {
 
 // --- one villager's think + act ---
 
+// --- anti-clustering: deterministic spread + wander (v14) ---
+// Celebration, eating, and hauling all target the town center by
+// default, which stacked every villager on one cell. Spread picks a
+// per-villager ring cell from hash01(seed, id): stable across
+// rethinks, so a celebrant walks to one spot and stays there instead
+// of jittering to a new spot every 4-7 seconds. Four quarter-turn
+// fallbacks, then the anchor cell itself.
+function spreadCell(state, grid, ax, az, angle, r) {
+  for (let k = 0; k < 4; k++) {
+    const a = angle + (k * Math.PI) / 2;
+    const x = Math.round(ax + Math.cos(a) * r), z = Math.round(az + Math.sin(a) * r);
+    if (!inBounds(x, z)) continue;
+    const c = peekCell(grid, x, z);
+    if (!c || c.water || c.blocked) continue;
+    return [x, z];
+  }
+  return null;
+}
+
+function spreadTarget(state, grid, v, ax, az, minR, maxR, salt) {
+  const angle = hash01(state.seed, v.id, 11, salt) * Math.PI * 2;
+  const r = minR + hash01(state.seed, v.id, 12, salt) * (maxR - minR);
+  const cell = spreadCell(state, grid, ax, az, angle, r);
+  if (cell) setTarget(state, grid, v, cell[0], cell[1]);
+  else setTarget(state, grid, v, ax, az);
+}
+
+// An idle villager strolls: a seeded walkable cell 3-9 cells from
+// home (1-2 for children), a fresh angle/radius per stroll from the
+// villager's wander count, so strolls vary instead of pacing one
+// fixed loop. Work found at the next rethink still wins; restUntil
+// (set on arrival in step.js) only gates the next stroll.
+function assignWander(state, grid, v) {
+  const home = v.home ? v.home.split(",").map(Number) : [state._cx, state._cz];
+  const child = (v.ageDays ?? 25) < CHILD_DAYS;
+  const n = (v._wanderN || 0) + 1;
+  v._wanderN = n;
+  const minR = child ? 1 : 3, maxR = child ? 2 : 9;
+  const angle = hash01(state.seed, v.id, n, 911) * Math.PI * 2;
+  const r = minR + hash01(state.seed, v.id, n + 500, 911) * (maxR - minR);
+  const cell = spreadCell(state, grid, home[0], home[1], angle, r);
+  v.state = "wander";
+  if (cell) setTarget(state, grid, v, cell[0], cell[1]);
+  else setTarget(state, grid, v, home[0], home[1]);
+}
+
 export function think(state, grid, v) {
   const cx = state._cx, cz = state._cz;
   // Urgent needs override jobs, exactly as in the Luanti brain.
@@ -506,9 +590,17 @@ export function think(state, grid, v) {
     if (raiderNear) {
       const dx = v.x - raiderNear.x, dz = v.z - raiderNear.z;
       const d = Math.hypot(dx, dz) || 1;
-      setTarget(state, grid, v, clamp(Math.round(v.x + (dx / d) * 6), 1, SIZE - 2), clamp(Math.round(v.z + (dz / d) * 6), 1, SIZE - 2));
+      // Seeded sideways jitter so villagers fleeing the same raider
+      // fan out instead of piling onto one corridor cell (the
+      // Phase 2 spread pattern, applied to flight).
+      const jx = -(dz / d), jz = dx / d;
+      const j = (hash01(state.seed, v.id, 17, 905) - 0.5) * 5;
+      setTarget(state, grid, v, clamp(Math.round(v.x + (dx / d) * 6 + jx * j), 1, SIZE - 2), clamp(Math.round(v.z + (dz / d) * 6 + jz * j), 1, SIZE - 2));
     } else {
-      setTarget(state, grid, v, cx + (v.x > cx ? 6 : -6), cz + (v.z > cz ? 6 : -6));
+      // Fearful villagers without a raider in sight run to their
+      // quadrant's muster point, spread around it instead of all
+      // standing on the one cell.
+      spreadTarget(state, grid, v, cx + (v.x > cx ? 6 : -6), cz + (v.z > cz ? 6 : -6), 1, 3, 905);
     }
     return;
   }
@@ -516,7 +608,7 @@ export function think(state, grid, v) {
   if (v.hunger >= 75) {
     v.state = "eat";
     const edible = state.stockpile.food + state.stockpile.fish + state.stockpile.meat;
-    if (edible > 0) setTarget(state, grid, v, cx, cz);
+    if (edible > 0) spreadTarget(state, grid, v, cx, cz, 1, 2, 901);
     else { // nothing stored: forage — a farmer's plot or the lake shore
       const plot = nearestCell(grid, v.x, v.z, (c) => c.farm && c.crop === 3);
       if (plot) setTarget(state, grid, v, plot[0], plot[1]); else v.state = "idle";
@@ -528,12 +620,13 @@ export function think(state, grid, v) {
     const home = v.home ? v.home.split(",").map(Number) : [cx - 2, cz - 3];
     setTarget(state, grid, v, home[0], home[1]); return;
   }
-  if (v.carry && v.carry.amt >= v.carryCap) { v.state = "haul"; setTarget(state, grid, v, cx, cz); return; }
+  if (v.carry && v.carry.amt >= v.carryCap) { v.state = "haul"; spreadTarget(state, grid, v, cx, cz, 1, 2, 902); return; }
 
   // A festival gathers everyone at the town center: work pauses while
-  // the village celebrates together.
+  // the village celebrates together. Attendees spread around the
+  // plaza instead of stacking on the town center cell.
   if (state.celebration && state.elapsed < state.celebration.until) {
-    v.state = "celebrate"; setTarget(state, grid, v, cx, cz); return;
+    v.state = "celebrate"; spreadTarget(state, grid, v, cx, cz, 2, 6, 903); return;
   }
   // Night is for sleep. Urgent needs above still win; everyone else
   // goes home until dawn.
@@ -543,19 +636,23 @@ export function think(state, grid, v) {
     setTarget(state, grid, v, home[0], home[1]); return;
   }
 
-  // Children stay near home and do no work yet.
+  // Children stay near home and do no work yet. Near home, a child
+  // strolls a tight radius instead of standing still.
   if ((v.ageDays ?? 25) < CHILD_DAYS) {
     v.job = "child"; v.state = "idle"; v.assignedJob = null;
     const home = v.home ? v.home.split(",").map(Number) : [cx, cz];
     if (Math.hypot(v.x - (home[0] + 0.5), v.z - (home[1] + 0.5)) > 3) setTarget(state, grid, v, home[0], home[1]);
+    else if (state.elapsed >= (v.restUntil || 0)) assignWander(state, grid, v);
     return;
   }
 
   // Students walk to the school and learn there instead of working.
+  // They spread around the schoolhouse instead of stacking on its
+  // one cell, like celebrants at the plaza.
   if (isStudent(state, v)) {
     v.job = "student"; v.state = "school"; v.assignedJob = null;
     const school = state.buildings.find((b) => b.type === "school");
-    if (school) setTarget(state, grid, v, school.x, school.z);
+    if (school) spreadTarget(state, grid, v, school.x, school.z, 1, 2, 904);
     return;
   }
 
@@ -593,7 +690,7 @@ export function think(state, grid, v) {
     // fallback) hauls it home instead of idling.
     const node = nearestCell(grid, v.x, v.z, (c) => (c.stone > 0 && (!v.carry || v.carry.type === "stone")) || (c.ore > 0 && (!v.carry || v.carry.type === "ore")));
     if (node) setTarget(state, grid, v, node[0], node[1]);
-    else if (v.carry) { v.state = "haul"; setTarget(state, grid, v, cx, cz); }
+    else if (v.carry) { v.state = "haul"; spreadTarget(state, grid, v, cx, cz, 1, 2, 902); }
     else v.state = "idle";
   } else if (job === "fisher") {
     const shore = nearestCell(grid, v.x, v.z, (c, x, z) => !c.water && !c.blocked && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const n = inBounds(x + dx, z + dz) ? peekCell(grid, x + dx, z + dz) : null; return !!(n && n.water); }));
@@ -607,7 +704,7 @@ export function think(state, grid, v) {
     if (q) setTarget(state, grid, v, q.x, q.z); else v.state = "idle";
   } else if (job === "teacher") {
     const school = state.buildings.find((b) => b.type === "school");
-    if (school) setTarget(state, grid, v, school.x, school.z); else v.state = "idle";
+    if (school) spreadTarget(state, grid, v, school.x, school.z, 1, 2, 904); else v.state = "idle";
   } else if (job === "carpenter" || job === "potter" || job === "smith" || job === "factory") {
     // Production workers walk to their workplace and work there; no
     // workplace, no work. The workplace type per job mirrors the
@@ -658,6 +755,10 @@ export function think(state, grid, v) {
       setTarget(state, grid, v, dest.x, dest.z);
     }
   }
+  // Nothing to do: stroll instead of standing still. Gated by
+  // restUntil so a villager pauses after each stroll before setting
+  // off again; work found at the next rethink still wins.
+  if (v.state === "idle" && state.elapsed >= (v.restUntil || 0)) assignWander(state, grid, v);
 }
 
 function workNeed(state, v, base) {
@@ -819,7 +920,8 @@ export function doWork(state, grid, v, dt) {  const [tx, tz] = v.target || [];
               cellAt(grid, q.x, q.z).blocked = true;
               state.populationCap += 2;
               const added = clearFarmBed(state, grid, q.x, q.z);
-              log(state, "A farmhouse rises in the west fields, with " + added + " new field plots around it. It houses 2 farmhands.");
+              const dd = farmDistrictOf(state, q.x, q.z);
+              log(state, "A farmhouse rises in the " + (dd ? dd + " fields" : "fields") + ", with " + added + " new field plots around it. It houses 2 farmhands.");
             } else if (type === "school") {
               cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A school opens its doors. The children will learn their letters.");
