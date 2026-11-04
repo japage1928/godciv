@@ -47,6 +47,38 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   assert.ok(fake.buildingsGroup.children.length > firstCount, "a new hut must grow the drawn group");
 }
 
+// Guard kit: a guard figure carries a spear and a red sash in its
+// userData, hidden until the villager works the guard job.
+{
+  const fake = Object.create(Renderer.prototype);
+  const g = Renderer.prototype._villagerGroup.call(fake, { id: 1, job: "guard" });
+  assert.ok(g.userData.spear && g.userData.sash, "a guard figure must carry a spear and a sash");
+  assert.equal(g.userData.spear.visible, false, "the spear starts hidden until the job is taken");
+  const plain = Renderer.prototype._villagerGroup.call(fake, { id: 2, job: "farmer" });
+  assert.ok(plain.userData.spear && plain.userData.sash, "every figure carries the guard kit meshes");
+  console.log("guard spear + sash ride on the villager figure");
+}
+
+// A manned tower draws its posted guard on the platform; an unmanned
+// tower draws empty.
+{
+  const { state, grid } = newWorld(42);
+  const fake = Object.create(Renderer.prototype);
+  fake.buildingsGroup = new THREE.Group();
+  fake.dressingGroup = new THREE.Group();
+  fake._nightMeshes = []; fake._chimneys = []; fake._season = "spring";
+  fake._buildSignature = undefined; fake._wasNight = null;
+  state.buildings.push({ type: "tower", x: state._cx + 5, z: state._cz, hp: 60, maxHp: 60, done: true, builtDay: 1 });
+  fake._syncBuildings(state, grid);
+  const unmanned = fake.buildingsGroup.children.length;
+  const g = state.villagers[0];
+  g.assignedJob = "guard"; g.job = "guard";
+  g.post = { x: state._cx + 5, z: state._cz, kind: "tower" };
+  fake._syncBuildings(state, grid);
+  assert.ok(fake.buildingsGroup.children.length > unmanned, "a manned tower must draw its guard figure");
+  console.log("manned tower draws its posted guard");
+}
+
 // Winter snow is a dusting, not a blanket: on a pitched hut the snow
 // mesh must span only part of the roof width, so the red tile reads
 // through. The old full-slope slabs spanned wider than the body.

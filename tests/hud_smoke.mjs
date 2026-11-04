@@ -60,8 +60,15 @@ console.log("v12 chips, toolbar, god bar, and raid chip all present");
 for (const action of ["bless", "drought", "flood", "fire", "plague", "quake"]) {
   assert.ok(html.includes('data-god="' + action + '"'), "god action missing from the god bar: " + action);
 }
+assert.ok(html.includes('data-god="muster"'), "god action missing from the god bar: muster");
 assert.ok(main.includes("dataset.god"), "main.js must dispatch god buttons via dataset.god");
 console.log("god bar offers all six actions including plague");
+
+// Defense HUD: the raid banner reports guards posted and towers
+// manned, and the panel reports the defense section.
+assert.ok(main.includes("towers manned"), "the raid banner must report towers manned");
+assert.ok(main.includes("guards posted"), "the panel must report guards posted");
+console.log("defense HUD: banner + panel report posts and manning");
 
 // No em-dashes in user-facing HUD text.
 const hudText = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "");

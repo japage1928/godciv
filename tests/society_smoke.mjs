@@ -164,6 +164,7 @@ for (const seed of [7, 42, 1234, 999]) {
   const seedBefore = saved.seed, elapsedBefore = saved.elapsed, dayBefore = saved.day;
   const popBefore = saved.villagers.length, stockBefore = { ...saved.stockpile };
   const buildingsBefore = saved.buildings.length;
+  const buildingTypesBefore = saved.buildings.map((b) => b[2]).sort(); // serialized buildings are [x, z, type] tuples
   const firstVillager = saved.villagers[0];
   const goodsBefore = { ...firstVillager.goods }, coinsBefore = firstVillager.coins;
   for (const k of V11_FIELDS) delete saved[k];
@@ -176,6 +177,11 @@ for (const seed of [7, 42, 1234, 999]) {
   assert.ok(Math.abs(m.elapsed - elapsedBefore) < 0.001, "elapsed survives migration");
   assert.equal(m.villagers.length, popBefore, "villagers survive migration");
   assert.equal(m.buildings.length, buildingsBefore, "buildings survive migration");
+  // Migration invents nothing: the exact building types survive, not
+  // just the count. (This replaces the old "no school" proxy, which
+  // assumed a day-6 village could not have built one yet; the stone
+  // economy fix made early building fast enough that it can.)
+  assert.deepEqual(m.buildings.map((b) => b.type).sort(), buildingTypesBefore, "migration must not invent or drop any building type");
   assert.deepEqual(m.stockpile, stockBefore, "stockpile survives migration");
   assert.deepEqual(m.villagers[0].goods, goodsBefore, "personal goods survive migration");
   assert.equal(m.villagers[0].coins, coinsBefore, "coins survive migration");
@@ -186,7 +192,6 @@ for (const seed of [7, 42, 1234, 999]) {
   assert.equal(m.morale, 55, "morale starts at 55 on migration");
   assert.deepEqual(m.tech, { level: 0, progress: 0 }, "tech starts at tier 0 on migration");
   assert.ok(m.villagers.every((v) => v.education === 0 && v.tool === 0), "migrated villagers start unschooled with crude tools");
-  assert.ok(!m.buildings.some((b) => b.type === "school"), "no school is invented on migration");
   // And the migrated world runs 5 more days with no exceptions.
   runDays(m, migrated.grid, 5);
   assert.ok(m.day >= dayBefore + 5, "migrated world keeps counting days");

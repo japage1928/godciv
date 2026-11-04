@@ -8,9 +8,9 @@
 // Buildings are merged vertex-colored geometry: one draw call per
 // building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell } from "./sim.js";
+import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, towerManned } from "./sim.js";
 
-const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, student: 0x78909c, child: 0xb0bec5 };
+const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, guard: 0x546e7a, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
 // Grass tint targets per season: the ground shifts with the year.
 const SEASON_GRASS = {
@@ -1120,7 +1120,7 @@ export class Renderer {
     const era = eraStageOf(techLevel);
     const popBucket = Math.floor(state.villagers.length / 5);
     const hasWalls = state.buildings.some((b) => b.type === "wall" || b.type === "tower");
-    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
+    const sig = state.buildings.map((b) => b.type + b.x + "," + b.z).join("|") + "#m" + state.buildings.filter((b) => b.type === "tower").map((t) => towerManned(state, t) ? 1 : 0).join("") + "#" + state.buildQueue.length + "#t" + techLevel + "#p" + popBucket + "#w" + (hasWalls ? 1 : 0);
     if (sig === this._buildSignature) return;
     // Build every mesh BEFORE touching the live groups: a single bad
     // building type must never blank the village (the v12 launch bug:
@@ -1153,6 +1153,22 @@ export class Renderer {
       frame.scale.setScalar(0.6);
       frame.traverse((o) => { if (o.material && o.material !== MAT_BODY && o.material !== MAT_WINDOW && o.material !== MAT_SNOW) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.55; } });
       built.push(frame);
+    }
+    // Manned towers draw their posted guard on the platform; an
+    // unmanned tower draws empty. The figure is static decoration,
+    // not a villager: its hit box is removed so taps never select it.
+    for (const t of state.buildings) {
+      if (t.type !== "tower" || !towerManned(state, t)) continue;
+      const cell = grid ? cellAt(grid, t.x, t.z) : null;
+      const groundY = cell ? cell.h * 0.9 : 0.45;
+      const fig = this._villagerGroup({ id: -1, job: "guard" });
+      fig.userData.spear.visible = true;
+      fig.userData.sash.visible = true;
+      fig.remove(fig.userData.hit);
+      fig.position.set(t.x + 0.5, groundY + (era === 0 ? 1.72 : 2.56), t.z + 0.5);
+      fig.scale.setScalar(0.85);
+      fig.userData.chunkKey = chunkKey(Math.floor(t.x / CHUNK), Math.floor(t.z / CHUNK));
+      built.push(fig);
     }
     this._clearGroup(this.buildingsGroup);
     this._clearGroup(this.dressingGroup);
@@ -1276,6 +1292,12 @@ export class Renderer {
     quill.position.set(0.18, 1.5, 0); quill.rotation.z = -0.3; quill.visible = false; g.add(quill);
     const toolMesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.5, 0.1), new THREE.MeshLambertMaterial({ color: 0x9e9e9e }));
     toolMesh.position.set(0.36, 0.55, 0.15); toolMesh.visible = false; g.add(toolMesh);
+    // Guard kit: a spear and a red sash, shown only while the
+    // villager works the guard job.
+    const spear = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.15, 0.06), new THREE.MeshLambertMaterial({ color: 0x6b4423 }));
+    spear.position.set(0.36, 0.85, 0.15); spear.visible = false; g.add(spear);
+    const sash = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.12, 0.36), new THREE.MeshLambertMaterial({ color: 0xb71c1c }));
+    sash.position.set(0, 0.78, 0); sash.rotation.z = 0.5; sash.visible = false; g.add(sash);
     const legMat = new THREE.MeshLambertMaterial({ color: 0x4e342e });
     const legs = [], arms = [];
     for (const sx of [-0.13, 0.13]) {
@@ -1293,6 +1315,7 @@ export class Renderer {
     g.userData.hit = hit; g.userData.legs = legs; g.userData.arms = arms;
     g.userData.body = body; g.userData.head = head; g.userData.hat = hat;
     g.userData.quill = quill; g.userData.toolMesh = toolMesh;
+    g.userData.spear = spear; g.userData.sash = sash;
     return g;
   }
 
@@ -1455,6 +1478,7 @@ export class Renderer {
       u.hat.material.color.setHex(v.job === "farmer" ? 0xd7a94e : v.job === "teacher" ? 0x7e57c2 : 0x5d4037);
       u.quill.visible = (v.education || 0) >= 5;
       u.toolMesh.visible = (v.tool || 0) > 0;
+      if (u.spear && u.sash) u.spear.visible = u.sash.visible = v.job === "guard";
       if ((v.tool || 0) >= 3) u.toolMesh.material.color.setHex(0xe8e8e8);
       else if ((v.tool || 0) >= 2) u.toolMesh.material.color.setHex(0xffd700);
       else u.toolMesh.material.color.setHex(0x9e9e9e);

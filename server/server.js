@@ -114,7 +114,7 @@ function readBody(req, limit = 16384) {
   });
 }
 
-const GOD_ACTIONS = new Set(["bless", "drought", "flood", "fire", "plague", "quake", "hut", "villager", "directive", "whisper"]);
+const GOD_ACTIONS = new Set(["bless", "drought", "flood", "fire", "plague", "quake", "hut", "villager", "directive", "whisper", "muster"]);
 
 const server = http.createServer(async (req, res) => {
   try {

@@ -18,7 +18,7 @@ export const OLD_SIZE = 48;
 export const SIZE = WORLD_SIZE; // map side; kept as the name the UI/tests already use
 export const CHUNKS_ACROSS = WORLD_SIZE / CHUNK;
 export const DAY_LENGTH = 180; // sim seconds per day: 45 real seconds at 4x, 22.5 at 8x
-export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher"];
+export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher", "guard"];
 export const TRAITS = ["devout", "skeptic", "brave", "cautious", "industrious", "lazy", "kind", "greedy"];
 export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "Hob", "Ilsa", "Jory", "Kessa", "Lorn", "Mira", "Nils", "Odessa", "Perrin", "Quill", "Rosa", "Soren", "Tilda", "Ulric", "Vera", "Wren", "Yannick"];
 
@@ -822,22 +822,77 @@ export function delegateRoles(state, grid = null) {
     builder: state.buildQueue.length ? Math.min(2, pop) : (demands.length || (state.day >= 2 && hutCount < 2) ? 1 : 0),
     hauler: pop >= 8 ? 1 : 0,
     teacher: hasSchool && pop >= 6 ? 1 : 0,
+    // Guards: one per tower, plus one per gate once a real wall ring
+    // exists (6+ wall segments), capped at GUARD_CAP and at one third
+    // of the adults. No posts, no guards.
+    guard: (() => {
+      const towers = state.buildings.filter((b) => b.type === "tower").length;
+      const walls = state.buildings.filter((b) => b.type === "wall").length;
+      return Math.min(GUARD_CAP, towers + (walls >= 6 ? 2 : 0), Math.floor(pop / 3));
+    })(),
   };
-  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler", "teacher"];
+  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler", "teacher", "guard"];
   let total = order.reduce((a, j) => a + desired[j], 0);
+  // Trimming must not zero a job the village needs while another job
+  // still holds a surplus, and must not stall building or leave
+  // standing towers unmanned: the builder is the only job that turns
+  // the queue into buildings (villagers follow delegation unless they
+  // refuse it), and a tower without a posted guard never shoots.
+  const builderWanted = state.buildQueue.length > 0 || demands.length > 0 || (state.day >= 2 && hutCount < 2);
+  const towersBuilt = state.buildings.filter((b) => b.type === "tower").length;
+  const guardFloor = Math.min(towersBuilt, desired.guard);
   while (total > pop) {
+    let trimmed = false;
+    // First trim surpluses: a job holding 2+ slots (or guards above
+    // the manned-tower floor) gives one up before any job is zeroed.
     for (let i = order.length - 1; i >= 0; i--) {
-      if (desired[order[i]] > 0) { desired[order[i]]--; total--; break; }
+      const j = order[i];
+      const floor = j === "guard" ? Math.max(1, guardFloor) : 1;
+      if (desired[j] > floor) { desired[j]--; total--; trimmed = true; break; }
+    }
+    if (trimmed) continue;
+    // Every wanted job is down to one slot (or the guard floor) and
+    // the village is still over strength: cut from the end, sparing
+    // the builder while building is wanted and the guards manning
+    // standing towers.
+    for (let i = order.length - 1; i >= 0; i--) {
+      const j = order[i];
+      if (desired[j] > 0
+        && !(j === "builder" && builderWanted && desired.builder <= 1)
+        && !(j === "guard" && desired.guard <= guardFloor)) {
+        desired[j]--; total--; trimmed = true; break;
+      }
+    }
+    if (!trimmed) {
+      // Last resort: only protected slots remain. Trim one rather
+      // than spin forever.
+      for (let i = order.length - 1; i >= 0; i--) {
+        if (desired[order[i]] > 0) { desired[order[i]]--; total--; break; }
+      }
     }
   }
   while (total < pop) { desired.farmer++; total++; }
   const unassigned = [...villagers];
   const assignment = new Map();
-  for (const job of order) {
+  // Guards are picked first, so the brave-first rule means something:
+  // filling the other jobs first would poach the brave villagers for
+  // the fields before the towers are ever manned.
+  const assignOrder = ["guard", ...order.filter((j) => j !== "guard")];
+  for (const job of assignOrder) {
     for (let i = 0; i < desired[job]; i++) {
       if (!unassigned.length) break;
       let bestIdx = 0;
-      for (let k = 1; k < unassigned.length; k++) if (unassigned[k].skills[job] > unassigned[bestIdx].skills[job]) bestIdx = k;
+      for (let k = 1; k < unassigned.length; k++) {
+        // Guards are picked brave first, then by tool tier, then skill:
+        // a guard's courage and spear matter more than practice.
+        const a = unassigned[k], b = unassigned[bestIdx];
+        const better = job === "guard"
+          ? (a.traits.includes("brave") !== b.traits.includes("brave") ? a.traits.includes("brave")
+            : (a.tool || 0) !== (b.tool || 0) ? (a.tool || 0) > (b.tool || 0)
+            : (a.skills[job] ?? 0) > (b.skills[job] ?? 0))
+          : a.skills[job] > b.skills[job];
+        if (better) bestIdx = k;
+      }
       assignment.set(unassigned[bestIdx].id, job);
       unassigned.splice(bestIdx, 1);
     }
@@ -854,6 +909,100 @@ export function delegateRoles(state, grid = null) {
     const l = leader(state);
     log(state, (l ? l.name + " delegates: " : "Delegation: ") + changes.slice(0, 3).join(", ") + (changes.length > 3 ? " and " + (changes.length - 3) + " more." : "."));
   }
+  assignGuardPosts(state);
+}
+
+// --- guard posts: towers first, then the four gate cells on the wall
+// ring. A post is a plain {x, z, kind} record on the villager; the
+// tower-manning rule reads the assignment, not the villager's position.
+
+export function guardPosts(state) {
+  const posts = [];
+  for (const b of state.buildings) if (b.type === "tower") posts.push({ x: b.x, z: b.z, kind: "tower" });
+  const walls = state.buildings.filter((b) => b.type === "wall").length;
+  if (walls >= 1) {
+    const cx = state._cx, cz = state._cz;
+    for (const [dx, dz, dir] of [[1, 0, "east"], [-1, 0, "west"], [0, 1, "south"], [0, -1, "north"]]) {
+      const x = cx + dx * WALL_RING_R, z = cz + dz * WALL_RING_R;
+      if (x < 0 || x >= SIZE || z < 0 || z >= SIZE) continue;
+      // A gate cell is open ground on the ring: no building stands there.
+      if (state.buildings.some((b) => b.x === x && b.z === z)) continue;
+      posts.push({ x, z, kind: "gate", dir });
+    }
+  }
+  posts.sort((a, b) => (a.x - b.x) || (a.z - b.z));
+  return posts;
+}
+
+export function assignGuardPosts(state) {
+  const posts = guardPosts(state);
+  const guards = state.villagers.filter((v) => v.assignedJob === "guard" && (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v));
+  // Drop posts whose tower is gone, so the guard reassigns next round.
+  for (const v of guards) {
+    if (v.post && !posts.some((p) => p.x === v.post.x && p.z === v.post.z)) v.post = null;
+  }
+  const taken = new Set();
+  for (const v of guards) if (v.post) taken.add(v.post.x + "," + v.post.z);
+  for (const v of guards) {
+    if (v.post) continue;
+    const home = v.home ? v.home.split(",").map(Number) : [state._cx, state._cz];
+    const free = posts.filter((p) => !taken.has(p.x + "," + p.z));
+    const towers = free.filter((p) => p.kind === "tower");
+    const pool = towers.length ? towers : free;
+    if (!pool.length) { v.post = null; continue; }
+    pool.sort((a, b) => Math.hypot(a.x - home[0], a.z - home[1]) - Math.hypot(b.x - home[0], b.z - home[1]));
+    v.post = pool[0];
+    taken.add(v.post.x + "," + v.post.z);
+    log(state, v.post.kind === "gate"
+      ? v.name + " takes the " + (v.post.dir || "") + " gate."
+      : v.name + " takes the tower.");
+  }
+  for (const v of state.villagers) if (v.assignedJob !== "guard" && v.post) v.post = null;
+}
+
+// Is this tower manned by a guard working the post right now?
+export function towerManned(state, t) {
+  return state.villagers.some((v) => v.job === "guard" && v.assignedJob === "guard" && v.health > 0
+    && v.post && v.post.kind === "tower" && v.post.x === t.x && v.post.z === t.z);
+}
+
+export function defenseSummary(state) {
+  const walls = state.buildings.filter((b) => b.type === "wall").length;
+  const towers = state.buildings.filter((b) => b.type === "tower");
+  const guards = state.villagers.filter((v) => v.assignedJob === "guard");
+  return {
+    walls,
+    towers: towers.length,
+    manned: towers.filter((t) => towerManned(state, t)).length,
+    guards: guards.length,
+    posted: guards.filter((v) => v.post).length,
+    lastRaid: state.lastRaidLine || null,
+  };
+}
+
+// Muster: every guard to its post immediately. The god holds this one
+// action; the leader's matching intent (call_to_arms) runs the same
+// path with raid-season validation.
+export function musterGuards(state, grid = null) {
+  assignGuardPosts(state);
+  let n = 0;
+  for (const v of state.villagers) {
+    if (v.assignedJob !== "guard" || !v.post) continue;
+    n++;
+    if (grid) setTarget(state, grid, v, v.post.x, v.post.z);
+    v.state = "work";
+  }
+  return n;
+}
+
+export function callToArms(state, grid = null) {
+  if (!state.raidActive && !(state.raidPendingDay && state.raidPendingDay > state.day)) {
+    log(state, "The call to arms is refused: no raid threatens the village.");
+    return { ok: false, reason: "No raid threatens the village." };
+  }
+  const n = musterGuards(state, grid);
+  log(state, "The leader calls the guards to their posts.");
+  return { ok: true, guards: n };
 }
 
 function scoreJob(state, v, job) {
@@ -876,6 +1025,13 @@ function scoreJob(state, v, job) {
   }
   if (v.assignedJob === job) score += 12; // leader delegation: strong nudge, still refuseable
   if (job === "fisher" && v.assignedJob === "fisher") score += 6; // a standing post: the delegated fisher stays at the shore instead of drifting to building/hauling while fish are plentiful
+  if (job === "guard") {
+    // Guards are a delegation-only job: nobody drifts into it unless
+    // there are posts to hold. A delegated guard stays at the post.
+    score += state.buildings.some((b) => b.type === "tower" || b.type === "wall") ? 2 : -8;
+    if (v.traits.includes("brave")) score += 2;
+  }
+  if (job === "guard" && v.assignedJob === "guard") score += 6; // standing post
   if (state.directive && state.directive.focusJob === job) score += refusesDirective(state, v, job) ? -6 : 6;
   if (v.personalFocus === job) score += 4;
   if (v.job === job) score += 1; // stickiness: don't churn jobs every tick
@@ -1213,8 +1369,16 @@ function think(state, grid, v) {
   // Raiders send villagers running away from the threat, never
   // toward the center where the raiders are headed.
   const raiderNear = nearestRaider(state, v.x, v.z, 8);
-  if (v.fear >= 50 || raiderNear || (state.elapsed < state.effects.floodUntil && Math.hypot(v.x - cx, v.z - cz) < 14)) {
+  // A guard on duty holds the post while a raid is active, as long as
+  // they are still standing: fear still accumulates, and a wounded
+  // guard (below GUARD_BREAK_HEALTH) falls back like anyone else.
+  const guardOnDuty = v.job === "guard" && state.raidActive && v.health >= GUARD_BREAK_HEALTH;
+  if (!guardOnDuty && (v.fear >= 50 || raiderNear || (state.elapsed < state.effects.floodUntil && Math.hypot(v.x - cx, v.z - cz) < 14))) {
     v.state = "flee";
+    if (v.job === "guard" && state.raidActive && v.health < GUARD_BREAK_HEALTH && !v.brokeOff) {
+      v.brokeOff = true;
+      log(state, v.name + " breaks off and falls back, wounded.");
+    }
     if (raiderNear) {
       const dx = v.x - raiderNear.x, dz = v.z - raiderNear.z;
       const d = Math.hypot(dx, dz) || 1;
@@ -1298,8 +1462,15 @@ function think(state, grid, v) {
     const tree = nearestCell(grid, v.x, v.z, (c) => c.tree);
     if (tree) setTarget(state, grid, v, tree[0], tree[1]); else v.state = "idle";
   } else if (job === "miner") {
-    const node = nearestCell(grid, v.x, v.z, (c) => c.stone > 0 || c.ore > 0);
-    if (node) setTarget(state, grid, v, node[0], node[1]); else v.state = "idle";
+    // Carry-aware targeting: a miner hauling stone goes to stone, a
+    // miner hauling ore goes to ore. Targeting a node whose mineral
+    // mismatches the carry would strand the miner there (see doWork).
+    // A miner left holding a mismatched carry (old saves, hauler
+    // fallback) hauls it home instead of idling.
+    const node = nearestCell(grid, v.x, v.z, (c) => (c.stone > 0 && (!v.carry || v.carry.type === "stone")) || (c.ore > 0 && (!v.carry || v.carry.type === "ore")));
+    if (node) setTarget(state, grid, v, node[0], node[1]);
+    else if (v.carry) { v.state = "haul"; setTarget(state, grid, v, cx, cz); }
+    else v.state = "idle";
   } else if (job === "fisher") {
     const shore = nearestCell(grid, v.x, v.z, (c, x, z) => !c.water && !c.blocked && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const n = inBounds(x + dx, z + dz) ? peekCell(grid, x + dx, z + dz) : null; return !!(n && n.water); }));
     if (shore) setTarget(state, grid, v, shore[0], shore[1]); else v.state = "idle";
@@ -1319,6 +1490,35 @@ function think(state, grid, v) {
     const node = nearestCell(grid, v.x, v.z, (c) => c.stone > 0);
     const t = ripe || node;
     if (t) setTarget(state, grid, v, t[0], t[1]); else v.state = "idle";
+  } else if (job === "guard") {
+    // Guards hold their post. During a raid they engage the nearest
+    // raider within GUARD_POST_RADIUS of the post, otherwise they hold
+    // it; on a warning day they wait at the post; in quiet times they
+    // patrol a fixed loop between their post, the nearest gate, and
+    // the next post, never leaving the wall ring.
+    const post = v.post;
+    if (!post) {
+      v.state = "idle";
+    } else if (state.raidActive) {
+      const r = nearestRaider(state, post.x + 0.5, post.z + 0.5, GUARD_POST_RADIUS);
+      if (r && v.health >= GUARD_BREAK_HEALTH) setTarget(state, grid, v, Math.round(r.x), Math.round(r.z));
+      else setTarget(state, grid, v, post.x, post.z);
+    } else if (state.raidPendingDay && state.raidPendingDay > state.day) {
+      setTarget(state, grid, v, post.x, post.z);
+    } else {
+      const posts = guardPosts(state);
+      const gates = posts.filter((p) => p.kind === "gate");
+      const idx = posts.findIndex((p) => p.x === post.x && p.z === post.z);
+      const next = posts.length > 1 ? posts[(idx + 1) % posts.length] : post;
+      const gate = gates.length ? gates.reduce((a, b) => Math.hypot(a.x - post.x, a.z - post.z) <= Math.hypot(b.x - post.x, b.z - post.z) ? a : b) : post;
+      const route = [post, gate, next];
+      v.patrolIdx = v.patrolIdx ?? 0;
+      if (v.patrolIdx >= route.length) v.patrolIdx = 0;
+      const wp = route[v.patrolIdx];
+      if (Math.hypot(v.x - (wp.x + 0.5), v.z - (wp.z + 0.5)) < 1.2) v.patrolIdx = (v.patrolIdx + 1) % route.length;
+      const dest = route[v.patrolIdx];
+      setTarget(state, grid, v, dest.x, dest.z);
+    }
   }
 }
 
@@ -1367,9 +1567,15 @@ function doWork(state, grid, v, dt) {
     cell.tree = false; cell.blocked = false; noteMutation(grid, tx, tz); addCarry("wood", 2 + fineBonus + steelBonus);
     if (hasWorkshop) { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("wood", 1); }
   } else if ((v.job === "miner" || v.job === "hauler") && cell && (cell.stone > 0 || cell.ore > 0)) {
-    if (cell.ore > 0 && state._rng() < 0.35) { cell.ore--; addCarry("ore"); noteMutation(grid, tx, tz); }
-    else if (cell.stone > 0) { cell.stone--; addCarry("stone", 1 + fineBonus + steelBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; noteMutation(grid, tx, tz); }
-    else addCarry("wood"); // hauler fallback at a spent node: gather firewood nearby
+    // Carry-aware mining: a villager takes only the mineral matching
+    // what they already carry (or anything on an empty carry). Taking
+    // the other mineral would void it: addCarry drops a mismatched
+    // type AFTER the cell is decremented, so the mineral vanished
+    // from the world without ever reaching the stockpile.
+    const carryOk = (type) => !v.carry || v.carry.type === type;
+    if (cell.ore > 0 && carryOk("ore") && state._rng() < 0.35) { cell.ore--; addCarry("ore"); noteMutation(grid, tx, tz); }
+    else if (cell.stone > 0 && carryOk("stone")) { cell.stone--; addCarry("stone", 1 + fineBonus + steelBonus); if (cell.stone <= 0 && cell.ore <= 0) cell.blocked = false; noteMutation(grid, tx, tz); }
+    else if (v.job === "hauler" && !cell.stone && !cell.ore) addCarry("wood"); // hauler fallback at a spent node
     if (v.job === "hauler" && !cell.stone && !cell.ore) addCarry("wood");
     if (hasWorkshop && v.job === "miner") { v.toolTick++; if (v.toolTick % workshopEvery === 0) addCarry("stone", 1); }
   } else if (v.job === "fisher") {
@@ -1954,6 +2160,13 @@ export const RAID_MIN_DAY = 12;
 export const RAID_MIN_POP = 12;
 export const RAID_MIN_TECH = 2;
 export const RAID_GAP_DAYS = 8;
+export const RAID_WARN_DAYS = 1;
+export const RAID_SIZE_CAP = 10;
+export const GUARD_DAMAGE_BASE = 3;
+export const GUARD_POST_RADIUS = 12;
+export const GUARD_CAP = 6;
+export const GUARD_BREAK_HEALTH = 25;
+export const TOWER_RANGE = 7;
 const BUILDING_HP = { wall: 30, tower: 60 };
 function buildingHp(b) { return BUILDING_HP[b.type] || 25; }
 
@@ -2003,7 +2216,10 @@ export function spawnRaid(state, grid, size = null) {
   }
   state.raidActive = true;
   state.raidUntil = state.elapsed + 120;
-  state._raidStats = { deaths: 0, stolen: 0, killed: 0 };
+  state._raidStats = { deaths: 0, stolen: 0, killed: 0, guardKills: 0, towerKills: 0, breaches: 0 };
+  // Guards rethink immediately: posts are taken in seconds, not on
+  // the next 4-7s rethink cycle.
+  for (const v of state.villagers) if (v.assignedJob === "guard") v.rethinkAt = state.elapsed;
   log(state, "Raiders attack! " + n + " raiders come from the " + dir + ". The villagers flee.");
   return spawned;
 }
@@ -2059,16 +2275,24 @@ function destructibleNear(state, grid, r) {
 function resolveRaid(state) {
   state.raidActive = false;
   state.lastRaidDay = state.day;
-  const st = state._raidStats || { deaths: 0, stolen: 0, killed: 0 };
+  const st = state._raidStats || { deaths: 0, stolen: 0, killed: 0, guardKills: 0, towerKills: 0, breaches: 0 };
+  const gk = st.guardKills || 0, tk = st.towerKills || 0, br = st.breaches || 0;
+  const defense = (st.killed || br)
+    ? " (" + st.killed + " felled" + ((gk || tk) ? ", " + gk + " by guards, " + tk + " by towers" : "") + (br ? ", " + br + (br === 1 ? " breach" : " breaches") : "") + ")"
+    : "";
   if (st.deaths === 0 && st.stolen === 0) {
     state.morale = clamp((state.morale ?? 60) + 8, 0, 100);
     state.faith = clamp(state.faith + 5, 0, 100);
-    log(state, "The village drives off the raiders without loss. Morale soars.");
+    state.lastRaidLine = "The village drives off the raiders without loss." + defense;
+    log(state, state.lastRaidLine + " Morale soars.");
   } else {
     state.morale = clamp((state.morale ?? 60) - 8, 0, 100);
     state.faith = clamp(state.faith - 3, 0, 100);
-    log(state, "The raid ends. " + st.deaths + " slain, " + st.stolen + " food stolen, " + st.killed + " raiders felled.");
+    state.lastRaidLine = "The raid ends. " + st.deaths + " slain, " + st.stolen + " food stolen, " + st.killed + " raiders felled." + defense;
+    log(state, state.lastRaidLine);
   }
+  for (const v of state.villagers) { v.brokeOff = false; v._guardKillLogged = false; }
+  assignGuardPosts(state);
   state._raidStats = null;
 }
 
@@ -2078,11 +2302,14 @@ function stepRaiders(state, grid, dt) {
     return;
   }
   const cx = state._cx, cz = state._cz;
-  // Towers shoot: one volley per second per tower, range 7.
+  // Towers shoot: one volley per second per MANNED tower, range
+  // TOWER_RANGE. An unmanned tower never shoots: its guard is the
+  // weapon, and the post is what makes the tower dangerous.
   if (state.elapsed >= (state.towerAt || 0)) {
     state.towerAt = state.elapsed + 1;
     for (const t of state.buildings.filter((b) => b.type === "tower")) {
-      let best = null, bestD = 7;
+      if (!towerManned(state, t)) continue;
+      let best = null, bestD = TOWER_RANGE;
       for (const r of state.raiders) {
         const d = Math.hypot(r.x - (t.x + 0.5), r.z - (t.z + 0.5));
         if (d < bestD) { bestD = d; best = r; }
@@ -2091,9 +2318,25 @@ function stepRaiders(state, grid, dt) {
         best.hp -= 2 + eraStageOf(state.tech ? state.tech.level : 0);
         if (best.hp <= 0) {
           state.raiders = state.raiders.filter((o) => o !== best);
-          if (state._raidStats) state._raidStats.killed++;
+          if (state._raidStats) { state._raidStats.killed++; state._raidStats.towerKills = (state._raidStats.towerKills || 0) + 1; }
           log(state, "A tower fells a raider.");
         }
+      }
+    }
+  }
+  // Guards strike: once per second, a guard on duty hits the nearest
+  // raider within 1.3 cells for GUARD_DAMAGE_BASE + tool tier.
+  if (state.elapsed >= (state.guardAt || 0)) {
+    state.guardAt = state.elapsed + 1;
+    for (const v of state.villagers) {
+      if (v.job !== "guard" || v.health <= 0) continue;
+      const r = nearestRaider(state, v.x, v.z, 1.3);
+      if (!r) continue;
+      r.hp -= GUARD_DAMAGE_BASE + (v.tool || 0);
+      if (r.hp <= 0) {
+        state.raiders = state.raiders.filter((o) => o !== r);
+        if (state._raidStats) { state._raidStats.killed++; state._raidStats.guardKills = (state._raidStats.guardKills || 0) + 1; }
+        if (!v._guardKillLogged) { v._guardKillLogged = true; log(state, v.name + " fells a raider."); }
       }
     }
   }
@@ -2128,6 +2371,7 @@ function stepRaiders(state, grid, dt) {
         cellAt(grid, target.x, target.z).building = null;
         cellAt(grid, target.x, target.z).blocked = false;
         noteMutation(grid, target.x, target.z);
+        if (state._raidStats && (target.type === "wall" || target.type === "tower")) state._raidStats.breaches = (state._raidStats.breaches || 0) + 1;
         log(state, target.type === "wall" ? "Raiders break through the wall!"
           : target.type === "tower" ? "Raiders topple a tower!"
           : "Raiders sack the " + target.type + "!");
@@ -2495,6 +2739,11 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       state.directive = opts.focusJob ? { focusJob: opts.focusJob } : null;
       log(state, opts.focusJob ? "Whispered through the leader: focus on " + opts.focusJob + ". Some may disobey." : "The directive is lifted.");
       break;
+    case "muster": {
+      const n = musterGuards(state, grid);
+      log(state, n ? "The muster sounds. Guards to their posts." : "The muster sounds, but no guards are posted.");
+      setCd(30); break;
+    }
     case "whisper":
       if (opts.text) log(state, "Whisper: \"" + String(opts.text).slice(0, 200) + "\"");
       break;

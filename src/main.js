@@ -1,6 +1,6 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
@@ -65,8 +65,9 @@ function renderHUD() {
   $("stat-morale").title = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(", ") || "Morale";
   $("stat-tech").textContent = "⚒️ " + TECH_TIERS[s.tech ? s.tech.level : 0].name + " · " + TECH_TIERS[s.tech ? s.tech.level : 0].era;
   const raidEl = $("stat-raid");
+  const def = defenseSummary(s);
   if (s.raiders && s.raiders.length) {
-    raidEl.textContent = "⚔️ Raiders! " + s.raiders.length;
+    raidEl.textContent = "⚔️ Raiders! " + s.raiders.length + " · guards " + def.posted + "/" + def.guards + " posted · " + def.manned + "/" + def.towers + " towers manned";
     raidEl.style.display = "";
   } else if (s.raidPendingDay && s.raidPendingDay > s.day) {
     raidEl.textContent = "⚠️ Raiders at dawn";
@@ -99,7 +100,7 @@ function villagerCard(v) {
   const goods = Object.keys(PRICES).filter((g) => (v.goods[g] || 0) > 0).map((g) => g + " " + v.goods[g]).join(" · ") || "no personal goods";
   const age = v.ageDays < 3 ? "child" : v.ageDays >= 45 ? "elder, " + v.ageDays + "d" : v.ageDays + "d old";
   return `<h3>${v.name}${v.leader ? " · Leader" : ""}</h3>
-    <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}</p>
+    <p class="muted">${v.job} · ${v.state} · ${carry} · ${age} · ${v.home ? "housed" : "homeless"}${v.job === "guard" && v.post ? " · post " + v.post.x + "," + v.post.z + (v.post.kind === "gate" ? " (" + (v.post.dir || "gate") + ")" : " (tower)") : ""}</p>
     <p>Coins: <b>${v.coins}</b> · Personal goods: ${goods}</p>
     <p>Education: <b>${v.education || 0}/10</b> · Tools: <b>${TOOL_NAMES[v.tool || 0]}</b>${v.job === "student" ? " · at school" : ""}${v.sick ? " · sick" : ""}</p>
     <p>Delegated by the leader: <b>${v.assignedJob || "none yet"}</b>${v.delegated ? " · following it" : v.assignedJob ? " · chose own work" : ""}</p>
@@ -153,13 +154,14 @@ function renderPanel() {
     const teacher = s.villagers.find((o) => o.assignedJob === "teacher");
     const educated = s.villagers.filter((o) => (o.education || 0) >= 5).length;
     const healer = s.buildings.find((b) => b.type === "healer");
+    const def = defenseSummary(s);
     $("panel-body").innerHTML = `
       <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
       <p>${SEASON_EMOJI[s.season]} ${SEASON_NAMES[s.season]}, Year ${yearOf(s.day)} · ${WEATHER_LABEL[s.weather ? s.weather.kind : "clear"]} · ${phaseOf(s.time)}</p>
       <p>Morale: <b>${Math.round(s.morale ?? 60)}/100</b>${moraleLine ? ": " + moraleLine : ""}</p>
       <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> · ${TECH_TIERS[tech.level].era} (${tech.progress}/${techThresholdFor(tech.level)})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
-      ${s.raiders && s.raiders.length ? `<p>⚔️ <b>Raiders in the village!</b> ${s.raiders.length} raiders. Villagers flee; towers shoot; walls slow them.</p>` : s.raidPendingDay && s.raidPendingDay > s.day ? `<p>⚠️ <b>Raiders at dawn.</b> Scouts saw them in the hills. Walls and towers help, if the village has them.</p>` : ""}
-      ${s.buildings.some((b) => b.type === "wall") || s.buildings.some((b) => b.type === "tower") ? `<p>Defenses: <b>${s.buildings.filter((b) => b.type === "wall").length} wall</b> · <b>${s.buildings.filter((b) => b.type === "tower").length} tower</b> · gates stay open on the four axes.</p>` : ""}
+      ${s.raiders && s.raiders.length ? `<p>⚔️ <b>Raiders in the village!</b> ${s.raiders.length} raiders. Guards hold their posts; only manned towers shoot; walls slow them.</p>` : s.raidPendingDay && s.raidPendingDay > s.day ? `<p>⚠️ <b>Raiders at dawn.</b> Scouts saw them in the hills. Walls and towers help, if the village has them.</p>` : ""}
+      ${s.buildings.some((b) => b.type === "wall") || s.buildings.some((b) => b.type === "tower") ? `<p>Defenses: <b>${def.walls} wall</b> · <b>${def.towers} tower</b> (${def.manned} manned) · <b>${def.posted}/${def.guards} guards posted</b> · gates stay open on the four axes.${def.lastRaid ? " Last raid: " + def.lastRaid : ""}</p>` : ""}
       <p>${celebrating ? "🎉 <b>" + s.celebration.name + "!</b> The village feasts at the town center." : "🎉 Next festival: <b>" + fest.name + "</b> in " + fest.inDays + "d, needs " + FESTIVAL_MIN_EDIBLE + " food in store and faith " + FESTIVAL_MIN_FAITH + ". A feast costs 10 food and lifts morale."}</p>
       ${school ? `<p>School: <b>${students.length} student${students.length === 1 ? "" : "s"}</b>${teacher ? " · teacher " + teacher.name : " · no teacher yet"} · ${educated} educated adult${educated === 1 ? "" : "s"}</p>` : ""}
       ${healer ? `<p>A healer's hut stands. The sick mend faster near it.</p>` : ""}
