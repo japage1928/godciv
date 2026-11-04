@@ -8,7 +8,7 @@
 // Buildings are merged vertex-colored geometry: one draw call per
 // building body, shared materials, no per-frame allocation.
 import * as THREE from "../vendor/three.module.js";
-import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, towerManned } from "./sim.js";
+import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, towerManned, terrainHeight } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, guard: 0x546e7a, student: 0x78909c, child: 0xb0bec5 };
 const CELL = 1;
@@ -483,7 +483,10 @@ export class Renderer {
 
     this.villagerMeshes = new Map();
     this.raiderMeshes = new Map();
+    this.caravanMeshes = new Map();
     this.deerMeshes = new Map();
+    this._villageMarkers = null;
+    this._markerSignature = "";
     this.selectedRing = new THREE.Mesh(
       new THREE.RingGeometry(0.55, 0.75, 24),
       new THREE.MeshBasicMaterial({ color: 0xffd700, side: THREE.DoubleSide })
@@ -1274,6 +1277,38 @@ export class Renderer {
     this._buildSignature = sig;
   }
 
+  // Village markers: one standing stone per known village, in the
+  // village's color, at its center. Markers live outside the chunk
+  // groups so they draw on ungenerated land too; their height
+  // reads the generated cell when there is one and the pure
+  // terrain function otherwise, so they never generate a chunk.
+  _syncVillageMarkers(state, grid) {
+    const spots = [{ id: 0, x: state._cx, z: state._cz, known: true }];
+    for (const rec of state.villages || []) {
+      if (rec.known) spots.push({ id: rec.id, x: rec.center[0], z: rec.center[1], known: true });
+    }
+    const sig = spots.map((s) => s.id + "@" + s.x + "," + s.z).join("|");
+    if (sig === this._markerSignature) return;
+    this._markerSignature = sig;
+    if (this._villageMarkers) { this.scene.remove(this._villageMarkers); this._villageMarkers = null; }
+    const group = new THREE.Group();
+    const colors = { 0: 0xb71c1c, 1: 0xd7a94e, 2: 0x00897b };
+    for (const s of spots) {
+      // Three cells east of the town center: on the plaza edge,
+      // clear of the towncenter mesh itself.
+      const mx = s.x + 3, mz = s.z;
+      const cell = grid ? peekCell(grid, mx, mz) : null;
+      const groundY = cell ? cell.h * 0.9 : terrainHeight(state.seed, mx, mz) * 0.9;
+      const stone = new THREE.Mesh(new THREE.BoxGeometry(0.7, 2.4, 0.7), new THREE.MeshLambertMaterial({ color: 0x8d8d8d }));
+      stone.position.set(mx + 0.5, groundY + 1.2, mz + 0.5);
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.3, 0.9), new THREE.MeshLambertMaterial({ color: colors[s.id] ?? 0x777777 }));
+      cap.position.set(mx + 0.5, groundY + 2.55, mz + 0.5);
+      group.add(stone); group.add(cap);
+    }
+    this._villageMarkers = group;
+    this.scene.add(group);
+  }
+
   _villagerGroup(v) {
     const g = new THREE.Group();
     const tunic = new THREE.MeshLambertMaterial({ color: JOB_COLORS[v.job] || 0x777777 });
@@ -1517,6 +1552,38 @@ export class Renderer {
       }
     }
     for (const [id, g] of this.raiderMeshes) if (!seenRaiders.has(id)) { this.scene.remove(g); this.raiderMeshes.delete(id); }
+
+    // Caravans: one trader figure per caravan in flight — a
+    // villager figure with a yellow sash and a pack bundle.
+    const seenCaravans = new Set();
+    for (const c of state.caravans || []) {
+      seenCaravans.add(c.id);
+      let g = this.caravanMeshes.get(c.id);
+      if (!g) {
+        g = this._villagerGroup({ id: -1000 - c.id, job: "hauler" });
+        g.userData.sash.visible = true;
+        g.userData.sash.material.color.setHex(0xf9d423);
+        const pack = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.4, 0.25), new THREE.MeshLambertMaterial({ color: 0x8d6e63 }));
+        pack.position.set(0, 1.05, -0.28); g.add(pack);
+        g.position.set(c.x + 0.5, 0, c.z + 0.5);
+        this.scene.add(g); this.caravanMeshes.set(c.id, g);
+      }
+      g.visible = this._actorVisible(c.x, c.z, state);
+      g.position.x += (c.x + 0.5 - g.position.x) * Math.min(1, dt * 8);
+      g.position.z += (c.z + 0.5 - g.position.z) * Math.min(1, dt * 8);
+      const bob = Math.abs(Math.sin(elapsed * 8 + c.id)) * 0.05;
+      g.position.y = bob;
+      if (c.path && c.path.length) {
+        const dx = c.path[0][0] + 0.5 - c.x, dz = c.path[0][1] + 0.5 - c.z;
+        if (Math.hypot(dx, dz) > 0.1) g.rotation.y = Math.atan2(dx, dz);
+      }
+    }
+    for (const [id, g] of this.caravanMeshes) if (!seenCaravans.has(id)) { this.scene.remove(g); this.caravanMeshes.delete(id); }
+
+    // Village markers: standing stones in village colors at known
+    // villages' centers, drawn even on ungenerated land so a
+    // discovered neighbor stays findable from far away.
+    this._syncVillageMarkers(state, grid);
 
     // Deer.
     const seenDeer = new Set();

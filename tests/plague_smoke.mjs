@@ -1,6 +1,8 @@
-// Plague smoke test for v12: the Plague god action fires, is
-// cooldown-gated, sickens a share of the village, kills only the
-// already weak, and passes without a death spiral.
+// Plague smoke test: the Plague god action fires, is
+// cooldown-gated, sickens a share of the village, kills a visible
+// fraction through the dawn roll (the sick, not only the already
+// weak), never more than a quarter of the village in one wave, and
+// passes without a death spiral.
 // Run: npm test  (or: node tests/plague_smoke.mjs)
 import assert from "node:assert";
 import {
@@ -36,7 +38,7 @@ function runDays(state, grid, days) {
 
 const { state, grid } = newWorld(7);
 // A 20-soul village: at 40% each, at least one falling ill is near
-// certain, and the weak-only death rule has room to show.
+// certain, and the dawn death roll has room to show.
 while (state.villagers.length < 20) {
   state.villagers.push(makeVillager(state, state._cx + 1, state._cz + 1, false, { ageDays: 20, coins: 0 }));
 }
@@ -47,6 +49,7 @@ const faithBefore = state.faith;
 const first = applyGod(state, grid, "plague");
 assert.equal(first.ok, true, "plague must fire, got " + JSON.stringify(first));
 assert.ok(state.effects.plagueUntil > state.elapsed, "the plague wave must be timed");
+assert.equal(state.effects.plagueBudget, 5, "one wave's death budget must be a quarter of 20");
 assert.equal(state.stats.plagues, 1, "the plague counter must increment");
 assert.ok(state.faith < faithBefore, "plague must cost faith");
 assert.equal(godCooldown(state, "plague"), 60, "plague cooldown must be 60s");
@@ -66,8 +69,8 @@ const plagueDeaths = counted.deaths;
 assert.ok(state.effects.plagueUntil < state.elapsed, "the plague wave must end");
 assert.equal(state.villagers.filter((v) => v.sick).length, 0, "everyone must recover after the wave");
 assert.ok(counted.sawRecovery, "the recovery must be logged");
-assert.ok(plagueDeaths <= 2, "plague must kill only a few of the weak, sickness deaths=" + plagueDeaths);
-assert.ok(state.villagers.length >= popBefore - 3, "no death spiral: pop " + popBefore + " -> " + state.villagers.length);
+assert.ok(plagueDeaths <= 5, "one plague wave must not exceed the quarter cap, sickness deaths=" + plagueDeaths);
+assert.ok(state.villagers.length >= popBefore - 8, "no death spiral: pop " + popBefore + " -> " + state.villagers.length);
 console.log("10 days later: pop " + popBefore + " -> " + state.villagers.length + ", sickness deaths " + plagueDeaths);
 
 // --- after the cooldown, plague can fire again ---

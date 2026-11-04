@@ -212,7 +212,11 @@ function inBoundsCheck(grid, x, z) { return x >= 0 && z >= 0 && x < SIZE && z < 
   assert.ok(s.buildings.length > 3, "a 6-day village must have raised buildings past founding, got " + s.buildings.length);
   for (const b of s.buildings) {
     // The town center and altar are the plaza's heart, not lot
-    // buildings: the streets wrap around them instead.
+    // buildings: the streets wrap around them instead. Neighbor
+    // villages have no street plan by design (their founding
+    // buildings materialize at fixed offsets), so the street bar
+    // covers the player's village only.
+    if ((b.village ?? 0) !== 0) continue;
     if (["wall", "tower", "marker", "towncenter", "altar"].includes(b.type)) continue;
     assert.ok(streetFrontage(g, b.x, b.z), "every settled building must front a street, " + JSON.stringify(b));
   }

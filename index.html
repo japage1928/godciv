@@ -49,6 +49,7 @@
   #godbar button .cd { position: absolute; top: 2px; right: 6px; font-size: 10px; color: #ffb74d; }
   #panel { position: absolute; right: 8px; top: 8px; width: min(340px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; background: var(--panel); border: 1px solid #3a523a; border-radius: 12px; padding: 12px; z-index: 6; display: none; }
   #panel.open { display: block; }
+  #panel-close { background: none; border: 1px solid #3a523a; border-radius: 6px; color: #e8f0e8; padding: 2px 9px; cursor: pointer; font-size: 14px; line-height: 1.4; }
   #panel h3, #panel h4 { margin: 8px 0 4px; }
   #panel .muted, .muted { color: #a8bfa8; font-size: 12px; }
   #panel .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
@@ -133,9 +134,9 @@
     <canvas id="scene"></canvas>
     <div id="arm-banner" style="display:none"></div>
     <div id="panel">
-      <div style="display:flex;justify-content:space-between;align-items:center">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <h3 id="panel-title" style="margin:0">Village</h3>
-        <span class="muted" id="directive-label">No directive</span>
+        <span style="display:flex;gap:8px;align-items:center"><span class="muted" id="directive-label">No directive</span><button id="panel-close" title="Close panel" aria-label="Close panel">✕</button></span>
       </div>
       <div id="panel-body"></div>
     </div>
@@ -156,6 +157,7 @@
     <button data-god="hut" title="Order an extra hut (villagers also build their own when crowded)">🛖<small>Extra hut</small><span class="cd"></span></button>
     <button data-god="villager" title="Call a wanderer (costs faith)">🧍<small>New soul</small><span class="cd"></span></button>
     <button data-god="muster" title="Muster: guards to their posts">🛡️<small>Muster</small><span class="cd"></span></button>
+    <button data-god="envoy" title="Envoy: send greetings to the nearest unknown village, or the coldest known one">🕊️<small>Envoy</small><span class="cd"></span></button>
     <button data-god="whisper" title="Whisper to the village">💬<small>Whisper</small><span class="cd"></span></button>
   </div>
 </div>

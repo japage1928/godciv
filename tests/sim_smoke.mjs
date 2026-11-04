@@ -184,9 +184,11 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
     }
   }
   // 30 days on: every farm plot west, dwellings spaced, roads grown.
+  // The settlement bar covers the player's own village: neighbor
+  // villages (Phase F) have no road network by design.
   for (let i = 0; i < 21600; i++) step(s, g, 0.25);
   for (const [x] of s._farmCells) assert.ok(x <= s._cx - 3, "farm plot must stay in the western district, x=" + x);
-  const dwellings = s.buildings.filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
+  const dwellings = s.buildings.filter((b) => (b.village ?? 0) === 0 && ["hut", "longhouse", "greathall"].includes(b.type));
   for (let i = 0; i < dwellings.length; i++) for (let j = i + 1; j < dwellings.length; j++) {
     const d = Math.max(Math.abs(dwellings[i].x - dwellings[j].x), Math.abs(dwellings[i].z - dwellings[j].z));
     assert.ok(d >= 3, "dwellings must keep 3 cells apart, " + JSON.stringify(dwellings[i]) + " vs " + JSON.stringify(dwellings[j]));

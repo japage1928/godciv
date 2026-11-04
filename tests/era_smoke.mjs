@@ -5,7 +5,7 @@
 import assert from "node:assert";
 import {
   newWorld, step, makeVillager, TECH_TIERS, techThresholdFor, ERA_POP_GATE,
-  eraStageOf, ERA_STAGE_NAMES, canAfford,
+  eraStageOf, ERA_STAGE_NAMES, canAfford, ownVillagers,
 } from "../src/sim.js";
 
 const STEPS_PER_DAY = 180 * 4;
@@ -47,8 +47,11 @@ assert.deepEqual(ERA_STAGE_NAMES, ["Timber hamlet", "Stone village", "Brick town
   state.tech.progress = techThresholdFor(2) - 1;
   runDays(state, grid, 1);
   assert.equal(state.tech.level, 2, "the population gate must hold Steel works at 6 villagers, level=" + state.tech.level);
-  for (let i = 0; i < 8 && state.villagers.length < 14; i++) state.villagers.push(makeVillager(state, state._cx + 1, state._cz + 1));
-  assert.ok(state.villagers.length >= 14, "the village must now meet the gate, pop=" + state.villagers.length);
+  // The gate counts the PLAYER's villagers only: neighbor villages
+  // may be active (their people live in state.villagers too) and
+  // must never satisfy the player's gate.
+  for (let i = 0; i < 8 && ownVillagers(state).length < 14; i++) state.villagers.push(makeVillager(state, state._cx + 1, state._cz + 1));
+  assert.ok(ownVillagers(state).length >= 14, "the village must now meet the gate, pop=" + ownVillagers(state).length);
   runDays(state, grid, 1);
   assert.equal(state.tech.level, 3, "meeting the gate must unlock Steel works");
   assert.equal(eraStageOf(state.tech.level), 2, "Steel works must render as the brick town stage");

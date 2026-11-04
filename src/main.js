@@ -1,6 +1,6 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, CHUNK, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary, ownVillagers, ownBuildings, relationBand, getRelation } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
@@ -59,7 +59,7 @@ function renderHUD() {
   $("stat-faith").textContent = Math.round(s.faith);
   $("faith-fill").style.width = s.faith + "%";
   $("stat-day").textContent = "Day " + s.day + " · " + fmtTime(s) + " · " + phaseOf(s.time);
-  $("stat-pop").textContent = s.villagers.length + "/" + s.populationCap;
+  $("stat-pop").textContent = ownVillagers(s).length + "/" + s.populationCap;
   $("stat-season").textContent = SEASON_EMOJI[s.season] + " " + SEASON_NAMES[s.season] + " Yr " + yearOf(s.day) + " · " + WEATHER_LABEL[s.weather ? s.weather.kind : "clear"];
   $("stat-morale").textContent = "💛 " + Math.round(s.morale ?? 60);
   $("stat-morale").title = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(", ") || "Morale";
@@ -91,7 +91,7 @@ function renderHUD() {
     btn.classList.toggle("cooling", cd > 0);
     btn.querySelector(".cd") && (btn.querySelector(".cd").textContent = cd > 0 ? Math.ceil(cd) + "s" : "");
   }
-  $("directive-label").textContent = s.directive ? "Directive: " + s.directive.focusJob : "No directive";
+  $("directive-label").textContent = s.directive && s.directive.focusJob ? "Directive: " + s.directive.focusJob : "No directive";
 }
 
 function villagerCard(v) {
@@ -115,6 +115,45 @@ function villagerCard(v) {
     <div class="row"><button data-focus="${v.id}">Nudge: focus ${v.job}</button><button id="clear-focus">Clear nudge</button></div>`;
 }
 
+function relationsSection(s) {
+  const known = (s.villages || []).filter((r) => r.known);
+  if (!known.length) return `<p class="muted">No other villages met yet. Traders, envoys, and long walks discover them.</p>`;
+  const goods = Object.keys(PRICES);
+  return known.map((rec) => {
+    const rel = getRelation(s, 0, rec.id);
+    const caravan = (s.caravans || []).find((c) => c.from === rec.id || c.to === rec.id);
+    const caravanLine = caravan
+      ? `Caravan ${caravan.state === "out" ? "on its way" : caravan.state === "home" ? "returning home" : caravan.state === "fleeing" ? "fleeing robbers" : "waiting for a road"}: ${Object.entries(caravan.load).map(([g, q]) => q + " " + g).join(", ") || "empty"}.`
+      : "No caravan on the road.";
+    const envoy = (s.pendingEnvoys || []).some((e) => e.to === rec.id) ? " An envoy is on the road." : "";
+    const stock = Object.entries(rec.stockpile).filter(([, q]) => q > 0).map(([g, q]) => g + " " + Math.floor(q)).join(" · ") || "bare stores";
+    return `<div class="village-card">
+      <p><b>${rec.name}</b> · led by ${rec.leaderName} · ${rec.pop} souls · ${rec.active ? "stirring nearby" : "distant"} · at ${rec.center[0]},${rec.center[1]}</p>
+      <p>Relations: <b>${rel} (${relationBand(rel)})</b>${rec.lastEvent ? " · " + rec.lastEvent : ""}${envoy}</p>
+      <p class="muted">Stores: ${stock} · ${rec.coins} coins · tech ${TECH_TIERS[rec.techLevel] ? TECH_TIERS[rec.techLevel].name : "unknown"}</p>
+      <p>${caravanLine}</p>
+      <div class="row"><button data-visit="${rec.id}">Visit</button></div>
+      <label>Suggest a trade: give
+        <select data-trade-give="${rec.id}">${goods.map((g) => `<option>${g}</option>`).join("")}</select>
+        <input data-trade-giveqty="${rec.id}" type="number" min="1" max="40" value="5" style="width:3.5em">
+        for
+        <select data-trade-want="${rec.id}">${goods.map((g) => `<option>${g}</option>`).join("")}</select>
+        <input data-trade-wantqty="${rec.id}" type="number" min="1" max="40" value="5" style="width:3.5em">
+      </label>
+      <div class="row"><button data-suggest="${rec.id}">Suggest trade</button></div>
+    </div>`;
+  }).join("");
+}
+
+function closePanel() {
+  // The one close path every other path funnels through: the X
+  // button, tapping empty ground, and re-tapping the selected
+  // villager all land here, so the panel can never get stuck open.
+  selectedId = null;
+  $("panel").classList.remove("open");
+  renderPanel();
+}
+
 function renderPanel() {
   const s = world.state;
   const v = s.villagers.find((o) => o.id === selectedId);
@@ -129,19 +168,23 @@ function renderPanel() {
     });
     $("clear-focus")?.addEventListener("click", () => { if (v) v.personalFocus = null; renderPanel(); });
   } else {
+    // No villager selected (or the selected one is gone): the
+    // selection is stale, so drop it — a ground tap afterwards
+    // must not think a villager card is still open.
+    selectedId = null;
     renderer.setSelected(null);
     $("panel-title").textContent = "Village";
     const counts = {};
-    for (const o of s.villagers) counts[o.job] = (counts[o.job] || 0) + 1;
+    for (const o of ownVillagers(s)) counts[o.job] = (counts[o.job] || 0) + 1;
     const assigned = {};
-    for (const o of s.villagers) if (o.assignedJob) assigned[o.assignedJob] = (assigned[o.assignedJob] || 0) + 1;
-    const l = s.villagers.find((o) => o.leader);
+    for (const o of ownVillagers(s)) if (o.assignedJob) assigned[o.assignedJob] = (assigned[o.assignedJob] || 0) + 1;
+    const l = leader(s);
     const rates = demographicRates(s);
     const demands = computeDemands(s, world.grid);
-    const huts = s.buildings.filter((b) => b.type === "hut").length;
-    const longhouses = s.buildings.filter((b) => b.type === "longhouse").length;
-    const greathalls = s.buildings.filter((b) => b.type === "greathall").length;
-    const farmhouses = s.buildings.filter((b) => b.type === "farmhouse").length;
+    const huts = ownBuildings(s).filter((b) => b.type === "hut").length;
+    const longhouses = ownBuildings(s).filter((b) => b.type === "longhouse").length;
+    const greathalls = ownBuildings(s).filter((b) => b.type === "greathall").length;
+    const farmhouses = ownBuildings(s).filter((b) => b.type === "farmhouse").length;
     let farmPlots = 0, roadCells = 0;
     forEachGeneratedCell(world.grid, (x, z, c) => { if (c.farm) farmPlots++; if (c.road) roadCells++; });
     const moraleLine = (s.moraleReasons || []).map((r) => r.label + " " + (r.delta >= 0 ? "+" : "") + r.delta).join(" · ");
@@ -149,19 +192,19 @@ function renderPanel() {
     const nextTier = TECH_TIERS[tech.level + 1];
     const fest = nextFestival(s.day);
     const celebrating = s.celebration && s.elapsed < s.celebration.until;
-    const school = s.buildings.find((b) => b.type === "school");
-    const students = s.villagers.filter((o) => isStudent(s, o));
-    const teacher = s.villagers.find((o) => o.assignedJob === "teacher");
-    const educated = s.villagers.filter((o) => (o.education || 0) >= 5).length;
-    const healer = s.buildings.find((b) => b.type === "healer");
+    const school = ownBuildings(s).find((b) => b.type === "school");
+    const students = ownVillagers(s).filter((o) => isStudent(s, o));
+    const teacher = ownVillagers(s).find((o) => o.assignedJob === "teacher");
+    const educated = ownVillagers(s).filter((o) => (o.education || 0) >= 5).length;
+    const healer = ownBuildings(s).find((b) => b.type === "healer");
     const def = defenseSummary(s);
     $("panel-body").innerHTML = `
-      <p class="muted">${s.villagers.length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
+      <p class="muted">${ownVillagers(s).length} villagers · ${huts} huts${longhouses ? " · " + longhouses + " longhouse" + (longhouses > 1 ? "s" : "") : ""}${greathalls ? " · " + greathalls + " great hall" + (greathalls > 1 ? "s" : "") : ""}${farmhouses ? " · " + farmhouses + " farmhouse" + (farmhouses > 1 ? "s" : "") : ""} · ${homelessCount(s)} homeless · ${s.buildQueue.length} build(s) queued</p>
       <p>${SEASON_EMOJI[s.season]} ${SEASON_NAMES[s.season]}, Year ${yearOf(s.day)} · ${WEATHER_LABEL[s.weather ? s.weather.kind : "clear"]} · ${phaseOf(s.time)}</p>
       <p>Morale: <b>${Math.round(s.morale ?? 60)}/100</b>${moraleLine ? ": " + moraleLine : ""}</p>
       <p>Tech: <b>${TECH_TIERS[tech.level].name}</b> · ${TECH_TIERS[tech.level].era} (${tech.progress}/${techThresholdFor(tech.level)})${nextTier ? " · Next: " + nextTier.name + ": " + nextTier.blurb : " · Highest tier reached."}</p>
       ${s.raiders && s.raiders.length ? `<p>⚔️ <b>Raiders in the village!</b> ${s.raiders.length} raiders. Guards hold their posts; only manned towers shoot; walls slow them.</p>` : s.raidPendingDay && s.raidPendingDay > s.day ? `<p>⚠️ <b>Raiders at dawn.</b> Scouts saw them in the hills. Walls and towers help, if the village has them.</p>` : ""}
-      ${s.buildings.some((b) => b.type === "wall") || s.buildings.some((b) => b.type === "tower") ? `<p>Defenses: <b>${def.walls} wall</b> · <b>${def.towers} tower</b> (${def.manned} manned) · <b>${def.posted}/${def.guards} guards posted</b> · gates stay open on the four axes.${def.lastRaid ? " Last raid: " + def.lastRaid : ""}</p>` : ""}
+      ${ownBuildings(s).some((b) => b.type === "wall") || ownBuildings(s).some((b) => b.type === "tower") ? `<p>Defenses: <b>${def.walls} wall</b> · <b>${def.towers} tower</b> (${def.manned} manned) · <b>${def.posted}/${def.guards} guards posted</b> · gates stay open on the four axes.${def.lastRaid ? " Last raid: " + def.lastRaid : ""}</p>` : ""}
       <p>${celebrating ? "🎉 <b>" + s.celebration.name + "!</b> The village feasts at the town center." : "🎉 Next festival: <b>" + fest.name + "</b> in " + fest.inDays + "d, needs " + FESTIVAL_MIN_EDIBLE + " food in store and faith " + FESTIVAL_MIN_FAITH + ". A feast costs 10 food and lifts morale."}</p>
       ${school ? `<p>School: <b>${students.length} student${students.length === 1 ? "" : "s"}</b>${teacher ? " · teacher " + teacher.name : " · no teacher yet"} · ${educated} educated adult${educated === 1 ? "" : "s"}</p>` : ""}
       ${healer ? `<p>A healer's hut stands. The sick mend faster near it.</p>` : ""}
@@ -170,7 +213,9 @@ function renderPanel() {
       <p>Births: <b>${rates.birthRate.toFixed(1)}%/day</b> · Deaths: <b>${rates.deathRate.toFixed(1)}%/day</b> (${rates.birthsPerDay.toFixed(1)} births, ${rates.deathsPerDay.toFixed(1)} deaths per day, last ${s.rateHistory.length || 0} dawns · ${s.stats.births} born, ${s.stats.deaths} died all time)</p>
       <p>Builders need: <b>${demands.length ? demands[0].type + ": " + demands[0].reason : "nothing pressing"}</b></p>
       <p>Leader: <b>${l ? l.name : "none"}</b> delegates: ${JOBS.map((j) => j + " " + (assigned[j] || 0)).join(" · ")}</p>
-      <p class="muted">Buildings: ${s.buildings.map((b) => b.type).join(", ")}. Town center, granary, roads, and markers are all raised by villagers, never by the god. Huts build themselves when crowded, farms spread when food is short.</p>
+      <h4>Neighbor villages</h4>
+      ${relationsSection(s)}
+      <p class="muted">Buildings: ${ownBuildings(s).map((b) => b.type).join(", ")}. Town center, granary, roads, and markers are all raised by villagers, never by the god. Huts build themselves when crowded, farms spread when food is short.</p>
       <p>Jobs: ${JOBS.map((j) => j + " " + (counts[j] || 0)).join(" · ")}</p>
       <label for="directive-select">Leader directive (a nudge, villagers can disobey)</label>
       <select id="directive-select">
@@ -188,8 +233,22 @@ function renderPanel() {
       const val = $("directive-select").value;
       doGod("directive", null, null, { focusJob: val || null });
     });
-    $("center-village").addEventListener("click", () => renderer.centerOn(24, 24));
+    $("center-village").addEventListener("click", () => renderer.centerOn(s._cx, s._cz));
     $("ask-council")?.addEventListener("click", () => runCouncil(true));
+    document.querySelectorAll("[data-visit]").forEach((btn) => btn.addEventListener("click", () => {
+      const rec = (s.villages || []).find((r) => r.id === Number(btn.dataset.visit));
+      if (!rec) return;
+      renderer.centerOn(rec.center[0], rec.center[1]);
+      doGod("visit", rec.center[0], rec.center[1]);
+    }));
+    document.querySelectorAll("[data-suggest]").forEach((btn) => btn.addEventListener("click", () => {
+      const id = Number(btn.dataset.suggest);
+      const giveGood = document.querySelector(`[data-trade-give="${id}"]`).value;
+      const giveQty = Number(document.querySelector(`[data-trade-giveqty="${id}"]`).value);
+      const wantGood = document.querySelector(`[data-trade-want="${id}"]`).value;
+      const wantQty = Number(document.querySelector(`[data-trade-wantqty="${id}"]`).value);
+      doGod("suggest_trade", null, null, { to: id, give: { good: giveGood, qty: giveQty }, want: { good: wantGood, qty: wantQty } });
+    }));
   }
 }
 
@@ -304,11 +363,19 @@ function enterWorld(w, isServer) {
   if (!renderer) {
     renderer = new Renderer($("scene"), (pick) => {
       if (pick.type === "villager") {
+        // Re-tapping the already-selected villager closes the card.
+        if (pick.id === selectedId) { closePanel(); return; }
         selectedId = pick.id;
         $("panel").classList.add("open");
         renderPanel();
       } else if (pick.type === "ground") {
         if (armed) { doGod(armed, pick.x, pick.z); }
+        else if (selectedId !== null) {
+          // Empty-ground tap with a villager card open closes it
+          // and clears the selection; the cell toast is skipped,
+          // the tap's job was dismissal.
+          closePanel();
+        }
         else if (pick.x >= 0 && pick.x < SIZE && pick.z >= 0 && pick.z < SIZE) {
           const cell = cellAt(world.grid, pick.x, pick.z);
           if (!cell) { toast("Beyond the edge of the known world."); return; }
@@ -399,6 +466,7 @@ function bindUI() {
     $("btn-speed").textContent = world.state.speed + "×";
   });
   $("btn-panel").addEventListener("click", () => { selectedId = null; $("panel").classList.toggle("open"); renderPanel(); });
+  $("panel-close").addEventListener("click", closePanel);
   $("btn-rotate-l").addEventListener("click", () => renderer.rotate(-1));
   $("btn-rotate-r").addEventListener("click", () => renderer.rotate(1));
   $("btn-zoom-in").addEventListener("click", () => renderer.zoomIn());
@@ -458,6 +526,7 @@ function bindUI() {
 }
 
 let lastFrame = performance.now();
+let dwell = { id: null, since: 0, done: false };
 function loop(now) {
   requestAnimationFrame(loop);
   if (!world || !renderer) return;
@@ -477,6 +546,25 @@ function loop(now) {
     }
   }
   renderer.update(s, world.grid, dtReal, now / 1000);
+  // Camera dwell: resting the view within 3 chunks of a village
+  // for 10s counts as walking there — the village stirs and is
+  // discovered, through the same visit action as the Visit button.
+  if (renderer && s.villages) {
+    const tx = renderer.target.x, tz = renderer.target.z;
+    let near = null;
+    for (const rec of s.villages) {
+      const dcx = Math.abs(Math.floor(tx / CHUNK) - Math.floor(rec.center[0] / CHUNK));
+      const dcz = Math.abs(Math.floor(tz / CHUNK) - Math.floor(rec.center[1] / CHUNK));
+      if (Math.max(dcx, dcz) <= 3) { near = rec; break; }
+    }
+    if (near) {
+      if (dwell.id !== near.id) dwell = { id: near.id, since: now, done: false };
+      else if (!dwell.done && now - dwell.since >= 10000) {
+        dwell.done = true;
+        doGod("visit", near.center[0], near.center[1]);
+      }
+    } else dwell = { id: null, since: 0, done: false };
+  }
   // HUD + panel refresh at ~4 Hz, not every frame.
   if (now - (loop._hudAt || 0) > 250) { loop._hudAt = now; renderHUD(); if ($("panel").classList.contains("open")) renderPanel(); }
   // Council loop (local villages only).

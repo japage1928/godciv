@@ -114,7 +114,7 @@ export function rollWeather(state) {
   return { kind, until };
 }
 export function isStudent(state, v) {
-  const school = state.buildings.some((b) => b.type === "school");
+  const school = ownBuildings(state).some((b) => b.type === "school");
   return school && (v.ageDays ?? 25) >= CHILD_DAYS && (v.ageDays ?? 25) <= SCHOOL_MAX_AGE;
 }
 
@@ -328,7 +328,92 @@ export function makeVillageRecord(seed, id, site, otherIds = []) {
     buildings: { towncenter: 1, hut: 2, granary: 1 },
     relations, foundedDay: 1, lastContactDay: 0, warExhaustion: 0,
     jobMix: { farmer: 0.4, woodcutter: 0.2, miner: 0.15, fisher: 0.1, hunter: 0.05, builder: 0.05, hauler: 0.05 },
+    // Phase F diplomacy state. traderDay is deterministic from the
+    // seed: the village's one first-season trader visit, staggered.
+    traderDay: 2 + Math.floor(hash01(seed, id, 7, 504) * 8),
+    traderSent: false, lastEvent: null, tradeSeason: -1, contactSeason: -1,
+    activeDay: 0, lastTriggerDay: 0,
   };
+}
+
+// --- diplomacy helpers: relations, bands, seasons, village scope ---
+
+// The villages' own random stream: distant-village life (abstract
+// ticks, activation spawns, foreign wandering) draws here, never
+// from the player's stream, so a neighbor's dawn can never shift
+// what the player's villagers do next. Deterministic per seed;
+// rebuilt on load like the main stream.
+export function villageRng(state) {
+  if (!state._vrng) state._vrng = mulberry32(((state.seed || 0) ^ 0x5f3759df) >>> 0);
+  return state._vrng;
+}
+
+export function villageRecord(state, id) {
+  return (state.villages || []).find((r) => r.id === id) || null;
+}
+
+export function seasonKey(state) {
+  return yearOf(state.day) * 4 + SEASONS.indexOf(state.season);
+}
+
+export function relationBand(value) {
+  if (value <= -70) return "Hostile";
+  if (value <= -40) return "Rival";
+  if (value < 0) return "Wary";
+  if (value < 30) return "Neutral";
+  if (value < 60) return "Friendly";
+  return "Allied";
+}
+
+// The relation value for a pair. Village 0 is the player's village,
+// which has no record: its side of every pair lives in the neighbor's
+// record (relations[0]). Neighbor pairs keep both views equal.
+export function getRelation(state, a, b) {
+  if (a === b) return 100;
+  const rec = villageRecord(state, a === 0 ? b : a);
+  if (!rec) return 0;
+  return rec.relations[a === 0 ? 0 : b] ?? 0;
+}
+
+export function setRelation(state, a, b, value) {
+  const v = clamp(Math.round(value), -100, 100);
+  const write = (rec, key) => { if (rec) rec.relations[key] = v; };
+  if (a === 0 || b === 0) {
+    const rec = villageRecord(state, a === 0 ? b : a);
+    const before = getRelation(state, a, b);
+    write(rec, 0);
+    if (rec && rec.known) logRelationBand(state, rec, before, v);
+  } else {
+    const ra = villageRecord(state, a), rb = villageRecord(state, b);
+    write(ra, b); write(rb, a);
+  }
+  return v;
+}
+
+function logRelationBand(state, rec, before, after) {
+  const b0 = relationBand(before), b1 = relationBand(after);
+  if (b0 !== b1) log(state, rec.name + " is now " + b1 + ".");
+}
+
+export function adjustRelation(state, a, b, delta) {
+  return setRelation(state, a, b, getRelation(state, a, b) + delta);
+}
+
+export function ownVillagers(state) {
+  return state.villagers.filter((v) => (v.village ?? 0) === 0);
+}
+
+export function ownBuildings(state) {
+  return state.buildings.filter((b) => (b.village ?? 0) === 0);
+}
+
+// The stockpile a village trades from: the player's global pile, or
+// the neighbor record's own pile (the same object the abstract tick
+// and trade write, so activation never copies goods anywhere).
+export function stockpileFor(state, villageId) {
+  if (villageId === 0) return state.stockpile;
+  const rec = villageRecord(state, villageId);
+  return rec ? rec.stockpile : state.stockpile;
 }
 
 export function chunkKey(cx, cz) { return cx + "," + cz; }
@@ -659,10 +744,12 @@ export function newWorld(seed) {
     villageSites: sites,
     villages: sites.map((s, i) => makeVillageRecord(seed, i + 1, s, sites.map((_, j) => j + 1).filter((id) => id !== i + 1))),
     caravans: [], warParties: [], nextCaravanId: 1, nextWarPartyId: 1,
+    pendingEnvoys: [], tradeSeasons: {}, _villageSeasonKey: -1,
   };
   for (const b of state.buildings) cellAt(grid, b.x, b.z).building = b.type;
   state.rngState = null; // runtime only, rebuilt on load
   state._rng = rng;
+  state._vrng = mulberry32((seed ^ 0x5f3759df) >>> 0);
   state._farmCells = farmCells;
   state._oreSpots = oldBlockFor(grid).stoneSpots.filter(([x, z]) => cellAt(grid, x, z).ore > 0);
   state._cx = cx; state._cz = cz;
@@ -679,7 +766,7 @@ export function newWorld(seed) {
 }
 
 export function makeVillager(state, x, z, leader = false, opts = {}) {
-  const rng = state._rng;
+  const rng = opts.rng || state._rng;
   const traits = [];
   while (traits.length < 2) { const t = TRAITS[Math.floor(rng() * TRAITS.length)]; if (!traits.includes(t)) traits.push(t); }
   const skills = {};
@@ -688,8 +775,9 @@ export function makeVillager(state, x, z, leader = false, opts = {}) {
   const goods = {};
   for (const g of Object.keys(PRICES)) goods[g] = 0;
   return {
-    id, name: NAMES[(id - 1) % NAMES.length] + (id > NAMES.length ? " " + Math.ceil(id / NAMES.length) : ""),
-    x, z, path: null, pathTarget: null, job: JOBS[Math.floor(rng() * JOBS.length)],
+    id, name: opts.name || NAMES[(id - 1) % NAMES.length] + (id > NAMES.length ? " " + Math.ceil(id / NAMES.length) : ""),
+    x, z, path: null, pathTarget: null, job: opts.job || JOBS[Math.floor(rng() * JOBS.length)],
+    village: opts.village ?? 0,
     traits, skills, leader,
     ageDays: opts.ageDays ?? (18 + Math.floor(rng() * 22)),
     sex: rng() < 0.5 ? "F" : "M",
@@ -714,16 +802,16 @@ export function homeCapacity(b) {
 }
 
 export function assignHomes(state) {
-  const homes = state.buildings.filter((b) => ["towncenter", "hut", "longhouse", "greathall", "farmhouse"].includes(b.type));
+  const homes = ownBuildings(state).filter((b) => ["towncenter", "hut", "longhouse", "greathall", "farmhouse"].includes(b.type));
   const occ = {};
-  for (const v of state.villagers) {
+  for (const v of ownVillagers(state)) {
     if (v.home) {
       const h = homes.find((b) => key(b.x, b.z) === v.home);
       if (h && (occ[v.home] || 0) < homeCapacity(h)) occ[v.home] = (occ[v.home] || 0) + 1;
       else v.home = null;
     }
   }
-  for (const v of state.villagers) {
+  for (const v of ownVillagers(state)) {
     if (!v.home) {
       const h = homes.find((b) => (occ[key(b.x, b.z)] || 0) < homeCapacity(b));
       if (h) { v.home = key(h.x, h.z); occ[v.home] = (occ[v.home] || 0) + 1; }
@@ -731,16 +819,28 @@ export function assignHomes(state) {
   }
 }
 
-export function homelessCount(state) { return state.villagers.filter((v) => !v.home).length; }
+export function homelessCount(state) { return ownVillagers(state).filter((v) => !v.home).length; }
 
 export function removeVillager(state, v, cause) {
+  const foreign = (v.village ?? 0) !== 0;
   const wasLeader = v.leader;
   state.villagers = state.villagers.filter((o) => o !== v);
+  if (foreign) {
+    // A neighbor's loss is the neighbor's: no faith hit on the
+    // player's village, no succession, no player death stat. The
+    // home village's population drops when it deactivates.
+    const rec = villageRecord(state, v.village);
+    log(state, v.name + " of " + (rec ? rec.name : "a neighbor village") + " dies (" + cause + ").");
+    return;
+  }
   state.faith = clamp(state.faith - 3, 0, 100); state.stats.deaths++;
   log(state, v.name + " dies (" + cause + "). Faith falls.");
-  if (wasLeader && state.villagers.length) {
-    state.villagers[0].leader = true;
-    log(state, state.villagers[0].name + " takes up the leader's staff.");
+  if (wasLeader) {
+    const next = ownVillagers(state)[0];
+    if (next) {
+      next.leader = true;
+      log(state, next.name + " takes up the leader's staff.");
+    }
   }
 }
 
@@ -793,8 +893,23 @@ export function hasShore(grid) {
 // assigns jobs; only the leader does, and only the leader is advised by
 // the council/Ollama layer.
 export function delegateRoles(state, grid = null) {
-  // Students go to school, not to work; toddlers stay home.
-  const villagers = state.villagers.filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v));
+  // Students go to school, not to work; toddlers stay home. Only the
+  // player's own villagers are delegated: neighbor villagers keep
+  // their own hours under their own leader.
+  const villagers = ownVillagers(state).filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v));
+  // A god-suggested trade waits for the leader's judgment at
+  // delegation. The leader accepts only on a real surplus, a real
+  // deficit, warm enough relations, and a free season; otherwise
+  // the suggestion is refused with the reason in the log. The
+  // suggestion clears either way: the leader has weighed it. This
+  // runs before the empty-village return: the decision is the
+  // leader's, not the workforce's. With no grid (a headless
+  // delegation) the suggestion waits.
+  const suggestion = state.directive && state.directive.suggestTrade;
+  if (suggestion && grid) {
+    state.directive.suggestTrade = null;
+    weighTradeSuggestion(state, grid, suggestion);
+  }
   if (!villagers.length) return;
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
@@ -912,21 +1027,46 @@ export function delegateRoles(state, grid = null) {
   assignGuardPosts(state);
 }
 
+function weighTradeSuggestion(state, grid, suggestion) {
+  const rec = villageRecord(state, suggestion.to);
+  const l = leader(state);
+  const who = l ? l.name : "The leader";
+  const refuse = (reason) => log(state, who + " declines the trade with " + (rec ? rec.name : "the village") + ": " + reason + ".");
+  if (!rec || !rec.known) return refuse("the village is unknown");
+  if (getRelation(state, 0, rec.id) < 0) return refuse("relations are too cold");
+  const s = state.stockpile;
+  if ((s[suggestion.give.good] || 0) - suggestion.give.qty < 5) {
+    return refuse("the village cannot spare " + suggestion.give.qty + " " + suggestion.give.good);
+  }
+  if ((s[suggestion.want.good] || 0) >= 15) {
+    return refuse("the village has enough " + suggestion.want.good + " already");
+  }
+  const key = pairKey(0, rec.id) + ":" + seasonKey(state);
+  if ((state.tradeSeasons || {})[key]) return refuse("those villages have already traded this season");
+  if ((state.caravans || []).some((c) => pairKey(c.from, c.to) === pairKey(0, rec.id))) {
+    return refuse("a caravan is already on the road");
+  }
+  const res = dispatchCaravan(state, grid, 0, rec.id, suggestion.give, suggestion.want, false);
+  if (res.ok) {
+    log(state, who + " agrees to the trade with " + rec.name + ": " + suggestion.give.qty + " " + suggestion.give.good + " for " + suggestion.want.qty + " " + suggestion.want.good + ".");
+  } else refuse(res.reason || "the road cannot be found");
+}
+
 // --- guard posts: towers first, then the four gate cells on the wall
 // ring. A post is a plain {x, z, kind} record on the villager; the
 // tower-manning rule reads the assignment, not the villager's position.
 
 export function guardPosts(state) {
   const posts = [];
-  for (const b of state.buildings) if (b.type === "tower") posts.push({ x: b.x, z: b.z, kind: "tower" });
-  const walls = state.buildings.filter((b) => b.type === "wall").length;
+  for (const b of ownBuildings(state)) if (b.type === "tower") posts.push({ x: b.x, z: b.z, kind: "tower" });
+  const walls = ownBuildings(state).filter((b) => b.type === "wall").length;
   if (walls >= 1) {
     const cx = state._cx, cz = state._cz;
     for (const [dx, dz, dir] of [[1, 0, "east"], [-1, 0, "west"], [0, 1, "south"], [0, -1, "north"]]) {
       const x = cx + dx * WALL_RING_R, z = cz + dz * WALL_RING_R;
       if (x < 0 || x >= SIZE || z < 0 || z >= SIZE) continue;
       // A gate cell is open ground on the ring: no building stands there.
-      if (state.buildings.some((b) => b.x === x && b.z === z)) continue;
+      if (state.buildings.some((b) => (b.village ?? 0) === 0 && b.x === x && b.z === z)) continue;
       posts.push({ x, z, kind: "gate", dir });
     }
   }
@@ -962,14 +1102,14 @@ export function assignGuardPosts(state) {
 
 // Is this tower manned by a guard working the post right now?
 export function towerManned(state, t) {
-  return state.villagers.some((v) => v.job === "guard" && v.assignedJob === "guard" && v.health > 0
+  return ownVillagers(state).some((v) => v.job === "guard" && v.assignedJob === "guard" && v.health > 0
     && v.post && v.post.kind === "tower" && v.post.x === t.x && v.post.z === t.z);
 }
 
 export function defenseSummary(state) {
-  const walls = state.buildings.filter((b) => b.type === "wall").length;
-  const towers = state.buildings.filter((b) => b.type === "tower");
-  const guards = state.villagers.filter((v) => v.assignedJob === "guard");
+  const walls = ownBuildings(state).filter((b) => b.type === "wall").length;
+  const towers = ownBuildings(state).filter((b) => b.type === "tower");
+  const guards = ownVillagers(state).filter((v) => v.assignedJob === "guard");
   return {
     walls,
     towers: towers.length,
@@ -1093,9 +1233,12 @@ function setTarget(state, grid, v, x, z) {
 export function runMarket(state) {
   let trades = 0;
   const summaries = [];
+  // The player's market only: neighbor villagers neither buy nor
+  // sell in it (their goods live in their village's record).
+  const own = ownVillagers(state);
   for (let round = 0; round < 3 && trades < 3; round++) {
     let done = false;
-    for (const buyer of state.villagers) {
+    for (const buyer of own) {
       if ((buyer.ageDays ?? 25) < CHILD_DAYS) continue;
       for (const g of Object.keys(PRICES)) {
         const price = PRICES[g];
@@ -1105,7 +1248,7 @@ export function runMarket(state) {
         const wantsMaterial = (g === "wood" || g === "stone") && buyer.job === "builder" && (buyer.goods[g] || 0) === 0;
         const wantsOre = g === "ore" && buyer.traits.includes("greedy") && (buyer.goods.ore || 0) === 0;
         if ((!wantsFood && !wantsMaterial && !wantsOre) || buyer.coins < price) continue;
-        const seller = state.villagers.find((s) => s !== buyer && (s.ageDays ?? 25) >= CHILD_DAYS && (s.goods[g] || 0) > 2);
+        const seller = own.find((s) => s !== buyer && (s.ageDays ?? 25) >= CHILD_DAYS && (s.goods[g] || 0) > 2);
         if (!seller) continue;
         seller.goods[g]--; buyer.goods[g] = (buyer.goods[g] || 0) + 1;
         buyer.coins -= price; seller.coins += price;
@@ -1123,11 +1266,11 @@ export function runMarket(state) {
   // needs a workshop; a fine tool needs a workshop and Bronze craft;
   // a steel tool needs a workshop and Steel works.
   // Coins go to the village fund, ore comes out of the stockpile.
-  const hasWorkshop = state.buildings.some((b) => b.type === "workshop");
+  const hasWorkshop = ownBuildings(state).some((b) => b.type === "workshop");
   if (hasWorkshop) {
     const toolGate = (next) =>
       (next === 1) || (next === 2 && state.tech && state.tech.level >= 1) || (next === 3 && state.tech && state.tech.level >= 3);
-    const buyer = state.villagers.find((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v)
+    const buyer = own.find((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v)
       && (v.tool || 0) < 3 && v.coins >= (TOOL_COSTS[(v.tool || 0) + 1].coins)
       && state.stockpile.ore >= TOOL_COSTS[(v.tool || 0) + 1].ore
       && toolGate((v.tool || 0) + 1));
@@ -1151,7 +1294,7 @@ export function runMarket(state) {
 export function recomputeMorale(state) {
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
-  const pop = Math.max(1, state.villagers.length);
+  const pop = Math.max(1, ownVillagers(state).length);
   const perMouth = edible / pop;
   const homeless = homelessCount(state);
   const kinds = ["food", "fish", "meat"].filter((k) => s[k] > 0).length;
@@ -1178,17 +1321,32 @@ export function recomputeMorale(state) {
 
 export function dawnDemographics(state, birthNeed) {
   let births = 0, deaths = 0;
+  // The player's dawn only: neighbor villagers live in their own
+  // records while abstract and keep their own hours while active.
   // Age a day, then death rolls: children and adults rarely, elders
   // increasingly, the sick more often.
-  for (const v of [...state.villagers]) {
+  for (const v of [...ownVillagers(state)]) {
     v.ageDays = (v.ageDays ?? 25) + 1;
     let p = v.ageDays < CHILD_DAYS ? 0.003 : v.ageDays >= ELDER_DAYS ? 0.02 + (v.ageDays - ELDER_DAYS) * 0.004 : 0.002;
-    // Plague kills only the already weak: the sick with low health,
-    // the old, or the starving. A healthy villager rides it out.
+    // Plague kills the sick, not only the already weak: while a
+    // wave runs and its death budget remains, every sick villager
+    // faces a dawn death roll, steeper for the weak. A sick
+    // villager who dies during the wave dies of the sickness and
+    // spends the budget, so one wave can never take more than a
+    // quarter of the village.
+    const plagueActive = v.sick && state.elapsed <= (state.effects.plagueUntil || -1);
+    const budgetLeft = plagueActive ? (state.effects.plagueBudget ?? disasterKillCap(state)) : 0;
     const weak = v.sick && (v.health < 50 || v.ageDays >= ELDER_DAYS || v.hunger >= 70);
     if (weak) p += 0.05;
+    if (plagueActive && budgetLeft > 0) p += DISASTER_PLAGUE_DAWN_DEATH + (weak ? 0.1 : 0);
     if (state._rng() < p) {
-      const cause = v.ageDays >= ELDER_DAYS ? "old age" : weak ? "sickness" : "a sudden illness";
+      let cause;
+      if (plagueActive && budgetLeft > 0) {
+        cause = "sickness";
+        state.effects.plagueBudget = budgetLeft - 1;
+      } else if (v.ageDays >= ELDER_DAYS) cause = "old age";
+      else if (weak) cause = "sickness";
+      else cause = "a sudden illness";
       removeVillager(state, v, cause); deaths++;
     }
   }
@@ -1196,18 +1354,18 @@ export function dawnDemographics(state, birthNeed) {
   // housing room, and faith. At most 3 births a dawn.
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
-  const fertile = state.villagers.filter((v) => v.ageDays >= CHILD_DAYS && v.ageDays < ELDER_DAYS);
+  const fertile = ownVillagers(state).filter((v) => v.ageDays >= CHILD_DAYS && v.ageDays < ELDER_DAYS);
   const pairs = Math.floor(fertile.length / 2);
   const foodFactor = edible >= birthNeed ? 1.4 : edible >= birthNeed / 2 ? 0.7 : 0.25;
-  const housingFactor = state.villagers.length >= state.populationCap ? 0
-    : state.villagers.length < state.populationCap * 0.7 ? 1.2 : 0.9;
+  const housingFactor = ownVillagers(state).length >= state.populationCap ? 0
+    : ownVillagers(state).length < state.populationCap * 0.7 ? 1.2 : 0.9;
   const faithFactor = 0.7 + state.faith / 200;
   // Morale moves willingness: a hopeful village has more babies.
   const moraleFactor = 0.7 + ((state.morale ?? 60) / 100) * 0.6;
   const pBirth = Math.min(0.9, 0.10 * foodFactor * housingFactor * faithFactor * moraleFactor);
-  const maxBirths = 1 + Math.floor(state.villagers.length / 12);
+  const maxBirths = 1 + Math.floor(ownVillagers(state).length / 12);
   for (let i = 0; i < pairs && births < maxBirths; i++) {
-    if (state.villagers.length >= state.populationCap) break;
+    if (ownVillagers(state).length >= state.populationCap) break;
     if (state._rng() < pBirth) {
       const v = makeVillager(state, state._cx + 1, state._cz + 1, false, { ageDays: 0, coins: 0 });
       state.villagers.push(v); births++; state.stats.births++;
@@ -1216,16 +1374,16 @@ export function dawnDemographics(state, birthNeed) {
   }
   // Dawn share: every adult gets 1 coin from the village's surplus, so
   // no one is locked out of the market forever for being broke.
-  for (const v of state.villagers) if (v.ageDays >= CHILD_DAYS) v.coins = Math.min(20, v.coins + 1);
+  for (const v of ownVillagers(state)) if (v.ageDays >= CHILD_DAYS) v.coins = Math.min(20, v.coins + 1);
   assignHomes(state);
   // The teacher is paid from the village fund for the day's lessons.
-  const hasSchool = state.buildings.some((b) => b.type === "school");
-  const teacher = state.villagers.find((v) => v.assignedJob === "teacher");
+  const hasSchool = ownBuildings(state).some((b) => b.type === "school");
+  const teacher = ownVillagers(state).find((v) => v.assignedJob === "teacher");
   if (hasSchool && teacher && state.fund >= 1) { state.fund -= 1; teacher.coins += 1; }
   // Schooling: students gain education at dawn, faster with a teacher.
   // Education caps at 10 and stays with the villager for life.
   if (hasSchool) {
-    for (const v of state.villagers) {
+    for (const v of ownVillagers(state)) {
       if (isStudent(state, v)) v.education = Math.min(10, (v.education || 0) + (teacher ? 2 : 1));
     }
   }
@@ -1236,7 +1394,7 @@ export function dawnDemographics(state, birthNeed) {
   if (!state.tech) state.tech = { level: 0, progress: 0 };
   if (state.tech.level < TECH_TIERS.length - 1) {
     let gain = 0;
-    for (const v of state.villagers) {
+    for (const v of ownVillagers(state)) {
       if ((v.ageDays ?? 25) <= SCHOOL_MAX_AGE) continue;
       if ((v.education || 0) >= 5) gain += 4;
       else if ((v.education || 0) >= 3) gain += 2;
@@ -1246,7 +1404,7 @@ export function dawnDemographics(state, birthNeed) {
     // at the threshold until the population gate is met.
     const need = techThresholdFor(state.tech.level);
     const popGate = ERA_POP_GATE[state.tech.level + 1] || 0;
-    if (state.tech.progress >= need && state.villagers.length >= popGate) {
+    if (state.tech.progress >= need && ownVillagers(state).length >= popGate) {
       state.tech.level++;
       state.tech.progress = 0;
       if (state.tech.level === TECH_TIERS.length - 1) {
@@ -1265,7 +1423,7 @@ export function demographicRates(state) {
   const h = state.rateHistory || [];
   if (!h.length) return { birthsPerDay: 0, deathsPerDay: 0, birthRate: 0, deathRate: 0 };
   const b = h.reduce((a, r) => a + r.births, 0), d = h.reduce((a, r) => a + r.deaths, 0);
-  const pop = Math.max(1, state.villagers.length);
+  const pop = Math.max(1, ownVillagers(state).length);
   return { birthsPerDay: b / h.length, deathsPerDay: d / h.length, birthRate: (b / h.length / pop) * 100, deathRate: (d / h.length / pop) * 100 };
 }
 
@@ -1280,15 +1438,15 @@ export function canAfford(state, type) {
 export function computeDemands(state, grid) {
   const s = state.stockpile;
   const edible = s.food + s.fish + s.meat;
-  const pop = state.villagers.length;
-  const built = (t) => state.buildings.some((b) => b.type === t);
+  const pop = ownVillagers(state).length;
+  const built = (t) => ownBuildings(state).some((b) => b.type === t);
   const queued = (t) => state.buildQueue.some((q) => q.type === t);
   const homeless = homelessCount(state);
-  const hutTotal = state.buildings.filter((b) => b.type === "hut" || b.type === "longhouse").length
+  const hutTotal = ownBuildings(state).filter((b) => b.type === "hut" || b.type === "longhouse").length
     + state.buildQueue.filter((q) => q.type === "hut" || q.type === "longhouse").length;
   const demands = [];
   const crowded = pop >= state.populationCap - 2;
-  const dwellings = state.buildings.filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
+  const dwellings = ownBuildings(state).filter((b) => ["hut", "longhouse", "greathall"].includes(b.type));
   const hutScore = homeless * 3 + (crowded ? 4 : 0) + (state.day >= 2 && hutTotal < 2 ? 3 : 0);
   if (hutScore > 0) {
     const spot = grid ? !!findHutSpot(state, grid) : true;
@@ -1303,8 +1461,8 @@ export function computeDemands(state, grid) {
   // an old hut, and surplus wood and stone. The prosperity trigger
   // exists because in the 30-day playtest the cap always jumped ahead
   // of population, so crowding-only upgrades never fired at all.
-  const huts = state.buildings.filter((b) => b.type === "hut");
-  const longhouses = state.buildings.filter((b) => b.type === "longhouse");
+  const huts = ownBuildings(state).filter((b) => b.type === "hut");
+  const longhouses = ownBuildings(state).filter((b) => b.type === "longhouse");
   const oldestHutAge = huts.length ? state.day - Math.min(...huts.map((b) => b.builtDay || 1)) : 0;  const prosperous = s.wood >= 40 && s.stone >= 20 && oldestHutAge >= 8;
   const nearCrowded = pop >= state.populationCap - 4;
   if ((nearCrowded || prosperous) && dwellings.length >= 4 && huts.length && !queued("longhouse")) {
@@ -1315,7 +1473,7 @@ export function computeDemands(state, grid) {
   }
   // Farmsteads: a farmhouse anchors a farm district. Demand rises with
   // mouths to feed and with fields that have no farmhouse nearby.
-  const farmhouses = state.buildings.filter((b) => b.type === "farmhouse");
+  const farmhouses = ownBuildings(state).filter((b) => b.type === "farmhouse");
   const farmNeed = pop * 4;
   const unanchored = state._farmCells ? state._farmCells.filter(([x, z]) => !farmhouses.some((f) => Math.hypot(x - f.x, z - f.z) <= 5)).length : 0;
   if (!queued("farmhouse") && (edible < farmNeed || unanchored >= 12) && pop >= 8) {
@@ -1349,11 +1507,11 @@ export function computeDemands(state, grid) {
   // Walls are capped so the ring never paves the whole map. Once the
   // inner ring is established, a bigger village raises a second ring
   // at OUTER_WALL_RING_R; a third ring is one more demand rule away.
-  const ringCount = (R) => state.buildings.filter((b) => b.type === "wall" && Math.max(Math.abs(b.x - state._cx), Math.abs(b.z - state._cz)) === R).length
+  const ringCount = (R) => ownBuildings(state).filter((b) => b.type === "wall" && Math.max(Math.abs(b.x - state._cx), Math.abs(b.z - state._cz)) === R).length
     + state.buildQueue.filter((q) => q.type === "wall" && Math.max(Math.abs(q.x - state._cx), Math.abs(q.z - state._cz)) === R).length;
-  const wallCount = state.buildings.filter((b) => b.type === "wall").length
+  const wallCount = ownBuildings(state).filter((b) => b.type === "wall").length
     + state.buildQueue.filter((q) => q.type === "wall").length;
-  const towerCount = state.buildings.filter((b) => b.type === "tower").length
+  const towerCount = ownBuildings(state).filter((b) => b.type === "tower").length
     + state.buildQueue.filter((q) => q.type === "tower").length;
   if (state.tech && state.tech.level >= 2 && pop >= 12 && ringCount(WALL_RING_R) < 40 && !queued("wall")) {
     demands.push({ type: "wall", ring: WALL_RING_R, score: 3.5, reason: "Iron craft brings wariness: the village needs a wall ring." });
@@ -2170,13 +2328,84 @@ export const RAID_MIN_TECH = 2;
 export const RAID_GAP_DAYS = 8;
 export const RAID_WARN_DAYS = 1;
 export const RAID_SIZE_CAP = 10;
+export const VILLAGE_COUNT = 3;
+export const CARAVAN_CAPACITY = 20;
+export const CARAVAN_BAND_BONUS = 10;
+export const CARAVAN_PATH_STEPS = 60000;
+export const ENVOY_COOLDOWN_DAYS = 5;
+export const DEACTIVATE_AFTER_DAYS = 5;
 export const GUARD_DAMAGE_BASE = 3;
 export const GUARD_POST_RADIUS = 12;
 export const GUARD_CAP = 6;
 export const GUARD_BREAK_HEALTH = 25;
 export const TOWER_RANGE = 7;
+// Disasters must move the population, visibly, but one use never
+// wipes the village: no single disaster kills more than a quarter
+// of the player's people (at least 1 in a tiny village). The same
+// cap bounds the plague wave's dawn deaths.
+export const DISASTER_MAX_FRACTION = 0.25;
+export const DISASTER_FIRE_RADIUS = 4;
+export const DISASTER_FIRE_DAMAGE = 30;
+export const DISASTER_FIRE_MAX_BURNED = 3;
+export const DISASTER_QUAKE_RADIUS = 6;
+export const DISASTER_QUAKE_DAMAGE = 60;
+export const DISASTER_QUAKE_MAX_COLLAPSED = 2;
+export const DISASTER_FLOOD_RADIUS = 14;
+export const DISASTER_FLOOD_LOW_H = 0.35;
+export const DISASTER_FLOOD_DAMAGE = 20;
+export const DISASTER_PLAGUE_DAYS = 1;
+export const DISASTER_PLAGUE_SICK_CHANCE = 0.4;
+export const DISASTER_PLAGUE_DAWN_DEATH = 0.35;
+export function disasterKillCap(state) {
+  return Math.max(1, Math.floor(ownVillagers(state).length * DISASTER_MAX_FRACTION));
+}
 const BUILDING_HP = { wall: 30, tower: 60 };
 function buildingHp(b) { return BUILDING_HP[b.type] || 25; }
+
+// Remove one building from the world: the list, its cell, and the
+// renderer's chunk indexes. Callers re-home villagers afterwards.
+function removeBuilding(state, grid, b) {
+  state.buildings = state.buildings.filter((o) => o !== b);
+  const c = cellAt(grid, b.x, b.z);
+  if (c) { c.building = null; c.blocked = false; noteMutation(grid, b.x, b.z); }
+}
+
+// Damage the player's buildings in `targets` order (nearest first).
+// At most maxCollapse may fall to this one disaster; the rest take
+// their damage but are held just short of collapse, so one use
+// scars the village without levelling it. The town center never
+// falls to a disaster. Returns { destroyed, damaged }.
+function damageBuildings(state, grid, targets, dmg, maxCollapse, verb) {
+  let destroyed = 0, damaged = 0;
+  for (const b of targets) {
+    if (b.type === "towncenter") continue;
+    b.damage = (b.damage || 0) + dmg;
+    if (b.damage >= buildingHp(b) && destroyed < maxCollapse) {
+      removeBuilding(state, grid, b);
+      log(state, "The " + b.type + " " + verb + "!");
+      destroyed++;
+    } else {
+      if (b.damage >= buildingHp(b)) b.damage = buildingHp(b) - 1;
+      damaged++;
+    }
+  }
+  if (destroyed || damaged) assignHomes(state);
+  return { destroyed, damaged };
+}
+
+// Kill up to `cap` villagers from `candidates` (the player's own),
+// weakest first, through the normal death path: a named log line,
+// a faith hit, and stats.deaths. Returns the villagers killed.
+function disasterKill(state, candidates, cause, cap) {
+  const killed = [];
+  const sorted = [...candidates].sort((a, b) => a.health - b.health);
+  for (const v of sorted) {
+    if (killed.length >= cap) break;
+    removeVillager(state, v, cause);
+    killed.push(v);
+  }
+  return killed;
+}
 
 export function nearestRaider(state, x, z, maxD) {
   let best = null, bestD = maxD;
@@ -2307,6 +2536,482 @@ function resolveRaid(state) {
   state._raidStats = null;
 }
 
+// --- neighbor villages (Phase F): abstract life, activation, trade ---
+// A neighbor village lives in its record while distant (one abstract
+// tick per dawn) and as real villagers and buildings while the god
+// is near. The two forms hold the same numbers: activation converts
+// exactly, deactivation converts back exactly. Nothing is created
+// or destroyed at the boundary except the villagers' positions.
+
+function stepForeignVillager(state, grid, v, dt) {
+  const rec = villageRecord(state, v.village);
+  const [cx, cz] = rec ? rec.center : [state._cx, state._cz];
+  const phase = phaseOf(state.time);
+  // A raider close by sends a neighbor villager running now, not
+  // at the next rethink: the same rule the player's villagers get.
+  if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
+    v.state = "flee"; v.rethinkAt = state.elapsed;
+  }
+  if (v.state === "flee") {
+    if (v.fear < 20) { v.state = "idle"; v.target = null; v.path = null; }
+    else if (!v.target) {
+      const r = nearestRaider(state, v.x, v.z, 30);
+      const ax = r ? r.x : cx, az = r ? r.z : cz;
+      const ang = Math.atan2(v.z - az, v.x - ax);
+      setTarget(state, grid, v, clamp(Math.round(v.x + Math.cos(ang) * 6), 0, SIZE - 1), clamp(Math.round(v.z + Math.sin(ang) * 6), 0, SIZE - 1));
+    }
+  } else if (!v.target && state.elapsed >= v.rethinkAt) {
+    const vrng = villageRng(state);
+    v.rethinkAt = state.elapsed + 4 + vrng() * 3;
+    // Mill around home: a short wander inside the cleared site.
+    if (phase !== "night" || vrng() < 0.3) {
+      setTarget(state, grid, v, clamp(Math.round(cx + (vrng() * 10 - 5)), 0, SIZE - 1), clamp(Math.round(cz + (vrng() * 10 - 5)), 0, SIZE - 1));
+    }
+  }
+  // Movement: the same path-following the player's villagers use,
+  // minus work. Arrival clears the target and settles the villager.
+  if (v.path && v.path.length) {
+    const [px, pz] = v.path[0];
+    const dx = px + 0.5 - v.x, dz = pz + 0.5 - v.z, dist = Math.hypot(dx, dz);
+    if (dist < 0.25) v.path.shift();
+    else {
+      const wkind = state.weather ? state.weather.kind : "clear";
+      const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1;
+      const sp = (v.state === "flee" ? 3.4 : 2.2) * moveFactor * dt;
+      v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist);
+    }
+  } else if (v.target) {
+    const dx = v.target[0] + 0.5 - v.x, dz = v.target[1] + 0.5 - v.z, dist = Math.hypot(dx, dz);
+    const tc = peekCell(grid, v.target[0], v.target[1]);
+    if (dist < 1.1 || !tc || tc.blocked) { v.target = null; v.path = null; v.state = "idle"; }
+    else { const sp = (v.state === "flee" ? 3.4 : 2.2) * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); }
+  }
+  if (v.state === "flee") v.fear = clamp(v.fear - dt * 8, 0, 100);
+}
+
+// One dawn of abstract life for a distant village: the fixed job mix
+// produces and eats at the player's per-worker rates, capped so a
+// village left alone for a season cannot balloon or starve to zero
+// in a single tick. Births and deaths are small chances, bounded.
+export function abstractVillageTick(state, rec) {
+  const rng = villageRng(state);
+  const pop = Math.max(0, rec.pop);
+  const mix = rec.jobMix;
+  const produce = {
+    food: pop * (mix.farmer * 2.4 + mix.fisher * 1.2 + mix.hunter * 1.5),
+    fish: pop * mix.fisher * 0.8,
+    meat: pop * mix.hunter * 0.6,
+    wood: pop * mix.woodcutter * 1.8,
+    stone: pop * mix.miner * 0.8,
+    ore: pop * mix.miner * 0.3,
+  };
+  const consume = {
+    food: pop * 1.1, fish: pop * 0.1, meat: pop * 0.05,
+    wood: pop * 0.1, stone: 0, ore: 0,
+  };
+  for (const g of Object.keys(produce)) {
+    rec.stockpile[g] = clamp((rec.stockpile[g] || 0) + produce[g] - (consume[g] || 0), 0, 200);
+  }
+  if (rng() < pop * 0.012 && pop < rec.popCap) rec.pop = pop + 1;
+  if (rng() < pop * 0.01 && pop > 3) rec.pop = Math.max(3, pop - 1);
+  rec.coins = clamp(rec.coins + 1, 0, 80);
+  const need = techThresholdFor(rec.techLevel);
+  if (rec.techLevel < TECH_TIERS.length - 1) {
+    rec.techProgress = (rec.techProgress || 0) + 2;
+    if (rec.techProgress >= need) { rec.techLevel++; rec.techProgress = 0; }
+  }
+  rec.morale = clamp(rec.morale + (50 - rec.morale) * 0.1, 0, 100);
+}
+
+// Discovery: the god learns a village exists. First trader arrival,
+// an envoy, or walking within 3 chunks all discover it. Discovery
+// is one-way and logged once.
+export function discoverVillage(state, rec, how) {
+  if (!rec || rec.known) return false;
+  rec.known = true;
+  rec.lastContactDay = state.day;
+  log(state, "You discover " + rec.name + ", led by " + rec.leaderName + " (" + how + ").");
+  return true;
+}
+
+// A trigger keeps a village active: a caravan moving, an envoy, or
+// the camera dwelling nearby. The dawn hook converts triggers into
+// activations and stale villages back into records.
+export function touchVillage(state, grid, rec) {
+  if (!rec) return;
+  rec.lastTriggerDay = state.day;
+  if (!rec.active && grid) activateVillage(state, grid, rec, false);
+}
+
+// Materialize a village: generate its chunks, place its buildings,
+// spawn its people. Exact conversion: pop villagers, building
+// counts from the record, the stockpile stays in the record.
+export function activateVillage(state, grid, rec, silent = false) {
+  if (!rec || rec.active) return false;
+  if (!grid) return false;
+  const [cx, cz] = rec.center;
+  // Generate the 3x3 chunks around the center first: the founding
+  // buildings land on real, cleared ground.
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const gx = cx + dx * CHUNK, gz = cz + dz * CHUNK;
+    if (gx >= 0 && gz >= 0 && gx < SIZE && gz < SIZE) {
+      const [ccx, ccz] = chunkOf(gx, gz);
+      getChunk(grid, ccx, ccz);
+    }
+  }
+  const placed = placeVillageBuildings(state, grid, rec);
+  const rng = villageRng(state);
+  const jobs = Object.keys(rec.jobMix);
+  let spawned = 0;
+  for (let i = 0; i < rec.pop; i++) {
+    const job = jobs[Math.floor(rng() * jobs.length)] || "hauler";
+    const v = makeVillager(state, cx + Math.round(rng() * 6 - 3), cz + Math.round(rng() * 6 - 3), false, {
+      village: rec.id, job, ageDays: 18 + Math.floor(rng() * 30), rng,
+    });
+    if (i === 0) { v.leader = true; v.name = rec.leaderName; }
+    state.villagers.push(v);
+    spawned++;
+  }
+  rec.active = true;
+  rec.activeDay = state.day;
+  rec.lastTriggerDay = state.day;
+  if (!silent) log(state, rec.name + " stirs. " + spawned + " villagers go about their day.");
+  return true;
+}
+
+function placeVillageBuildings(state, grid, rec) {
+  // Fixed offsets from the center: town center at home, huts and
+  // granary around it. Cells are already cleared by site generation;
+  // buildings land on land, never on water.
+  const [cx, cz] = rec.center;
+  const layout = [];
+  layout.push(["towncenter", 0, 0]);
+  const huts = rec.buildings.hut || 0;
+  const hutOffsets = [[-2, -2], [2, -2], [-2, 2], [2, 2], [0, -3], [0, 3], [-3, 0], [3, 0]];
+  for (let i = 0; i < huts; i++) layout.push(["hut", hutOffsets[i % hutOffsets.length][0], hutOffsets[i % hutOffsets.length][1]]);
+  if (rec.buildings.granary) layout.push(["granary", -3, 3]);
+  if (rec.buildings.longhouse) layout.push(["longhouse", 3, -3]);
+  if (rec.buildings.workshop) layout.push(["workshop", -3, -3]);
+  let placed = 0;
+  for (const [type, dx, dz] of layout) {
+    const x = cx + dx, z = cz + dz;
+    const c = cellAt(grid, x, z);
+    if (!c || c.water || c.building) continue;
+    c.building = type; c.blocked = true; noteMutation(grid, x, z);
+    state.buildings.push({ type, x, z, done: true, builtDay: state.day, village: rec.id });
+    placed++;
+  }
+  return placed;
+}
+
+// Send a village back to its record: pop becomes the live count,
+// building counts become the live counts, villagers and buildings
+// despawn. Exact conversion, silent unless a battle just ended.
+export function deactivateVillage(state, grid, rec) {
+  if (!rec || !rec.active) return false;
+  const live = state.villagers.filter((v) => v.village === rec.id);
+  rec.pop = clamp(live.length, 3, rec.popCap);
+  const counts = {};
+  for (const b of state.buildings.filter((b) => b.village === rec.id)) {
+    counts[b.type] = (counts[b.type] || 0) + 1;
+  }
+  rec.buildings = counts;
+  state.villagers = state.villagers.filter((v) => v.village !== rec.id);
+  for (const b of state.buildings.filter((b) => b.village === rec.id)) {
+    const c = peekCell(grid, b.x, b.z);
+    if (c && c.building === b.type) { c.building = null; c.blocked = c.water; noteMutation(grid, b.x, b.z); }
+  }
+  state.buildings = state.buildings.filter((b) => b.village !== rec.id);
+  rec.active = false;
+  return true;
+}
+
+export function dawnVillages(state, grid) {
+  const sKey = seasonKey(state);
+  const sChanged = state._villageSeasonKey !== sKey;
+  state._villageSeasonKey = sKey;
+  for (const rec of state.villages || []) {
+    if (!rec.active) abstractVillageTick(state, rec);
+    // First trader: one caravan per village in the first season,
+    // staggered by the deterministic traderDay.
+    if (!rec.traderSent && state.day >= rec.traderDay) {
+      const res = dispatchCaravan(state, grid, rec.id, 0, null, null, true);
+      if (res.ok) rec.traderSent = true;
+    }
+    // Season drift: relations drift 1 per season toward 0 when
+    // there has been no contact this season; completed trades and
+    // envoy contact count as contact.
+    if (sChanged) {
+      if (rec.contactSeason !== sKey) {
+        const cur = getRelation(state, 0, rec.id);
+        if (cur !== 0) adjustRelation(state, 0, rec.id, cur > 0 ? -1 : 1);
+      }
+      rec.contactSeason = -1;
+    }
+    // Envoy arrivals resolve at dawn.
+    if (state.pendingEnvoys) {
+      for (const e of [...state.pendingEnvoys]) {
+        if (e.to !== rec.id) continue;
+        state.pendingEnvoys = state.pendingEnvoys.filter((o) => o !== e);
+        discoverVillage(state, rec, "your envoy arrives");
+        adjustRelation(state, 0, rec.id, 3);
+        rec.lastEvent = "Envoy exchanged greetings (+3).";
+        rec.contactSeason = sKey;
+        log(state, rec.leaderName + " of " + rec.name + " welcomes your envoy. Relations warm (+3).");
+      }
+    }
+    // Deactivation: five quiet game-days with no trigger, no
+    // caravan in flight to or from the village, and no raiders
+    // within 20 cells of its center.
+    if (rec.active && state.day - (rec.lastTriggerDay || 0) >= DEACTIVATE_AFTER_DAYS) {
+      const busy = (state.caravans || []).some((c) => c.from === rec.id || c.to === rec.id);
+      const raidersNear = (state.raiders || []).some((r) => Math.hypot(r.x - rec.center[0], r.z - rec.center[1]) < 20);
+      if (!busy && !raidersNear) deactivateVillage(state, grid, rec);
+    }
+  }
+}
+
+export function caravanCapacity(state, a, b) {
+  const rel = getRelation(state, a, b);
+  let cap = CARAVAN_CAPACITY;
+  if (rel >= 60) cap += 2 * CARAVAN_BAND_BONUS;
+  else if (rel >= 30) cap += CARAVAN_BAND_BONUS;
+  return cap;
+}
+
+function pairKey(a, b) { return Math.min(a, b) + "-" + Math.max(a, b); }
+
+// Generate every chunk the straight line between two points
+// crosses, plus its neighbors, so a caravan's pathfinding sees
+// real terrain instead of the ungenerated void (which reads as
+// blocked) and has room to route around lakes.
+function generateCorridor(grid, x0, z0, x1, z1) {
+  const steps = Math.max(Math.abs(x1 - x0), Math.abs(z1 - z0), 1);
+  const seen = new Set();
+  for (let i = 0; i <= steps; i++) {
+    const x = Math.round(x0 + (x1 - x0) * (i / steps));
+    const z = Math.round(z0 + (z1 - z0) * (i / steps));
+    const [ccx, ccz] = chunkOf(x, z);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const nx = ccx + dx, nz = ccz + dz;
+      if (nx < 0 || nz < 0 || nx >= CHUNKS_ACROSS || nz >= CHUNKS_ACROSS) continue;
+      const k = chunkKey(nx, nz);
+      if (!seen.has(k)) { seen.add(k); getChunk(grid, nx, nz); }
+    }
+  }
+}
+
+// Send a caravan from one village to another. The path is computed
+// FIRST: no path means no trade and nothing moves. Goods leave the
+// origin stockpile at dispatch; the exchange settles at arrival.
+export function dispatchCaravan(state, grid, from, to, give = null, want = null, scheduled = false) {
+  const fromRec = villageRecord(state, from), toRec = villageRecord(state, to);
+  if (from === to) return { ok: false, reason: "A village cannot trade with itself." };
+  if ((state.caravans || []).some((c) => pairKey(c.from, c.to) === pairKey(from, to))) {
+    return { ok: false, reason: "A caravan is already traveling between those villages." };
+  }
+  if (getRelation(state, from, to) < 0) {
+    return { ok: false, reason: "Relations are too cold for trade." };
+  }
+  const sKey = seasonKey(state);
+  if (!scheduled) {
+    const key = pairKey(from, to) + ":" + sKey;
+    if ((state.tradeSeasons || {})[key]) return { ok: false, reason: "Those villages have already traded this season." };
+  }
+  const fromStock = stockpileFor(state, from);
+  const toStock = stockpileFor(state, to);
+  const cap = caravanCapacity(state, from, to);
+  let giveGood, giveQty, wantGood, wantQty;
+  if (!give) {
+    // First trader / auto offer: send the largest surplus, ask for
+    // the scarcest staple.
+    let best = null;
+    for (const g of Object.keys(PRICES)) if ((fromStock[g] || 0) >= 10 && (!best || fromStock[g] > fromStock[best])) best = g;
+    if (!best) {
+      log(state, (fromRec ? fromRec.name : "The village") + " has nothing to spare for a trader.");
+      return { ok: false, reason: "Nothing to spare." };
+    }
+    giveGood = best; giveQty = Math.min(10, Math.floor(fromStock[best]), cap);
+    const scarcest = ["food", "fish", "meat", "wood", "stone", "ore"].reduce((a, b) => (fromStock[a] || 0) <= (fromStock[b] || 0) ? a : b);
+    wantGood = scarcest; wantQty = Math.min(giveQty, cap);
+  } else {
+    giveGood = give.good; giveQty = Math.floor(give.qty);
+    wantGood = want.good; wantQty = Math.floor(want.qty);
+    if (!PRICES[giveGood] || !PRICES[wantGood]) return { ok: false, reason: "Unknown goods." };
+    if (giveQty < 1 || wantQty < 1 || giveQty > cap || wantQty > cap) {
+      return { ok: false, reason: "The load is outside the caravan's capacity (" + cap + ")." };
+    }
+    if ((fromStock[giveGood] || 0) < giveQty) return { ok: false, reason: "The origin does not hold that much " + giveGood + "." };
+    if ((toStock[wantGood] || 0) < wantQty) return { ok: false, reason: "The destination does not hold that much " + wantGood + "." };
+  }
+  const [fx, fz] = from === 0 ? [state._cx, state._cz] : fromRec.center;
+  const [tx, tz] = to === 0 ? [state._cx, state._cz] : toRec.center;
+  generateCorridor(grid, fx, fz, tx, tz);
+  // The default step cap scales with the settled active set and
+  // starves a cross-map BFS: the corridor band floods before the
+  // target is reached. A caravan dispatch is rare (one per pair
+  // per season), so it gets an explicit generous cap.
+  const path = findPath(grid, fx, fz, tx, tz, CARAVAN_PATH_STEPS);
+  if (!path || !path.length) {
+    log(state, "No road can be found between the villages. The caravan stays home.");
+    return { ok: false, reason: "No path between the villages." };
+  }
+  fromStock[giveGood] -= giveQty;
+  const caravan = {
+    id: state.nextCaravanId++, from, to,
+    give: giveGood, giveQty, want: wantGood, wantQty,
+    load: { [giveGood]: giveQty },
+    path, x: fx + 0.5, z: fz + 0.5, state: "out",
+    scheduled: !!scheduled, robbed: 0, held: false, fled: false,
+  };
+  state.caravans.push(caravan);
+  if (!scheduled) {
+    if (!state.tradeSeasons) state.tradeSeasons = {};
+    state.tradeSeasons[pairKey(from, to) + ":" + sKey] = true;
+  }
+  // A departure stirs both ends: villages activate on the trigger.
+  if (fromRec) touchVillage(state, grid, fromRec);
+  if (toRec) touchVillage(state, grid, toRec);
+  return { ok: true, caravan };
+}
+
+function caravanDestination(state, c) {
+  const leg = (c.state === "waiting" ? (c.prevState || "out") : c.state) === "out" ? c.to : c.from;
+  if (leg === 0) return [state._cx, state._cz];
+  const rec = villageRecord(state, leg);
+  return rec ? rec.center : [state._cx, state._cz];
+}
+
+function moveCoins(state, fromId, toId, amount) {
+  if (amount <= 0) return 0;
+  const get = (id) => id === 0 ? state.fund : ((villageRecord(state, id) || {}).coins || 0);
+  const set = (id, v) => { if (id === 0) state.fund = v; else { const r = villageRecord(state, id); if (r) r.coins = v; } };
+  const paid = Math.min(amount, get(fromId));
+  set(fromId, get(fromId) - paid);
+  set(toId, get(toId) + paid);
+  return paid;
+}
+
+function arriveCaravan(state, grid, c) {
+  const destRec = villageRecord(state, c.to);
+  const fromRec = villageRecord(state, c.from);
+  const destStock = stockpileFor(state, c.to);
+  // Deliver the load, take the return goods, settle the coin
+  // difference between the two funds. Quantities clamp to what is
+  // actually there: stocks move while a caravan is on the road.
+  const deliverQty = c.load[c.give] || 0;
+  destStock[c.give] = (destStock[c.give] || 0) + deliverQty;
+  const takeQty = Math.min(c.wantQty, destStock[c.want] || 0);
+  destStock[c.want] = (destStock[c.want] || 0) - takeQty;
+  const coinsDue = deliverQty * PRICES[c.give] - takeQty * PRICES[c.want];
+  if (coinsDue > 0) moveCoins(state, c.to, c.from, coinsDue);
+  else if (coinsDue < 0) moveCoins(state, c.from, c.to, -coinsDue);
+  // A completed trade warms relations, at most +2 per season per pair.
+  const sKey = seasonKey(state);
+  const pairRec = fromRec || destRec;
+  if (pairRec && pairRec.tradeSeason !== sKey) {
+    pairRec.tradeSeason = sKey;
+    adjustRelation(state, c.from, c.to, 2);
+  }
+  if (pairRec) {
+    pairRec.lastEvent = "Traded " + deliverQty + " " + c.give + " for " + takeQty + " " + c.want + ".";
+    pairRec.contactSeason = sKey;
+    pairRec.lastContactDay = state.day;
+  }
+  // Arrival discovers: the first trader, or the god's own trader
+  // reaching a village the god has never seen.
+  if (c.to === 0 && fromRec) discoverVillage(state, fromRec, "a trader arrives");
+  if (c.from === 0 && destRec) discoverVillage(state, destRec, "your trader arrives");
+  const fromName = fromRec ? fromRec.name : "your village";
+  const toName = destRec ? destRec.name : "your village";
+  log(state, "A trader from " + fromName + " reaches " + toName + ": " + deliverQty + " " + c.give + " for " + takeQty + " " + c.want + ".");
+  c.load = takeQty > 0 ? { [c.want]: takeQty } : {};
+  c.state = "home";
+  const [hx, hz] = caravanDestination(state, c);
+  const path = findPath(grid, Math.round(c.x), Math.round(c.z), hx, hz, CARAVAN_PATH_STEPS);
+  if (path && path.length) c.path = path;
+  else { c.prevState = "home"; c.state = "waiting"; c.path = null; }
+  if (fromRec) touchVillage(state, grid, fromRec);
+  if (destRec) touchVillage(state, grid, destRec);
+}
+
+function returnCaravan(state, c) {
+  const originStock = stockpileFor(state, c.from);
+  for (const [g, q] of Object.entries(c.load)) originStock[g] = (originStock[g] || 0) + q;
+  state.caravans = state.caravans.filter((o) => o !== c);
+  const fromRec = villageRecord(state, c.from);
+  log(state, "The trader returns to " + (fromRec ? fromRec.name : "your village")
+    + (c.robbed ? ", robbed of " + c.robbed + " goods on the road." : "."));
+}
+
+export function stepCaravans(state, grid, dt) {
+  for (const c of [...(state.caravans || [])]) {
+    // Arrival is positional, not path-emptiness: a path recomputed
+    // from an adjacent cell always returns one more step, so a
+    // caravan waiting on an empty path would oscillate forever.
+    // Within a cell and a half of the leg's destination, the leg
+    // resolves: the trader has reached the village.
+    const dest = caravanDestination(state, c);
+    if (Math.hypot(c.x - (dest[0] + 0.5), c.z - (dest[1] + 0.5)) < 1.5) {
+      const leg = c.state === "waiting" ? (c.prevState || "out") : c.state;
+      if (leg === "out") arriveCaravan(state, grid, c);
+      else returnCaravan(state, c);
+      continue;
+    }
+    // Held up: a raider adjacent to a laden caravan stops it cold.
+    c.held = (state.raiders || []).some((r) => Math.hypot(r.x - c.x, r.z - c.z) < 1.3) && Object.keys(c.load).length > 0;
+    if (c.held) continue;
+    if (c.state === "waiting") {
+      const dest = caravanDestination(state, c);
+      const path = findPath(grid, Math.round(c.x), Math.round(c.z), dest[0], dest[1], CARAVAN_PATH_STEPS);
+      if (path && path.length) { c.path = path; c.state = c.prevState || "out"; }
+      continue;
+    }
+    if (!c.path || !c.path.length) {
+      if (c.state === "out") { arriveCaravan(state, grid, c); continue; }
+      // Home or fleeing with no route: route home, or if already
+      // there, deposit the load and leave.
+      const dest = caravanDestination(state, c);
+      const path = findPath(grid, Math.round(c.x), Math.round(c.z), dest[0], dest[1], CARAVAN_PATH_STEPS);
+      if (path && path.length) { c.path = path; continue; }
+      returnCaravan(state, c);
+      continue;
+    }
+    const [px, pz] = c.path[0];
+    const dx = px + 0.5 - c.x, dz = pz + 0.5 - c.z, dist = Math.hypot(dx, dz);
+    if (dist < 0.25) { c.path.shift(); continue; }
+    const sp = (c.state === "fleeing" ? 3.4 : 2.2) * dt;
+    c.x += (dx / dist) * Math.min(sp, dist);
+    c.z += (dz / dist) * Math.min(sp, dist);
+  }
+}
+
+function nearestLadenCaravan(state, x, z, maxD) {
+  let best = null, bestD = maxD;
+  for (const c of state.caravans || []) {
+    if (!Object.keys(c.load).length || c.state === "fleeing") continue;
+    const d = Math.hypot(c.x - x, c.z - z);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+
+function stealFromCaravan(state, c, n) {
+  const g = Object.keys(c.load)[0];
+  if (!g) return 0;
+  const take = Math.min(n, c.load[g]);
+  c.load[g] -= take;
+  if (c.load[g] <= 0) delete c.load[g];
+  c.robbed = (c.robbed || 0) + take;
+  if (!Object.keys(c.load).length && !c.fled) {
+    c.fled = true;
+    c.state = "fleeing";
+    adjustRelation(state, c.from, c.to, -3);
+    log(state, "Raiders rob the trader bare. Word of it sours relations (-3).");
+  }
+  return take;
+}
+
 function stepRaiders(state, grid, dt) {
   if (!state.raiders.length) {
     if (state.raidActive) resolveRaid(state);
@@ -2370,6 +3075,25 @@ function stepRaiders(state, grid, dt) {
       if (victim.health <= 0) {
         removeVillager(state, victim, "slain by raiders");
         if (state._raidStats) state._raidStats.deaths++;
+      }
+      continue;
+    }
+    // Caravans on the road are worth robbing: a raider within 8
+    // cells of a laden caravan diverts to it and steals 2 goods
+    // per 2 seconds while adjacent. A caravan robbed empty flees.
+    const caravan = nearestLadenCaravan(state, r.x, r.z, 8);
+    if (caravan) {
+      const d = Math.hypot(caravan.x - r.x, caravan.z - r.z);
+      if (d < 1.3) {
+        if (state.elapsed >= r.stealAt) {
+          r.stealAt = state.elapsed + 2;
+          const stolen = stealFromCaravan(state, caravan, 2);
+          r.loot += stolen;
+          if (state._raidStats) state._raidStats.stolen += stolen;
+        }
+        caravan.held = true;
+      } else {
+        moveRaider(state, grid, r, Math.round(caravan.x), Math.round(caravan.z), dt);
       }
       continue;
     }
@@ -2453,7 +3177,7 @@ export function step(state, grid, dt) {
     // Dawn: surplus food spoils in the open air unless a granary holds
     // it. A granary doubles the kept surplus and lowers the birth
     // threshold. Winter cold preserves more; summer heat spoils more.
-    const hasGranary = state.buildings.some((b) => b.type === "granary");
+    const hasGranary = ownBuildings(state).some((b) => b.type === "granary");
     const keepCap = SEASON_KEEP[state.season] * (hasGranary ? 2 : 1);
     const birthNeed = hasGranary ? 10 : 14;
     const s = state.stockpile;
@@ -2468,7 +3192,10 @@ export function step(state, grid, dt) {
     }
     // Age-based births and deaths, then a shrine's dawn blessing.
     dawnDemographics(state, birthNeed);
-    if (state.buildings.some((b) => b.type === "shrine")) state.faith = clamp(state.faith + 3, 0, 100);
+    // Neighbor villages live their own dawn: abstract ticks,
+    // envoy arrivals, first traders, season drift, deactivation.
+    dawnVillages(state, grid);
+    if (ownBuildings(state).some((b) => b.type === "shrine")) state.faith = clamp(state.faith + 3, 0, 100);
     // Calendar: a festival fires when the village can afford it.
     const fest = FESTIVALS[yearDayOf(state.day)];
     if (fest) {
@@ -2490,8 +3217,8 @@ export function step(state, grid, dt) {
     recomputeMorale(state);
     if ((state.morale ?? 60) < 20) {
       state.lowMoraleDawns = (state.lowMoraleDawns || 0) + 1;
-      if (state.lowMoraleDawns >= 3 && state.villagers.length > 4 && state.elapsed - (state.lastLeaveAt || -Infinity) > 5 * DAY_LENGTH) {
-        const leaver = [...state.villagers].sort((a, b) => (a.hunger + (100 - a.energy)) - (b.hunger + (100 - b.energy)))[0];
+      if (state.lowMoraleDawns >= 3 && ownVillagers(state).length > 4 && state.elapsed - (state.lastLeaveAt || -Infinity) > 5 * DAY_LENGTH) {
+        const leaver = [...ownVillagers(state)].sort((a, b) => (a.hunger + (100 - a.energy)) - (b.hunger + (100 - b.energy)))[0];
         removeVillager(state, leaver, "walks away, seeking a kinder village");
         state.lastLeaveAt = state.elapsed;
         state.lowMoraleDawns = 0;
@@ -2517,6 +3244,16 @@ export function step(state, grid, dt) {
     while (state.deer.length < deerCap) state.deer.push(makeDeer(state, state._cx + 8, state._cz + 8));
     if (state.elapsed >= state.effects.droughtUntil && state.effects.droughtUntil > 0) log(state, "The drought breaks. Rain returns to the fields.");
     state.effects.droughtUntil = Math.min(state.effects.droughtUntil, state.elapsed);
+    // Famine warnings, at dawn, before hunger deaths start: as
+    // the stores fall the village hears it, and an empty store
+    // means the next hungry villager finds nothing to eat.
+    {
+      const edibleNow = s.food + s.fish + s.meat;
+      const mouths = ownVillagers(state).length;
+      const droughtHolds = state.elapsed < state.effects.droughtUntil;
+      if (edibleNow <= 0) log(state, "The stores stand empty. Hunger stalks the village." + (droughtHolds ? " The drought holds the fields still." : ""));
+      else if (edibleNow < mouths) log(state, "Food runs low: " + edibleNow + " meals for " + mouths + " mouths." + (droughtHolds ? " The drought holds the fields still." : ""));
+    }
   }
 
   // Crops grow. Plots within 5 cells of a farmhouse grow half again
@@ -2577,12 +3314,18 @@ export function step(state, grid, dt) {
   }
 
   // Villagers.
-  const hasWell = state.buildings.some((b) => b.type === "well");
-  const healer = state.buildings.find((b) => b.type === "healer");
+  const hasWell = ownBuildings(state).some((b) => b.type === "well");
+  const healer = ownBuildings(state).find((b) => b.type === "healer");
   const phase = phaseOf(state.time);
   const wkind = state.weather ? state.weather.kind : "clear";
   let plagueCleared = 0;
   for (const v of [...state.villagers]) {
+    // Neighbor villagers keep their own hours and their own
+    // hunger: they mill around home, flee danger, and never work
+    // the player's economy or starve on its clock. They branch
+    // before the shared vitals so the player's hunger, wells, and
+    // healers never touch them.
+    if ((v.village ?? 0) !== 0) { stepForeignVillager(state, grid, v, dt); continue; }
     // Hunger rises faster in winter cold and summer heat; water from a
     // well and rain both take the edge off. Snow and storms slow feet.
     let hungerRate = (v.ageDays ?? 25) < CHILD_DAYS ? 0.23 : hasWell ? 0.34 : 0.38;
@@ -2596,7 +3339,10 @@ export function step(state, grid, dt) {
     const nearHealer = healer && Math.hypot(v.x - (healer.x + 0.5), v.z - (healer.z + 0.5)) <= 8;
     if (v.sick) {
       v.hunger = clamp(v.hunger + dt * (nearHealer ? 0.2 : 0.4), 0, 100);
-      v.health = clamp(v.health - dt * (nearHealer ? 0.2 : 0.8) + (nearHealer ? dt * 1.5 : 0), 0, 100);
+      // The sickness weakens but does not itself finish a healthy
+      // villager: the dawn roll above is what kills. A healer
+      // nearby still mends faster than the sickness drains.
+      v.health = clamp(v.health - dt * (nearHealer ? 0.1 : 0.3) + (nearHealer ? dt * 1.5 : 0), 0, 100);
     }
     if (v.hunger >= 100) v.health = clamp(v.health - dt * 1.2, 0, 100);
     if (state.elapsed >= state.effects.plagueUntil && v.sick) { v.sick = false; plagueCleared++; }
@@ -2649,14 +3395,20 @@ export function step(state, grid, dt) {
         const personal = mostAbundant(v.goods);
         const pile = mostAbundant(s);
         const eatKind = personal ? personal[0] : pile ? pile[0] : null;
+        let ate = false;
         if (eatKind) {
           if (v.goods[eatKind] > 0) v.goods[eatKind]--;
           else {
             s[eatKind]--;
             if (v.coins >= PRICES[eatKind]) { v.coins -= PRICES[eatKind]; state.fund += PRICES[eatKind]; }
           }
-        } else if (v.target && cellAt(grid, v.target[0], v.target[1]).farm && cellAt(grid, v.target[0], v.target[1]).crop === 3) { cellAt(grid, v.target[0], v.target[1]).crop = 0; }
-        v.hunger = clamp(v.hunger - 45, 0, 100);
+          ate = true;
+        } else if (v.target && cellAt(grid, v.target[0], v.target[1]).farm && cellAt(grid, v.target[0], v.target[1]).crop === 3) { cellAt(grid, v.target[0], v.target[1]).crop = 0; ate = true; }
+        // No food anywhere means no meal: hunger stands, the
+        // villager tries again at the next rethink, and starvation
+        // takes its course through the hunger/health drain. An
+        // empty store used to feed everyone anyway.
+        if (ate) v.hunger = clamp(v.hunger - 45, 0, 100);
         v.state = "idle"; v.target = null; v.rethinkAt = state.elapsed + 1;
       } else if (v.state === "haul") {
         if (v.carry) {
@@ -2688,6 +3440,50 @@ export function step(state, grid, dt) {
   if (plagueCleared > 0) log(state, "The sickness passes. The village breathes again.");
   // Raiders move, fight, steal, and leave on their own schedule.
   stepRaiders(state, grid, dt);
+  // Caravans walk after raiders move, so a held-up caravan reacts
+  // to the raiders' current positions, not last tick's.
+  stepCaravans(state, grid, dt);
+}
+
+// --- diplomacy intents: the validation every leader decision ---
+// passes through. Village leaders decide; the god proposes and
+// sends envoys. In Phase F the only live intents are trade offers
+// and envoys: relation moves (alliances, war) are validated as
+// rejected, honestly, until their phases land. A war declaration
+// is rejected through every path, including this one.
+export function validateDiplomacyIntent(state, intent) {
+  if (!intent || typeof intent.kind !== "string") return { ok: false, reason: "An intent needs a kind." };
+  if (intent.kind === "declare_war") {
+    return { ok: false, reason: "The god cannot declare war, and no leader intent declares war in this phase." };
+  }
+  if (intent.kind === "relation_move") {
+    return { ok: false, reason: "Alliances and war arrive in later phases. Relations move only through trade, envoys, and drift." };
+  }
+  if (intent.kind === "envoy") {
+    const rec = villageRecord(state, intent.to);
+    if (!rec) return { ok: false, reason: "No such village." };
+    if ((state.pendingEnvoys || []).some((e) => e.to === intent.to)) return { ok: false, reason: "An envoy is already on the road." };
+    return { ok: true };
+  }
+  if (intent.kind === "trade_offer") {
+    const rec = villageRecord(state, intent.to);
+    if (!rec || !rec.known) return { ok: false, reason: "Trade offers go to villages you have met." };
+    if (getRelation(state, 0, intent.to) < 0) return { ok: false, reason: "Relations are too cold for trade." };
+    if ((state.caravans || []).some((c) => pairKey(c.from, c.to) === pairKey(0, intent.to))) {
+      return { ok: false, reason: "A caravan is already traveling between those villages." };
+    }
+    const cap = caravanCapacity(state, 0, intent.to);
+    if (!intent.give || !intent.want || !PRICES[intent.give.good] || !PRICES[intent.want.good]) {
+      return { ok: false, reason: "Name the goods to give and to ask for." };
+    }
+    if (intent.give.qty < 1 || intent.want.qty < 1 || intent.give.qty > cap || intent.want.qty > cap) {
+      return { ok: false, reason: "The load is outside the caravan's capacity (" + cap + ")." };
+    }
+    const key = pairKey(0, intent.to) + ":" + seasonKey(state);
+    if ((state.tradeSeasons || {})[key]) return { ok: false, reason: "Those villages have already traded this season." };
+    return { ok: true };
+  }
+  return { ok: false, reason: "Unknown diplomacy intent: " + intent.kind + "." };
 }
 
 // --- god actions: nudges and catastrophes. Never direct control. ---
@@ -2708,28 +3504,92 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
     case "drought":
       state.effects.droughtUntil = state.elapsed + 60;
       log(state, "Drought. The crops stop growing for a time."); setCd(45); break;
-    case "flood":
+    case "flood": {
+      // Low ground floods: villagers standing on flooded cells can
+      // drown (capped), the rest are swept and wounded; flooded
+      // crops are ruined and flooded buildings battered.
       state.effects.floodUntil = state.elapsed + 30;
-      for (const v of state.villagers) v.fear = clamp(v.fear + 45, 0, 100);
-      log(state, "Flood waters rise. The villagers flee to high ground."); setCd(45); break;
+      for (const v of ownVillagers(state)) v.fear = clamp(v.fear + 45, 0, 100);
+      const cx = state._cx, cz = state._cz;
+      const cap = disasterKillCap(state);
+      const inZone = ownVillagers(state).filter((v) => Math.hypot(v.x - (cx + 0.5), v.z - (cz + 0.5)) < DISASTER_FLOOD_RADIUS);
+      const flooded = inZone.filter((v) => {
+        const c = peekCell(grid, Math.floor(v.x), Math.floor(v.z));
+        return c && c.h < DISASTER_FLOOD_LOW_H;
+      });
+      const drowned = disasterKill(state, flooded, "drowned in the flood", cap);
+      const drownedSet = new Set(drowned);
+      for (const v of inZone) {
+        if (drownedSet.has(v)) continue;
+        v.health = Math.max(1, v.health - 20);
+        v.fear = 80;
+      }
+      let cropsLost = 0;
+      forEachGeneratedCell(grid, (x, z, c) => {
+        if (!c.farm || c.crop <= 0) return;
+        if (Math.hypot(x - cx, z - cz) >= DISASTER_FLOOD_RADIUS || c.h >= DISASTER_FLOOD_LOW_H) return;
+        c.crop = 0; c.cropGrow = 0; cropsLost++; noteMutation(grid, x, z);
+      });
+      const wetBuildings = ownBuildings(state).filter((b) => {
+        const c = peekCell(grid, b.x, b.z);
+        return c && c.h < DISASTER_FLOOD_LOW_H && Math.hypot(b.x - cx, b.z - cz) < DISASTER_FLOOD_RADIUS;
+      }).sort((a, b) => Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz));
+      const dmg = damageBuildings(state, grid, wetBuildings, DISASTER_FLOOD_DAMAGE, 99, "is washed away");
+      log(state, "Flood waters rise. The villagers flee to high ground."
+        + (drowned.length ? " " + drowned.length + " drown." : "")
+        + (cropsLost ? " " + cropsLost + " crops are ruined." : "")
+        + (dmg.damaged ? " " + dmg.damaged + " buildings battered." : ""));
+      setCd(45); break;
+    }
     case "fire": {
       if (x == null) return { ok: false, reason: "Tap the ground to place the fire." };
-      for (const v of state.villagers) if (Math.hypot(v.x - x, v.z - z) < 4) { v.fear = 80; v.health = clamp(v.health - 25, 0, 100); }
+      const cap = disasterKillCap(state);
+      const inRadius = ownVillagers(state).filter((v) => Math.hypot(v.x - x, v.z - z) < DISASTER_FIRE_RADIUS);
+      const burned = disasterKill(state, inRadius, "burned in the fire", cap);
+      const burnedSet = new Set(burned);
+      for (const v of inRadius) {
+        if (burnedSet.has(v)) continue;
+        v.fear = 80; v.health = Math.max(1, v.health - 25);
+      }
+      const inFlames = ownBuildings(state).filter((b) => Math.hypot(b.x - x, b.z - z) < DISASTER_FIRE_RADIUS)
+        .sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z));
+      const dmg = damageBuildings(state, grid, inFlames, DISASTER_FIRE_DAMAGE, DISASTER_FIRE_MAX_BURNED, "burns down");
       state._fire = { x, z, until: state.elapsed + 12 };
-      log(state, "Fire falls from the sky."); setCd(30); break;
+      log(state, "Fire falls from the sky."
+        + (burned.length ? " " + burned.length + " caught in the flames." : "")
+        + (dmg.destroyed ? " " + dmg.destroyed + " structures burn." : ""));
+      setCd(30); break;
     }
     case "plague":
-      state.effects.plagueUntil = state.elapsed + 45;
-      for (const v of state.villagers) if (state._rng() < 0.4) v.sick = true;
+      // A full day's wave, so it always spans a dawn: the sick
+      // face the dawn death roll (budget-capped), not only the
+      // already weak. The budget is set here, at cast.
+      state.effects.plagueUntil = state.elapsed + DISASTER_PLAGUE_DAYS * DAY_LENGTH;
+      state.effects.plagueBudget = disasterKillCap(state);
+      for (const v of ownVillagers(state)) if (state._rng() < DISASTER_PLAGUE_SICK_CHANCE) v.sick = true;
       state.faith = clamp(state.faith - 8, 0, 100);
       state.stats.plagues = (state.stats.plagues || 0) + 1;
       log(state, "Plague spreads through the village."); setCd(60); break;
     case "quake": {
       if (x == null) return { ok: false, reason: "Tap the ground for the quake's center." };
       state._quake = { x, z, until: state.elapsed + 2 };
-      for (const v of state.villagers) if (Math.hypot(v.x - x, v.z - z) < 6) v.fear = clamp(v.fear + 55, 0, 100);
+      const cap = disasterKillCap(state);
+      const inRadius = ownVillagers(state).filter((v) => Math.hypot(v.x - x, v.z - z) < DISASTER_QUAKE_RADIUS);
+      const crushed = disasterKill(state, inRadius, "crushed in the quake", cap);
+      const crushedSet = new Set(crushed);
+      for (const v of inRadius) {
+        if (crushedSet.has(v)) continue;
+        v.fear = clamp(v.fear + 55, 0, 100);
+        v.health = Math.max(1, v.health - 30);
+      }
+      const shaken = ownBuildings(state).filter((b) => Math.hypot(b.x - x, b.z - z) < DISASTER_QUAKE_RADIUS)
+        .sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z));
+      const dmg = damageBuildings(state, grid, shaken, DISASTER_QUAKE_DAMAGE, DISASTER_QUAKE_MAX_COLLAPSED, "collapses");
       state.faith = clamp(state.faith - 4, 0, 100);
-      log(state, "The earth shakes."); setCd(40); break;
+      log(state, "The earth shakes."
+        + (crushed.length ? " " + crushed.length + " crushed." : "")
+        + (dmg.destroyed ? " " + dmg.destroyed + " structures collapse." : ""));
+      setCd(40); break;
     }
     case "hut": {
       const spot = findHutSpot(state, grid);
@@ -2746,14 +3606,75 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       assignHomes(state);
       state.faith = clamp(state.faith - 10, 0, 100);
       log(state, "A wanderer joins the village."); setCd(30); break;
-    case "directive":
-      state.directive = opts.focusJob ? { focusJob: opts.focusJob } : null;
+    case "directive": {
+      // The focus nudge is one field of the directive, not the
+      // whole of it: a pending trade suggestion survives a
+      // directive change, and lifting the nudge keeps it too.
+      if (!state.directive) state.directive = {};
+      if (opts.focusJob) state.directive.focusJob = opts.focusJob;
+      else delete state.directive.focusJob;
+      if (!state.directive.focusJob && !state.directive.suggestTrade) state.directive = null;
       log(state, opts.focusJob ? "Whispered through the leader: focus on " + opts.focusJob + ". Some may disobey." : "The directive is lifted.");
       break;
+    }
     case "muster": {
       const n = musterGuards(state, grid);
       log(state, n ? "The muster sounds. Guards to their posts." : "The muster sounds, but no guards are posted.");
       setCd(30); break;
+    }
+    case "envoy": {
+      // An envoy walks to the nearest village the god has not met,
+      // or the coldest known one. It arrives at the next dawn.
+      const recs = state.villages || [];
+      if (!recs.length) return { ok: false, reason: "No other villages are known to exist." };
+      const unknown = recs.filter((r) => !r.known);
+      let target = null;
+      if (unknown.length) {
+        target = unknown.reduce((a, b) => Math.hypot(a.center[0] - state._cx, a.center[1] - state._cz) < Math.hypot(b.center[0] - state._cx, b.center[1] - state._cz) ? a : b);
+      } else {
+        target = [...recs].sort((a, b) => getRelation(state, 0, a.id) - getRelation(state, 0, b.id))[0];
+      }
+      if (!state.pendingEnvoys) state.pendingEnvoys = [];
+      if (state.pendingEnvoys.some((e) => e.to === target.id)) return { ok: false, reason: "An envoy is already on the road to " + target.name + "." };
+      state.pendingEnvoys.push({ to: target.id, sentDay: state.day });
+      touchVillage(state, grid, target);
+      log(state, "An envoy sets out for " + target.name + ".");
+      setCd(ENVOY_COOLDOWN_DAYS * DAY_LENGTH); break;
+    }
+    case "suggest_trade": {
+      // The god proposes; the leader decides at the next delegation.
+      // Validation here only checks the proposal is well-formed and
+      // the village is known. The leader weighs surplus, deficit,
+      // relations, and the season limit before any caravan moves.
+      const to = opts.to, give = opts.give, want = opts.want;
+      const rec = villageRecord(state, to);
+      if (!rec || !rec.known) return { ok: false, reason: "Suggest trade to a village you have met." };
+      if (!give || !want || !PRICES[give.good] || !PRICES[want.good]) return { ok: false, reason: "Name the goods to give and to ask for." };
+      const cap = caravanCapacity(state, 0, to);
+      if (give.qty < 1 || want.qty < 1 || give.qty > cap || want.qty > cap) {
+        return { ok: false, reason: "The load must fit the caravan's capacity (" + cap + ")." };
+      }
+      if (!state.directive) state.directive = {};
+      state.directive.suggestTrade = { to, give: { good: give.good, qty: Math.floor(give.qty) }, want: { good: want.good, qty: Math.floor(want.qty) } };
+      log(state, "You suggest trading " + give.qty + " " + give.good + " for " + want.qty + " " + want.good + " with " + rec.name + ". The leader will weigh it.");
+      setCd(10); break;
+    }
+    case "declare_war":
+      // There is no path for the god to declare war: war is a
+      // leaders' decision, in a later phase. This case exists so the
+      // refusal is explicit and testable, not a silent unknown.
+      return { ok: false, reason: "The god cannot declare war. War is for village leaders, in a later phase." };
+    case "visit": {
+      // Walking there: the camera dwelling near a village stirs it
+      // and discovers it. Idempotent: a village already known and
+      // active simply has its trigger refreshed.
+      if (x == null || z == null) return { ok: false, reason: "Visit needs a place." };
+      const ccx = Math.floor(x / CHUNK), ccz = Math.floor(z / CHUNK);
+      const rec = (state.villages || []).find((r) => Math.max(Math.abs(Math.floor(r.center[0] / CHUNK) - ccx), Math.abs(Math.floor(r.center[1] / CHUNK) - ccz)) <= 3);
+      if (!rec) return { ok: false, reason: "No village near here." };
+      touchVillage(state, grid, rec);
+      discoverVillage(state, rec, "you walk the land");
+      return { ok: true };
     }
     case "whisper":
       if (opts.text) log(state, "Whisper: \"" + String(opts.text).slice(0, 200) + "\"");
@@ -2769,7 +3690,8 @@ function findHutSpot(state, grid) {
 }
 
 export function leader(state) {
-  return state.villagers.find((v) => v.leader) || state.villagers[0] || null;
+  const own = ownVillagers(state);
+  return own.find((v) => v.leader) || own[0] || null;
 }
 
 // --- save / load: only plain data, grid is rebuilt from the seed ---
@@ -2786,8 +3708,8 @@ export function serialize(state, grid) {
     if (c.road) roads.push([x, z]);
   });
   const chunks = [...grid.chunks.keys()].map((k) => k.split(",").map(Number));
-  const { _rng, _farmCells, _oreSpots, _fire, _quake, raiders, _raidStats, ...rest } = state;
-  void _rng; void _farmCells; void _oreSpots; void raiders; void _raidStats;
+  const { _rng, _vrng, _farmCells, _oreSpots, _fire, _quake, raiders, _raidStats, ...rest } = state;
+  void _rng; void _vrng; void _farmCells; void _oreSpots; void raiders; void _raidStats;
   // The save version is stamped here, not trusted to state, so every
   // file on disk carries the version its writer used.
   return JSON.stringify({ ...rest, version: SAVE_VERSION, crops, stones, buildings, roads, chunks, fire: _fire || null, quake: _quake || null });
@@ -2866,6 +3788,20 @@ export function deserialize(json) {
     if (state.nextCaravanId == null) state.nextCaravanId = 1;
     if (state.nextWarPartyId == null) state.nextWarPartyId = 1;
   }
+  // Phase F record fields: backfilled on every load, so a save
+  // written by an earlier v5 build gains them without a bump.
+  for (const rec of state.villages || []) {
+    if (rec.traderDay == null) rec.traderDay = 2 + Math.floor(hash01(data.seed, rec.id, 7, 504) * 8);
+    if (rec.traderSent == null) rec.traderSent = false;
+    if (rec.lastEvent === undefined) rec.lastEvent = null;
+    if (rec.tradeSeason == null) rec.tradeSeason = -1;
+    if (rec.contactSeason == null) rec.contactSeason = -1;
+    if (rec.activeDay == null) rec.activeDay = 0;
+    if (rec.lastTriggerDay == null) rec.lastTriggerDay = 0;
+  }
+  if (!state.pendingEnvoys) state.pendingEnvoys = [];
+  if (!state.tradeSeasons) state.tradeSeasons = {};
+  if (state._villageSeasonKey == null) state._villageSeasonKey = -1;
   grid._villageSites = state.villageSites || [];
   // Regenerate every chunk the save had generated, so chunks with no
   // deltas still count as generated (render + save round-trips).
@@ -2894,6 +3830,7 @@ export function deserialize(json) {
   for (const b of state.buildings) { if (b.builtDay == null) b.builtDay = 1; if (b.village == null) b.village = 0; }
   assignHomes(state);
   state._rng = mulberry32((data.seed ^ 0x9e3779b9) + Math.floor(state.elapsed * 1000));
+  state._vrng = mulberry32((data.seed ^ 0x5f3759df) + Math.floor(state.elapsed * 1000));
   for (const [x, z, crop, grow] of savedCrops) { cellAt(grid, x, z).farm = true; cellAt(grid, x, z).crop = crop; cellAt(grid, x, z).cropGrow = grow; }
   for (const [x, z] of savedRoads) cellAt(grid, x, z).road = true;
   // Rebuild the farm list from the grid so farms cleared by expansion

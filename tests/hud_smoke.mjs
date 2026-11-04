@@ -43,7 +43,7 @@ const required = [
   "stat-faith", "faith-fill", "stat-day", "stat-season", "stat-morale",
   "stat-tech", "stat-festival", "stat-pop", "stat-view", "stat-mode",
   "version-chip", "stat-raid", "stat-effects", "hud", "godbar", "top-actions",
-  "panel", "panel-title", "panel-body", "directive-label",
+  "panel", "panel-title", "panel-body", "directive-label", "panel-close",
   "btn-panel", "btn-zoom-out", "btn-zoom-in", "btn-rotate-l", "btn-rotate-r",
   "btn-speed", "btn-pause", "btn-save", "btn-settings",
   "start-overlay", "mode-row", "btn-mode-local", "btn-mode-server",
@@ -61,14 +61,34 @@ for (const action of ["bless", "drought", "flood", "fire", "plague", "quake"]) {
   assert.ok(html.includes('data-god="' + action + '"'), "god action missing from the god bar: " + action);
 }
 assert.ok(html.includes('data-god="muster"'), "god action missing from the god bar: muster");
+assert.ok(html.includes('data-god="envoy"'), "god action missing from the god bar: envoy");
 assert.ok(main.includes("dataset.god"), "main.js must dispatch god buttons via dataset.god");
 console.log("god bar offers all six actions including plague");
+
+// Neighbor villages: the panel lists known villages with relations,
+// a Visit button, and a suggest-trade form per village.
+assert.ok(main.includes("Neighbor villages"), "the panel must list neighbor villages");
+assert.ok(main.includes("Suggest trade"), "the panel must offer a suggest-trade form");
+assert.ok(main.includes("data-visit"), "the panel must offer a Visit button per village");
+console.log("neighbor villages: relations panel + visit + suggest-trade");
 
 // Defense HUD: the raid banner reports guards posted and towers
 // manned, and the panel reports the defense section.
 assert.ok(main.includes("towers manned"), "the raid banner must report towers manned");
 assert.ok(main.includes("guards posted"), "the panel must report guards posted");
 console.log("defense HUD: banner + panel report posts and manning");
+
+// Panel close: an X button lives in the static panel header (never
+// re-rendered away), and all three close paths funnel through one
+// closePanel helper — X tap, empty-ground tap with a villager
+// selected, and re-tapping the selected villager. The harness has
+// no DOM, so these are code-path assertions, not click tests.
+assert.ok(html.includes('id="panel-close"'), "the panel header must carry an explicit close button");
+assert.ok(main.includes("function closePanel()"), "main.js must define the single closePanel path");
+assert.ok(main.includes('$("panel-close").addEventListener("click", closePanel)'), "the X button must be wired to closePanel");
+assert.ok(main.includes("if (pick.id === selectedId) { closePanel(); return; }"), "re-tapping the selected villager must close the panel");
+assert.ok(main.includes("else if (selectedId !== null)"), "an empty-ground tap with a villager selected must close the panel");
+console.log("panel close: X button + ground-tap + re-tap paths all present");
 
 // No em-dashes in user-facing HUD text.
 const hudText = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "");

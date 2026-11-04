@@ -114,7 +114,7 @@ function readBody(req, limit = 16384) {
   });
 }
 
-const GOD_ACTIONS = new Set(["bless", "drought", "flood", "fire", "plague", "quake", "hut", "villager", "directive", "whisper", "muster"]);
+const GOD_ACTIONS = new Set(["bless", "drought", "flood", "fire", "plague", "quake", "hut", "villager", "directive", "whisper", "muster", "envoy", "suggest_trade", "declare_war", "visit"]);
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -146,6 +146,13 @@ const server = http.createServer(async (req, res) => {
       const opts = {};
       if (typeof body.focusJob === "string") opts.focusJob = body.focusJob;
       if (typeof body.text === "string") opts.text = body.text.slice(0, 200);
+      if (typeof body.to === "number") opts.to = body.to;
+      if (body.give && typeof body.give.good === "string" && typeof body.give.qty === "number") {
+        opts.give = { good: body.give.good, qty: body.give.qty };
+      }
+      if (body.want && typeof body.want.good === "string" && typeof body.want.qty === "number") {
+        opts.want = { good: body.want.good, qty: body.want.qty };
+      }
       const result = applyGod(world.state, world.grid, action, x, z, opts);
       console.log(`god ${action} -> ${result.ok ? "ok" : result.reason || "rejected"}`);
       persist();

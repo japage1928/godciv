@@ -8,7 +8,7 @@
 import assert from "node:assert";
 import * as THREE from "../vendor/three.module.js";
 import { Renderer } from "../src/render.js";
-import { newWorld, cellAt } from "../src/sim.js";
+import { newWorld, cellAt, generatedChunks } from "../src/sim.js";
 
 const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well", "workshop", "shrine", "farmhouse", "school", "healer", "wall", "tower", "marker", "stockpile", "altar", "mystery-type"];
 
@@ -129,6 +129,27 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   const stepMesh = fake.dressingGroup.children.find((m) => m.userData.doorstep);
   assert.ok(stepMesh, "a doorstep must join the hut door to its street");
   assert.ok(stepMesh.position.x > 30.5, "the doorstep must sit on the street side of the hut");
+}
+
+// Village markers: one standing stone per known village, drawn
+// without generating chunks (markers read peekCell / terrainHeight).
+{
+  const { state, grid } = newWorld(42);
+  const fake = Object.create(Renderer.prototype);
+  fake.scene = new THREE.Group();
+  fake._markerSignature = "";
+  fake._villageMarkers = null;
+  const before = generatedChunks(grid).length;
+  fake._syncVillageMarkers(state, grid);
+  assert.equal(fake._villageMarkers.children.length, 2, "the player's own marker is one stone + one cap");
+  assert.equal(generatedChunks(grid).length, before, "marker sync must not generate chunks");
+  state.villages[0].known = true;
+  fake._syncVillageMarkers(state, grid);
+  assert.equal(fake._villageMarkers.children.length, 4, "a discovered neighbor gains its own marker");
+  assert.equal(generatedChunks(grid).length, before, "a distant marker must not generate its chunks");
+  fake._syncVillageMarkers(state, grid);
+  assert.equal(fake._villageMarkers.children.length, 4, "repeat sync with an unchanged signature must not rebuild");
+  console.log("village markers: player + discovered neighbor, zero chunk generation");
 }
 
 // render.js must never fetch: all textures are procedural canvases,
