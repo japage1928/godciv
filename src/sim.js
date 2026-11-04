@@ -333,6 +333,11 @@ export function makeVillageRecord(seed, id, site, otherIds = []) {
     traderDay: 2 + Math.floor(hash01(seed, id, 7, 504) * 8),
     traderSent: false, lastEvent: null, tradeSeason: -1, contactSeason: -1,
     activeDay: 0, lastTriggerDay: 0,
+    // Phase G alliance state. allies holds village ids (0 is the
+    // player's village); allyOffer is a pending proposal from
+    // another leader; allyCooldownDay is the first day a new
+    // alliance with anyone may form after a break.
+    allies: [], allyOffer: null, allyCooldownDay: 0,
   };
 }
 
@@ -387,6 +392,11 @@ export function setRelation(state, a, b, value) {
     const ra = villageRecord(state, a), rb = villageRecord(state, b);
     write(ra, b); write(rb, a);
   }
+  // An alliance breaks the moment relations fall under 20, no
+  // matter what moved them: trade, robbery, drift, or mourning.
+  if (a !== b && allied(state, a, b) && v < 20) {
+    breakAlliance(state, a, b, "relations fell under 20");
+  }
   return v;
 }
 
@@ -397,6 +407,60 @@ function logRelationBand(state, rec, before, after) {
 
 export function adjustRelation(state, a, b, delta) {
   return setRelation(state, a, b, getRelation(state, a, b) + delta);
+}
+
+export function villageName(state, id) {
+  if (id === 0) return "Your village";
+  const rec = villageRecord(state, id);
+  return rec ? rec.name : "Village " + id;
+}
+
+// The live headcount of a village: real villagers while active,
+// the record's pop while abstract.
+export function villagePop(state, rec) {
+  if (!rec) return 0;
+  if (rec.active) return state.villagers.filter((v) => v.village === rec.id).length;
+  return rec.pop || 0;
+}
+
+// Alliances live on the records, symmetric: the higher id's record
+// is the pair's home, and both records list each other.
+export function allied(state, a, b) {
+  if (a === b) return false;
+  const rec = villageRecord(state, Math.max(a, b));
+  if (!rec) return false;
+  return (rec.allies || []).includes(Math.min(a, b));
+}
+
+export function allianceCooldownOk(state, a, b) {
+  const recs = [villageRecord(state, a), villageRecord(state, b)].filter(Boolean);
+  return recs.every((r) => state.day >= (r.allyCooldownDay || 0));
+}
+
+export function formAlliance(state, a, b) {
+  if (allied(state, a, b)) return false;
+  for (const [id, other] of [[a, b], [b, a]]) {
+    const rec = villageRecord(state, id);
+    if (!rec) continue;
+    if (!Array.isArray(rec.allies)) rec.allies = [];
+    if (!rec.allies.includes(other)) rec.allies.push(other);
+    if (rec.allyOffer && rec.allyOffer.from === other) rec.allyOffer = null;
+  }
+  log(state, villageName(state, a) + " and " + villageName(state, b) + " are allies. Caravans grow, and guards will answer a raid.");
+  return true;
+}
+
+export function breakAlliance(state, a, b, reason, cooldownDays = ALLIANCE_COOLDOWN_DAYS) {
+  if (!allied(state, a, b)) return false;
+  for (const id of [a, b]) {
+    const rec = villageRecord(state, id);
+    if (!rec) continue;
+    rec.allies = (rec.allies || []).filter((o) => o !== (id === a ? b : a));
+    rec.allyCooldownDay = state.day + cooldownDays;
+    if (rec.allyOffer && (rec.allyOffer.from === a || rec.allyOffer.from === b)) rec.allyOffer = null;
+  }
+  log(state, "The alliance between " + villageName(state, a) + " and " + villageName(state, b) + " breaks: " + reason + ".");
+  return true;
 }
 
 export function ownVillagers(state) {
@@ -828,9 +892,15 @@ export function removeVillager(state, v, cause) {
   if (foreign) {
     // A neighbor's loss is the neighbor's: no faith hit on the
     // player's village, no succession, no player death stat. The
-    // home village's population drops when it deactivates.
+    // home village's population drops when it deactivates. A
+    // reinforcement who falls defending an ally is mourned by
+    // both villages: relations cool by the combat rule.
     const rec = villageRecord(state, v.village);
     log(state, v.name + " of " + (rec ? rec.name : "a neighbor village") + " dies (" + cause + ").");
+    if (v.reinforcement) {
+      adjustRelation(state, 0, v.village, ALLIED_GUARD_DEATH_RELATION);
+      log(state, (rec ? rec.name : "The neighbor village") + " mourns a guard fallen defending an ally (" + ALLIED_GUARD_DEATH_RELATION + ").");
+    }
     return;
   }
   state.faith = clamp(state.faith - 3, 0, 100); state.stats.deaths++;
@@ -909,6 +979,15 @@ export function delegateRoles(state, grid = null) {
   if (suggestion && grid) {
     state.directive.suggestTrade = null;
     weighTradeSuggestion(state, grid, suggestion);
+  }
+  // A god-suggested alliance waits for the same judgment: the
+  // leader proposes only on warm enough relations, a free
+  // cooldown, and no pending offer. The suggestion clears either
+  // way. The neighbor leader answers at dawn.
+  const allySuggestion = state.directive && state.directive.suggestAlliance;
+  if (allySuggestion && grid) {
+    state.directive.suggestAlliance = null;
+    weighAllianceSuggestion(state, allySuggestion);
   }
   if (!villagers.length) return;
   const s = state.stockpile;
@@ -1050,6 +1129,22 @@ function weighTradeSuggestion(state, grid, suggestion) {
   if (res.ok) {
     log(state, who + " agrees to the trade with " + rec.name + ": " + suggestion.give.qty + " " + suggestion.give.good + " for " + suggestion.want.qty + " " + suggestion.want.good + ".");
   } else refuse(res.reason || "the road cannot be found");
+}
+
+function weighAllianceSuggestion(state, suggestion) {
+  const rec = villageRecord(state, suggestion.to);
+  const l = leader(state);
+  const who = l ? l.name : "The leader";
+  const refuse = (reason) => log(state, who + " declines the alliance with " + (rec ? rec.name : "the village") + ": " + reason + ".");
+  if (!rec || !rec.known) return refuse("the village is unknown");
+  if (allied(state, 0, rec.id)) return refuse("the villages are already allies");
+  if (getRelation(state, 0, rec.id) < ALLIANCE_MIN_RELATION) {
+    return refuse("relations are too cold (need " + ALLIANCE_MIN_RELATION + ")");
+  }
+  if (!allianceCooldownOk(state, 0, rec.id)) return refuse("a recent break must cool first");
+  if (rec.allyOffer) return refuse("a proposal is already before them");
+  rec.allyOffer = { from: 0, day: state.day };
+  log(state, who + " proposes an alliance with " + rec.name + ". Their leader answers within " + ALLIANCE_OFFER_DAWNS + " dawns.");
 }
 
 // --- guard posts: towers first, then the four gate cells on the wall
@@ -2339,6 +2434,18 @@ export const GUARD_POST_RADIUS = 12;
 export const GUARD_CAP = 6;
 export const GUARD_BREAK_HEALTH = 25;
 export const TOWER_RANGE = 7;
+// Alliances (design section 13.5-13.7): relation 60+, both
+// leaders' intents, 10-day cooldown between formations. An ally
+// adds caravan capacity and sends two guards when its partner is
+// raided. An alliance breaks when relations fall under 20, when a
+// leader ends it, or when war is declared (Phase H).
+export const ALLIANCE_MIN_RELATION = 60;
+export const ALLIANCE_OFFER_DAWNS = 3;
+export const ALLIANCE_COOLDOWN_DAYS = 10;
+export const ALLIANCE_CAPACITY_BONUS = 10;
+export const ALLIED_GUARDS = 2;
+export const ALLIED_GUARD_MIN_POP = 5;
+export const ALLIED_GUARD_DEATH_RELATION = -2;
 // Disasters must move the population, visibly, but one use never
 // wipes the village: no single disaster kills more than a quarter
 // of the player's people (at least 1 in a tiny village). The same
@@ -2426,6 +2533,39 @@ export function makeRaider(state, x, z) {
   };
 }
 
+// An allied village sends two guards to a raid: the village is
+// stirred if it was distant, the road is generated so the march
+// can be pathed, and the two nearest able villagers march. They
+// fight by the guard rules (stepRaiders strikes any villager with
+// job "guard"), walk home when the raid ends, and keep their old
+// job when they get there. Too small a village sends no one.
+export function dispatchAlliedGuards(state, grid, rec) {
+  touchVillage(state, grid, rec);
+  const live = state.villagers.filter((v) => v.village === rec.id && !v.reinforcement);
+  if (live.length < ALLIED_GUARD_MIN_POP) {
+    log(state, rec.name + " is too small to send aid.");
+    return 0;
+  }
+  generateCorridor(grid, rec.center[0], rec.center[1], state._cx, state._cz);
+  const [cx, cz] = rec.center;
+  const picked = [...live]
+    .sort((a, b) => (Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz))
+      || ((b.ageDays ?? 25) - (a.ageDays ?? 25)));
+  let sent = 0;
+  for (const v of picked) {
+    if (sent >= ALLIED_GUARDS) break;
+    if ((v.ageDays ?? 25) < CHILD_DAYS || v.health <= 0) continue;
+    v.reinforcement = true;
+    v._homeJob = v.job;
+    v.job = "guard";
+    v.state = "idle";
+    setTarget(state, grid, v, state._cx, state._cz);
+    sent++;
+  }
+  if (sent) log(state, rec.name + " sends " + sent + " guard" + (sent > 1 ? "s" : "") + " to aid the village.");
+  return sent;
+}
+
 export function spawnRaid(state, grid, size = null) {
   const pop = state.villagers.length;
   // Raid size scales with the village and the era, capped: bigger
@@ -2457,6 +2597,13 @@ export function spawnRaid(state, grid, size = null) {
   state.raidActive = true;
   state.raidUntil = state.elapsed + 120;
   state._raidStats = { deaths: 0, stolen: 0, killed: 0, guardKills: 0, towerKills: 0, breaches: 0 };
+  // Allied villages answer a raid: each ally with enough people
+  // sends two guards, who walk over, fight by the guard rules,
+  // and walk home when the raid ends.
+  for (const rec of state.villages || []) {
+    if (!allied(state, 0, rec.id)) continue;
+    dispatchAlliedGuards(state, grid, rec);
+  }
   // Guards rethink immediately: posts are taken in seconds, not on
   // the next 4-7s rethink cycle.
   for (const v of state.villagers) if (v.assignedJob === "guard") v.rethinkAt = state.elapsed;
@@ -2547,12 +2694,34 @@ function stepForeignVillager(state, grid, v, dt) {
   const rec = villageRecord(state, v.village);
   const [cx, cz] = rec ? rec.center : [state._cx, state._cz];
   const phase = phaseOf(state.time);
-  // A raider close by sends a neighbor villager running now, not
-  // at the next rethink: the same rule the player's villagers get.
-  if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
-    v.state = "flee"; v.rethinkAt = state.elapsed;
-  }
-  if (v.state === "flee") {
+  // Reinforcements do not flee or mill about: while the raid runs
+  // they close with raiders or hold the village center, and when
+  // it ends they walk home. Arrival home clears the flag and
+  // restores the job they marched away from.
+  if (v.reinforcement) {
+    if (state.raidActive) {
+      if (!v.target && state.elapsed >= v.rethinkAt) {
+        v.rethinkAt = state.elapsed + 2 + villageRng(state)() * 2;
+        const r = nearestRaider(state, v.x, v.z, 12);
+        if (r) setTarget(state, grid, v, Math.round(r.x), Math.round(r.z));
+        else setTarget(state, grid, v, state._cx, state._cz);
+      }
+    } else {
+      if (Math.hypot(v.x - (cx + 0.5), v.z - (cz + 0.5)) < 3) {
+        v.reinforcement = false; v.job = v._homeJob || "hauler"; v._homeJob = null;
+        v.target = null; v.path = null; v.state = "idle";
+      } else if (!v.target && state.elapsed >= v.rethinkAt) {
+        v.rethinkAt = state.elapsed + 2 + villageRng(state)() * 2;
+        setTarget(state, grid, v, cx, cz);
+      }
+    }
+  } else {
+    // A raider close by sends a neighbor villager running now, not
+    // at the next rethink: the same rule the player's villagers get.
+    if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
+      v.state = "flee"; v.rethinkAt = state.elapsed;
+    }
+    if (v.state === "flee") {
     if (v.fear < 20) { v.state = "idle"; v.target = null; v.path = null; }
     else if (!v.target) {
       const r = nearestRaider(state, v.x, v.z, 30);
@@ -2567,6 +2736,7 @@ function stepForeignVillager(state, grid, v, dt) {
     if (phase !== "night" || vrng() < 0.3) {
       setTarget(state, grid, v, clamp(Math.round(cx + (vrng() * 10 - 5)), 0, SIZE - 1), clamp(Math.round(cz + (vrng() * 10 - 5)), 0, SIZE - 1));
     }
+  }
   }
   // Movement: the same path-following the player's villagers use,
   // minus work. Arrival clears the target and settles the villager.
@@ -2740,9 +2910,12 @@ export function dawnVillages(state, grid) {
     }
     // Season drift: relations drift 1 per season toward 0 when
     // there has been no contact this season; completed trades and
-    // envoy contact count as contact.
+    // envoy contact count as contact. Allies instead warm by 2
+    // every season: the alliance itself is the contact.
     if (sChanged) {
-      if (rec.contactSeason !== sKey) {
+      if (allied(state, 0, rec.id)) {
+        adjustRelation(state, 0, rec.id, 2);
+      } else if (rec.contactSeason !== sKey) {
         const cur = getRelation(state, 0, rec.id);
         if (cur !== 0) adjustRelation(state, 0, rec.id, cur > 0 ? -1 : 1);
       }
@@ -2760,13 +2933,36 @@ export function dawnVillages(state, grid) {
         log(state, rec.leaderName + " of " + rec.name + " welcomes your envoy. Relations warm (+3).");
       }
     }
+    // Alliance proposals: the neighbor leader answers within
+    // three dawns. Acceptance needs warm relations, a free
+    // cooldown, and enough people to spare guards; otherwise the
+    // offer waits, and lapses past its window.
+    if (rec.allyOffer) {
+      const offer = rec.allyOffer;
+      if (state.day - offer.day > ALLIANCE_OFFER_DAWNS) {
+        rec.allyOffer = null;
+        log(state, rec.leaderName + " of " + rec.name + " lets the alliance offer lapse.");
+      } else if (!allied(state, offer.from, rec.id) && getRelation(state, offer.from, rec.id) >= ALLIANCE_MIN_RELATION
+        && allianceCooldownOk(state, offer.from, rec.id) && villagePop(state, rec) >= ALLIED_GUARD_MIN_POP) {
+        formAlliance(state, offer.from, rec.id);
+        rec.lastEvent = "Allied with " + villageName(state, offer.from) + ".";
+      }
+    }
+    // A leader ends an alliance whose relations have soured under
+    // 30: the end_alliance intent, with its longer cooldown. The
+    // player's leader speaks here too, at dawn, in the leader's name.
+    if (allied(state, 0, rec.id) && getRelation(state, 0, rec.id) < 30) {
+      const l = leader(state);
+      breakAlliance(state, 0, rec.id, (l ? l.name : "The leader") + " ends it: relations have soured", 30);
+    }
     // Deactivation: five quiet game-days with no trigger, no
     // caravan in flight to or from the village, and no raiders
     // within 20 cells of its center.
     if (rec.active && state.day - (rec.lastTriggerDay || 0) >= DEACTIVATE_AFTER_DAYS) {
       const busy = (state.caravans || []).some((c) => c.from === rec.id || c.to === rec.id);
       const raidersNear = (state.raiders || []).some((r) => Math.hypot(r.x - rec.center[0], r.z - rec.center[1]) < 20);
-      if (!busy && !raidersNear) deactivateVillage(state, grid, rec);
+      const deployed = state.villagers.some((v) => v.village === rec.id && v.reinforcement);
+      if (!busy && !raidersNear && !deployed) deactivateVillage(state, grid, rec);
     }
   }
 }
@@ -2776,6 +2972,7 @@ export function caravanCapacity(state, a, b) {
   let cap = CARAVAN_CAPACITY;
   if (rel >= 60) cap += 2 * CARAVAN_BAND_BONUS;
   else if (rel >= 30) cap += CARAVAN_BAND_BONUS;
+  if (allied(state, a, b)) cap += ALLIANCE_CAPACITY_BONUS;
   return cap;
 }
 
@@ -3457,7 +3654,32 @@ export function validateDiplomacyIntent(state, intent) {
     return { ok: false, reason: "The god cannot declare war, and no leader intent declares war in this phase." };
   }
   if (intent.kind === "relation_move") {
-    return { ok: false, reason: "Alliances and war arrive in later phases. Relations move only through trade, envoys, and drift." };
+    // Alliance moves validate; they do not execute here. A
+    // proposal is weighed by the player's leader and answered by
+    // the neighbor's at dawn; ending one is a leader's decision
+    // with its longer cooldown. War moves stay refused: war is
+    // a later phase, and the god never declares it.
+    const rec = villageRecord(state, intent.to);
+    if (!rec || !rec.known) return { ok: false, reason: "Relations move only with villages you have met." };
+    if (intent.move === "propose_alliance") {
+      if (allied(state, 0, intent.to)) return { ok: false, reason: "The villages are already allies." };
+      if (getRelation(state, 0, intent.to) < ALLIANCE_MIN_RELATION) return { ok: false, reason: "Relations are too cold for an alliance (need " + ALLIANCE_MIN_RELATION + ")." };
+      if (!allianceCooldownOk(state, 0, intent.to)) return { ok: false, reason: "A recent break must cool first." };
+      if (rec.allyOffer) return { ok: false, reason: "A proposal is already before them." };
+      return { ok: true };
+    }
+    if (intent.move === "accept_alliance") {
+      if (!rec.allyOffer || rec.allyOffer.from !== intent.from) return { ok: false, reason: "No proposal from that village is waiting." };
+      if (state.day - rec.allyOffer.day > ALLIANCE_OFFER_DAWNS) return { ok: false, reason: "The proposal has lapsed." };
+      if (getRelation(state, 0, intent.to) < ALLIANCE_MIN_RELATION) return { ok: false, reason: "Relations are too cold for an alliance." };
+      if (!allianceCooldownOk(state, 0, intent.to)) return { ok: false, reason: "A recent break must cool first." };
+      return { ok: true };
+    }
+    if (intent.move === "end_alliance") {
+      if (!allied(state, 0, intent.to)) return { ok: false, reason: "The villages are not allies." };
+      return { ok: true };
+    }
+    return { ok: false, reason: "Unknown relation move: " + intent.move + ". Moves are propose_alliance, accept_alliance, end_alliance." };
   }
   if (intent.kind === "envoy") {
     const rec = villageRecord(state, intent.to);
@@ -3608,12 +3830,13 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       log(state, "A wanderer joins the village."); setCd(30); break;
     case "directive": {
       // The focus nudge is one field of the directive, not the
-      // whole of it: a pending trade suggestion survives a
-      // directive change, and lifting the nudge keeps it too.
+      // whole of it: pending trade and alliance suggestions
+      // survive a directive change, and lifting the nudge keeps
+      // them too.
       if (!state.directive) state.directive = {};
       if (opts.focusJob) state.directive.focusJob = opts.focusJob;
       else delete state.directive.focusJob;
-      if (!state.directive.focusJob && !state.directive.suggestTrade) state.directive = null;
+      if (!state.directive.focusJob && !state.directive.suggestTrade && !state.directive.suggestAlliance) state.directive = null;
       log(state, opts.focusJob ? "Whispered through the leader: focus on " + opts.focusJob + ". Some may disobey." : "The directive is lifted.");
       break;
     }
@@ -3657,6 +3880,19 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
       if (!state.directive) state.directive = {};
       state.directive.suggestTrade = { to, give: { good: give.good, qty: Math.floor(give.qty) }, want: { good: want.good, qty: Math.floor(want.qty) } };
       log(state, "You suggest trading " + give.qty + " " + give.good + " for " + want.qty + " " + want.good + " with " + rec.name + ". The leader will weigh it.");
+      setCd(10); break;
+    }
+    case "suggest_alliance": {
+      // The god proposes; both leaders decide. Validation here
+      // only checks the proposal is well-formed and the village is
+      // known. The player's leader weighs it at the next
+      // delegation, and the neighbor's leader answers at dawn.
+      const rec = villageRecord(state, opts.to);
+      if (!rec || !rec.known) return { ok: false, reason: "Suggest an alliance to a village you have met." };
+      if (allied(state, 0, rec.id)) return { ok: false, reason: "The villages are already allies." };
+      if (!state.directive) state.directive = {};
+      state.directive.suggestAlliance = { to: rec.id };
+      log(state, "You suggest an alliance with " + rec.name + ". The leaders will weigh it.");
       setCd(10); break;
     }
     case "declare_war":
@@ -3798,6 +4034,9 @@ export function deserialize(json) {
     if (rec.contactSeason == null) rec.contactSeason = -1;
     if (rec.activeDay == null) rec.activeDay = 0;
     if (rec.lastTriggerDay == null) rec.lastTriggerDay = 0;
+    if (!Array.isArray(rec.allies)) rec.allies = [];
+    if (rec.allyOffer === undefined) rec.allyOffer = null;
+    if (rec.allyCooldownDay == null) rec.allyCooldownDay = 0;
   }
   if (!state.pendingEnvoys) state.pendingEnvoys = [];
   if (!state.tradeSeasons) state.tradeSeasons = {};

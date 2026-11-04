@@ -72,6 +72,14 @@ assert.ok(main.includes("Suggest trade"), "the panel must offer a suggest-trade 
 assert.ok(main.includes("data-visit"), "the panel must offer a Visit button per village");
 console.log("neighbor villages: relations panel + visit + suggest-trade");
 
+// Alliances: the relations card shows alliance status and offers a
+// Suggest alliance button per known village, wired to the
+// suggest_alliance god action.
+assert.ok(main.includes("data-suggest-ally"), "the panel must offer a Suggest alliance button per village");
+assert.ok(main.includes('doGod("suggest_alliance"'), "the alliance button must call the suggest_alliance god action");
+assert.ok(main.includes("Allied: caravans carry more"), "the panel must show allied status");
+console.log("alliances: status + suggest-alliance button wired");
+
 // Defense HUD: the raid banner reports guards posted and towers
 // manned, and the panel reports the defense section.
 assert.ok(main.includes("towers manned"), "the raid banner must report towers manned");

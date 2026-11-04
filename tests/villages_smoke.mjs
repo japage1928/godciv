@@ -356,8 +356,14 @@ function setRelationDirect(state, rec, value) {
   const intent = validateDiplomacyIntent(state, { kind: "declare_war", to: 1 });
   assert.equal(intent.ok, false, "intent validation refuses declare_war");
   const move = validateDiplomacyIntent(state, { kind: "relation_move", to: 1, delta: 10 });
-  assert.equal(move.ok, false, "relation moves wait for their phase");
-  assert.ok(/later phases/.test(move.reason), "the stub is honest: " + move.reason);
+  assert.equal(move.ok, false, "relation moves go only to villages met");
+  assert.ok(/met/.test(move.reason), "the refusal says so: " + move.reason);
+  const rec0 = state.villages[0];
+  rec0.known = true;
+  const noMove = validateDiplomacyIntent(state, { kind: "relation_move", to: rec0.id, delta: 10 });
+  assert.equal(noMove.ok, false, "a relation move without a named move refuses");
+  assert.ok(/Unknown relation move/.test(noMove.reason), "the refusal names the valid moves: " + noMove.reason);
+  rec0.known = false; // the stranger check below needs an unmet village
   const weird = validateDiplomacyIntent(state, { kind: "annex", to: 1 });
   assert.equal(weird.ok, false, "unknown intents refuse");
   const rec = state.villages[0];

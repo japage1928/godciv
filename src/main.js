@@ -1,6 +1,6 @@
 // GodCiv PWA glue: UI, god actions, council loop, save/load. The sim
 // owns truth; this file only reads it and calls applyGod().
-import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, CHUNK, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary, ownVillagers, ownBuildings, relationBand, getRelation } from "./sim.js";
+import { newWorld, step, applyGod, godCooldown, leader, serialize, deserialize, SIZE, CHUNK, JOBS, PRICES, demographicRates, homelessCount, computeDemands, yearOf, nextFestival, phaseOf, SEASON_NAMES, TECH_TIERS, techThresholdFor, TOOL_NAMES, FESTIVAL_MIN_EDIBLE, FESTIVAL_MIN_FAITH, isStudent, cellAt, forEachGeneratedCell, defenseSummary, ownVillagers, ownBuildings, relationBand, getRelation, allied } from "./sim.js";
 import { Renderer } from "./render.js";
 import { loadOllamaSettings, saveOllamaSettings, fetchCouncil, fallbackCouncil, testOllama } from "./ollama.js";
 
@@ -127,12 +127,17 @@ function relationsSection(s) {
       : "No caravan on the road.";
     const envoy = (s.pendingEnvoys || []).some((e) => e.to === rec.id) ? " An envoy is on the road." : "";
     const stock = Object.entries(rec.stockpile).filter(([, q]) => q > 0).map(([g, q]) => g + " " + Math.floor(q)).join(" · ") || "bare stores";
+    const allyState = allied(s, 0, rec.id) ? "Allied: caravans carry more, and their guards answer raids."
+      : rec.allyOffer ? "An alliance proposal waits on their leader."
+      : "Not allied.";
+    const allyBtn = allied(s, 0, rec.id) ? "" : `<div class="row"><button data-suggest-ally="${rec.id}">Suggest alliance</button></div>`;
     return `<div class="village-card">
       <p><b>${rec.name}</b> · led by ${rec.leaderName} · ${rec.pop} souls · ${rec.active ? "stirring nearby" : "distant"} · at ${rec.center[0]},${rec.center[1]}</p>
       <p>Relations: <b>${rel} (${relationBand(rel)})</b>${rec.lastEvent ? " · " + rec.lastEvent : ""}${envoy}</p>
+      <p>${allyState}</p>
       <p class="muted">Stores: ${stock} · ${rec.coins} coins · tech ${TECH_TIERS[rec.techLevel] ? TECH_TIERS[rec.techLevel].name : "unknown"}</p>
       <p>${caravanLine}</p>
-      <div class="row"><button data-visit="${rec.id}">Visit</button></div>
+      <div class="row"><button data-visit="${rec.id}">Visit</button></div>${allyBtn}
       <label>Suggest a trade: give
         <select data-trade-give="${rec.id}">${goods.map((g) => `<option>${g}</option>`).join("")}</select>
         <input data-trade-giveqty="${rec.id}" type="number" min="1" max="40" value="5" style="width:3.5em">
@@ -248,6 +253,9 @@ function renderPanel() {
       const wantGood = document.querySelector(`[data-trade-want="${id}"]`).value;
       const wantQty = Number(document.querySelector(`[data-trade-wantqty="${id}"]`).value);
       doGod("suggest_trade", null, null, { to: id, give: { good: giveGood, qty: giveQty }, want: { good: wantGood, qty: wantQty } });
+    }));
+    document.querySelectorAll("[data-suggest-ally]").forEach((btn) => btn.addEventListener("click", () => {
+      doGod("suggest_alliance", null, null, { to: Number(btn.dataset.suggestAlly) });
     }));
   }
 }
