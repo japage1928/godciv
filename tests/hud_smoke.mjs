@@ -80,6 +80,15 @@ assert.ok(main.includes('doGod("suggest_alliance"'), "the alliance button must c
 assert.ok(main.includes("Allied: caravans carry more"), "the panel must show allied status");
 console.log("alliances: status + suggest-alliance button wired");
 
+// War: the relations card names an active war with its exhaustion,
+// names rivalry when trade has stopped, and never offers the god a
+// way to declare one.
+assert.ok(main.includes("At war."), "the panel must name an active war");
+assert.ok(main.includes("War exhaustion"), "the panel must show war exhaustion");
+assert.ok(main.includes("Rivalry: trade has stopped"), "the panel must name rivalry");
+assert.ok(!main.includes('doGod("declare_war"'), "the panel must never offer to declare war");
+console.log("war: status + exhaustion + rivalry, no declare-war button");
+
 // Defense HUD: the raid banner reports guards posted and towers
 // manned, and the panel reports the defense section.
 assert.ok(main.includes("towers manned"), "the raid banner must report towers manned");

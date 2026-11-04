@@ -11,6 +11,9 @@ import * as THREE from "../vendor/three.module.js";
 import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, towerManned, terrainHeight } from "./sim.js";
 
 const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, guard: 0x546e7a, student: 0x78909c, child: 0xb0bec5 };
+// Village colors, shared with the standing-stone markers: a war
+// party reads as its village at a glance.
+const VILLAGE_COLORS = { 0: 0xb71c1c, 1: 0xd7a94e, 2: 0x00897b };
 const CELL = 1;
 // Grass tint targets per season: the ground shifts with the year.
 const SEASON_GRASS = {
@@ -1514,6 +1517,13 @@ export class Renderer {
       u.quill.visible = (v.education || 0) >= 5;
       u.toolMesh.visible = (v.tool || 0) > 0;
       if (u.spear && u.sash) u.spear.visible = u.sash.visible = v.job === "guard";
+      // War fighters: dark tunic, spear, and a sash in their
+      // village's color. The sash color resets when the flag
+      // clears, so a stood-down fighter reads as a civilian again.
+      if (v.warParty) {
+        u.body.material.color.setHex(0x2b2b2b);
+        if (u.spear && u.sash) { u.spear.visible = true; u.sash.visible = true; u.sash.material.color.setHex(VILLAGE_COLORS[v.village ?? 0] ?? 0xb71c1c); }
+      } else if (u.sash) u.sash.material.color.setHex(0xb71c1c);
       if ((v.tool || 0) >= 3) u.toolMesh.material.color.setHex(0xe8e8e8);
       else if ((v.tool || 0) >= 2) u.toolMesh.material.color.setHex(0xffd700);
       else u.toolMesh.material.color.setHex(0x9e9e9e);

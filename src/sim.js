@@ -463,6 +463,133 @@ export function breakAlliance(state, a, b, reason, cooldownDays = ALLIANCE_COOLD
   return true;
 }
 
+// --- war: rivalry, declaration, parties, exhaustion, peace ---
+
+export function warWith(state, a, b) {
+  return (state.wars || []).find((w) => (w.a === a && w.b === b) || (w.a === b && w.b === a)) || null;
+}
+
+export function truceUntil(state, a, b) {
+  return (state.truces || {})[pairKey(a, b)] || 0;
+}
+
+function warHomeCenter(state, id) {
+  if (id === 0) return [state._cx, state._cz];
+  const rec = villageRecord(state, id);
+  return rec ? rec.center : [state._cx, state._cz];
+}
+
+export function partyFighters(state, partyId) {
+  return state.villagers.filter((v) => v.warParty === partyId);
+}
+
+// The nearest villager of the target village to a point: what a war
+// fighter chases. Fighters never chase their own village's people.
+function nearestEnemyVillager(state, x, z, maxD, targetVillage) {
+  let best = null, bestD = maxD;
+  for (const v of state.villagers) {
+    if ((v.village ?? 0) !== targetVillage || v.health <= 0) continue;
+    const d = Math.hypot(v.x - x, v.z - z);
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  return best;
+}
+
+// The nearest flagged fighter NOT of the given village: what makes
+// defenders flee and guards hold. A village's own fighters never
+// spook its own people.
+export function nearestEnemyFighter(state, x, z, maxD, ownVillage) {
+  let best = null, bestD = maxD;
+  for (const v of state.villagers) {
+    if (!v.warParty || (v.village ?? 0) === ownVillage || v.health <= 0) continue;
+    const d = Math.hypot(v.x - x, v.z - z);
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  return best;
+}
+
+// Declare war between two villages: the record, the log line, and
+// the marching party. Betrayal (declaring on a current ally) breaks
+// the alliance and sets relations to -40: the betrayal itself is
+// the act. The dawn leader decision never calls this on an ally —
+// the gate requires -70, and an alliance breaks under 20 first —
+// so the betrayal branch is leader-intent territory, built and
+// tested at the unit level, never auto-fired. The god never calls
+// this: applyGod refuses declare_war outright.
+export function declareWar(state, grid, a, b) {
+  if (allied(state, a, b)) {
+    breakAlliance(state, a, b, "betrayal", WAR_COOLDOWN_DAYS);
+    setRelation(state, a, b, WAR_RIVALRY);
+    log(state, villageName(state, a) + " betrays " + villageName(state, b) + "! The alliance is broken.");
+  }
+  state.wars.push({ a, b, sinceDay: state.day, exhaustion: 0, lastBattleDay: state.day, peaceOffer: null, offerCount: 0 });
+  log(state, villageName(state, a) + " declares war on " + villageName(state, b) + ".");
+  spawnWarParty(state, grid, a, b);
+  return warWith(state, a, b);
+}
+
+// A war party is 3-6 flagged villagers of the declaring village,
+// picked guards-first, who march on the target. The fighters stay
+// real villagers: their deaths cost the home village people through
+// the existing removeVillager path, and their flags survive saves.
+export function spawnWarParty(state, grid, from, to) {
+  const fromRec = villageRecord(state, from);
+  if (fromRec) touchVillage(state, grid, fromRec);
+  const pop = from === 0 ? ownVillagers(state).length : villagePop(state, fromRec);
+  const n = clamp(2 + Math.floor(pop / 10), WAR_PARTY_MIN, WAR_PARTY_MAX);
+  const [hx, hz] = warHomeCenter(state, from);
+  const [tx, tz] = warHomeCenter(state, to);
+  generateCorridor(grid, hx, hz, tx, tz);
+  const able = state.villagers
+    .filter((v) => (v.village ?? 0) === from && !v.warParty && !v.reinforcement && (v.ageDays ?? 25) >= CHILD_DAYS && v.health > 0)
+    .sort((a, b) => ((b.job === "guard") - (a.job === "guard")) || (a.id - b.id));
+  const picked = able.slice(0, n);
+  if (!picked.length) {
+    log(state, villageName(state, from) + " cannot muster a war party.");
+    return null;
+  }
+  const party = { id: state.nextWarPartyId++, from, to, size: picked.length, loot: {}, load: 0, retreating: false, _lootAt: 0 };
+  state.warParties.push(party);
+  for (const v of picked) {
+    v.warParty = party.id;
+    v._homeJob = v.job;
+    v.state = "idle";
+    setTarget(state, grid, v, tx, tz);
+  }
+  log(state, "A war party of " + picked.length + " marches from " + villageName(state, from) + " against " + villageName(state, to) + ".");
+  return party;
+}
+
+// Stand a party down: flags clear, jobs restore, fighters walk home
+// through the ordinary villager logic. Used on arrival home laden,
+// on peace, and on white peace.
+export function standDownParty(state, grid, party) {
+  for (const v of partyFighters(state, party.id)) {
+    v.warParty = null;
+    v._chase = false;
+    v._foe = null;
+    v.job = v._homeJob || v.job;
+    v._homeJob = null;
+    v.target = null; v.path = null; v.state = "idle";
+    const [hx, hz] = warHomeCenter(state, party.from);
+    setTarget(state, grid, v, hx, hz);
+  }
+  state.warParties = (state.warParties || []).filter((p) => p !== party);
+}
+
+// End a war: the record goes, relations settle at -10, and a
+// 30-day truce blocks the next declaration. Parties stand down.
+export function endWar(state, grid, war, kind) {
+  state.wars = (state.wars || []).filter((w) => w !== war);
+  for (const p of [...(state.warParties || [])]) {
+    if ((p.from === war.a && p.to === war.b) || (p.from === war.b && p.to === war.a)) standDownParty(state, grid, p);
+  }
+  setRelation(state, war.a, war.b, -10);
+  state.truces[pairKey(war.a, war.b)] = state.day + WAR_COOLDOWN_DAYS;
+  if (kind === "white") log(state, "After thirty quiet days, the war between " + villageName(state, war.a) + " and " + villageName(state, war.b) + " ends in white peace. Relations settle at -10.");
+  else log(state, villageName(state, war.a) + " and " + villageName(state, war.b) + " make peace. The war is over. Relations settle at -10.");
+}
+
 export function ownVillagers(state) {
   return state.villagers.filter((v) => (v.village ?? 0) === 0);
 }
@@ -808,6 +935,7 @@ export function newWorld(seed) {
     villageSites: sites,
     villages: sites.map((s, i) => makeVillageRecord(seed, i + 1, s, sites.map((_, j) => j + 1).filter((id) => id !== i + 1))),
     caravans: [], warParties: [], nextCaravanId: 1, nextWarPartyId: 1,
+    wars: [], truces: {}, borderIncidents: {},
     pendingEnvoys: [], tradeSeasons: {}, _villageSeasonKey: -1,
   };
   for (const b of state.buildings) cellAt(grid, b.x, b.z).building = b.type;
@@ -966,7 +1094,7 @@ export function delegateRoles(state, grid = null) {
   // Students go to school, not to work; toddlers stay home. Only the
   // player's own villagers are delegated: neighbor villagers keep
   // their own hours under their own leader.
-  const villagers = ownVillagers(state).filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v));
+  const villagers = ownVillagers(state).filter((v) => (v.ageDays ?? 25) >= CHILD_DAYS && !isStudent(state, v) && !v.warParty);
   // A god-suggested trade waits for the leader's judgment at
   // delegation. The leader accepts only on a real surplus, a real
   // deficit, warm enough relations, and a free season; otherwise
@@ -1627,12 +1755,14 @@ function think(state, grid, v) {
   const cx = state._cx, cz = state._cz;
   // Urgent needs override jobs, exactly as in the Luanti brain.
   // Raiders send villagers running away from the threat, never
-  // toward the center where the raiders are headed.
-  const raiderNear = nearestRaider(state, v.x, v.z, 8);
+  // toward the center where the raiders are headed. An enemy war
+  // fighter is the same kind of threat, and a guard on duty holds
+  // against either while still standing.
+  const raiderNear = nearestRaider(state, v.x, v.z, 8) || nearestEnemyFighter(state, v.x, v.z, 8, 0);
   // A guard on duty holds the post while a raid is active, as long as
   // they are still standing: fear still accumulates, and a wounded
   // guard (below GUARD_BREAK_HEALTH) falls back like anyone else.
-  const guardOnDuty = v.job === "guard" && state.raidActive && v.health >= GUARD_BREAK_HEALTH;
+  const guardOnDuty = v.job === "guard" && (state.raidActive || !!nearestEnemyFighter(state, v.x, v.z, 8, 0)) && v.health >= GUARD_BREAK_HEALTH;
   if (!guardOnDuty && (v.fear >= 50 || raiderNear || (state.elapsed < state.effects.floodUntil && Math.hypot(v.x - cx, v.z - cz) < 14))) {
     v.state = "flee";
     if (v.job === "guard" && state.raidActive && v.health < GUARD_BREAK_HEALTH && !v.brokeOff) {
@@ -1759,9 +1889,16 @@ function think(state, grid, v) {
     const post = v.post;
     if (!post) {
       v.state = "idle";
-    } else if (state.raidActive) {
+    } else if (state.raidActive || nearestEnemyFighter(state, post.x + 0.5, post.z + 0.5, GUARD_POST_RADIUS, 0)) {
+      // During a raid — or a war party's approach — guards engage
+      // the nearest threat within range of the post, raider or
+      // fighter alike, otherwise they hold it.
       const r = nearestRaider(state, post.x + 0.5, post.z + 0.5, GUARD_POST_RADIUS);
-      if (r && v.health >= GUARD_BREAK_HEALTH) setTarget(state, grid, v, Math.round(r.x), Math.round(r.z));
+      const f = nearestEnemyFighter(state, post.x + 0.5, post.z + 0.5, GUARD_POST_RADIUS, 0);
+      const t = r && f
+        ? (Math.hypot(r.x - post.x, r.z - post.z) <= Math.hypot(f.x - post.x, f.z - post.z) ? r : f)
+        : (r || f);
+      if (t && v.health >= GUARD_BREAK_HEALTH) setTarget(state, grid, v, Math.round(t.x), Math.round(t.z));
       else setTarget(state, grid, v, post.x, post.z);
     } else if (state.raidPendingDay && state.raidPendingDay > state.day) {
       setTarget(state, grid, v, post.x, post.z);
@@ -2446,6 +2583,24 @@ export const ALLIANCE_CAPACITY_BONUS = 10;
 export const ALLIED_GUARDS = 2;
 export const ALLIED_GUARD_MIN_POP = 5;
 export const ALLIED_GUARD_DEATH_RELATION = -2;
+// War (Phase H, doc §13.5-13.7): rivalry at -40 stops trade (the
+// relation gate already refuses below 0); war needs rivalry plus
+// -70 plus a clear 30-day cooldown. A party is 3-6 fighters, loot
+// caps at 20, exhaustion ends wars, and the god never declares one.
+export const WAR_RIVALRY = -40;
+export const WAR_MIN_RELATION = -70;
+export const WAR_COOLDOWN_DAYS = 30;
+export const WAR_PARTY_MIN = 3;
+export const WAR_PARTY_MAX = 6;
+export const WAR_PARTY_MIN_POP = 6;
+export const WAR_LOOT_CAP = 20;
+export const WAR_LOOT_TICK = 2;
+export const WAR_LOOT_INTERVAL = 5;
+export const WAR_RETREAT_FRACTION = 0.25;
+export const WAR_EXHAUSTION_PEACE = 10;
+export const WAR_WHITE_PEACE_DAYS = 30;
+export const WAR_KILL_RELATION = -8;
+export const WAR_BORDER_INCIDENT_CHANCE = 0.5;
 // Disasters must move the population, visibly, but one use never
 // wipes the village: no single disaster kills more than a quarter
 // of the player's people (at least 1 in a tiny village). The same
@@ -2541,7 +2696,7 @@ export function makeRaider(state, x, z) {
 // job when they get there. Too small a village sends no one.
 export function dispatchAlliedGuards(state, grid, rec) {
   touchVillage(state, grid, rec);
-  const live = state.villagers.filter((v) => v.village === rec.id && !v.reinforcement);
+  const live = state.villagers.filter((v) => v.village === rec.id && !v.reinforcement && !v.warParty);
   if (live.length < ALLIED_GUARD_MIN_POP) {
     log(state, rec.name + " is too small to send aid.");
     return 0;
@@ -2694,6 +2849,9 @@ function stepForeignVillager(state, grid, v, dt) {
   const rec = villageRecord(state, v.village);
   const [cx, cz] = rec ? rec.center : [state._cx, state._cz];
   const phase = phaseOf(state.time);
+  // War fighters march and fight under the war step, never the
+  // civilian arms below: no fleeing, no milling about.
+  if (v.warParty) { stepWarFighter(state, grid, v, dt); return; }
   // Reinforcements do not flee or mill about: while the raid runs
   // they close with raiders or hold the village center, and when
   // it ends they walk home. Arrival home clears the flag and
@@ -2718,7 +2876,9 @@ function stepForeignVillager(state, grid, v, dt) {
   } else {
     // A raider close by sends a neighbor villager running now, not
     // at the next rethink: the same rule the player's villagers get.
-    if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
+    // An enemy war fighter does the same: armies spook civilians.
+    if ((state.raiders.length || (state.warParties || []).length) && v.state !== "flee"
+      && (nearestRaider(state, v.x, v.z, 5) || nearestEnemyFighter(state, v.x, v.z, 5, v.village))) {
       v.state = "flee"; v.rethinkAt = state.elapsed;
     }
     if (v.state === "flee") {
@@ -2956,13 +3116,16 @@ export function dawnVillages(state, grid) {
       breakAlliance(state, 0, rec.id, (l ? l.name : "The leader") + " ends it: relations have soured", 30);
     }
     // Deactivation: five quiet game-days with no trigger, no
-    // caravan in flight to or from the village, and no raiders
-    // within 20 cells of its center.
+    // caravan in flight to or from the village, no raiders within
+    // 20 cells of its center, no deployed reinforcements homed
+    // here, and no war party homed here or marching on it.
     if (rec.active && state.day - (rec.lastTriggerDay || 0) >= DEACTIVATE_AFTER_DAYS) {
       const busy = (state.caravans || []).some((c) => c.from === rec.id || c.to === rec.id);
       const raidersNear = (state.raiders || []).some((r) => Math.hypot(r.x - rec.center[0], r.z - rec.center[1]) < 20);
       const deployed = state.villagers.some((v) => v.village === rec.id && v.reinforcement);
-      if (!busy && !raidersNear && !deployed) deactivateVillage(state, grid, rec);
+      const atWarHere = state.villagers.some((v) => v.warParty && (v.village === rec.id
+        || (state.warParties || []).some((p) => p.id === v.warParty && p.to === rec.id)));
+      if (!busy && !raidersNear && !deployed && !atWarHere) deactivateVillage(state, grid, rec);
     }
   }
 }
@@ -3209,6 +3372,244 @@ function stealFromCaravan(state, c, n) {
   return take;
 }
 
+// --- war parties: march, fight, loot, retreat ---
+
+// One flagged fighter's step: chase the nearest enemy villager
+// within 12 cells, else march on the target center; retreating
+// parties walk home. Hunger and work never touch a fighter: the
+// war is their job until they stand down. Movement mirrors the
+// foreign-villager step (path-following, then direct), so a
+// fighter never walks into a blocked cell and stalls.
+function stepWarFighter(state, grid, v, dt) {
+  const party = (state.warParties || []).find((p) => p.id === v.warParty);
+  if (!party) { v.warParty = null; return; }
+  const [hx, hz] = warHomeCenter(state, party.from);
+  const [tx, tz] = warHomeCenter(state, party.to);
+  if (party.retreating) {
+    v._chase = false;
+    v._foe = null;
+    if (!v.target && state.elapsed >= v.rethinkAt) {
+      v.rethinkAt = state.elapsed + 2 + villageRng(state)() * 2;
+      setTarget(state, grid, v, hx, hz);
+    }
+  } else if (state.elapsed >= v.rethinkAt) {
+    // A fighter commits to one foe until the foe falls or escapes
+    // beyond reach: switching to the nearest body every rethink
+    // zigzagged between fleeing defenders and killed no one.
+    v.rethinkAt = state.elapsed + 2 + villageRng(state)() * 2;
+    let foe = state.villagers.find((o) => o.id === v._foe);
+    if (foe && (foe.health <= 0 || (foe.village ?? 0) !== party.to)) { foe = null; v._foe = null; }
+    if (foe && Math.hypot(foe.x - v.x, foe.z - v.z) > 12) { foe = null; v._foe = null; }
+    if (!foe) {
+      foe = nearestEnemyVillager(state, v.x, v.z, 12, party.to);
+      if (foe) v._foe = foe.id;
+    }
+    if (foe) {
+      v._chase = true;
+      setTarget(state, grid, v, Math.round(foe.x), Math.round(foe.z));
+      // Chase direct, like a hunter on a deer: a path recomputed
+      // every few seconds through village clutter loses a straight
+      // fleeing line every time. The march itself keeps its path.
+      v.path = null;
+    }
+    else { v._chase = false; setTarget(state, grid, v, tx, tz); }
+  }
+  // A fighter closing on an enemy runs the foe down: flee speed
+  // is 3.4, and equal speeds plus a head start meant a straight
+  // fleeing line was never caught — wars came out bloodless. The
+  // march itself stays slow.
+  const chaseSpeed = v._chase ? 4.2 : 2.2;
+  if (v.path && v.path.length) {
+    const [px, pz] = v.path[0];
+    const dx = px + 0.5 - v.x, dz = pz + 0.5 - v.z, dist = Math.hypot(dx, dz);
+    if (dist < 0.25) v.path.shift();
+    else {
+      const wkind = state.weather ? state.weather.kind : "clear";
+      const moveFactor = wkind === "snow" ? 0.85 : wkind === "storm" ? 0.9 : 1;
+      const sp = chaseSpeed * moveFactor * dt;
+      v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist);
+    }
+  } else if (v.target) {
+    const dx = v.target[0] + 0.5 - v.x, dz = v.target[1] + 0.5 - v.z, dist = Math.hypot(dx, dz);
+    const tc = peekCell(grid, v.target[0], v.target[1]);
+    if (dist < 1.1 || !tc || tc.blocked) { v.target = null; v.path = null; v.state = "idle"; }
+    else { const sp = chaseSpeed * dt; v.x += (dx / dist) * Math.min(sp, dist); v.z += (dz / dist) * Math.min(sp, dist); }
+  }
+  v._moving = !!(v.path && v.path.length) || !!v.target;
+}
+
+// War combat: fighters grind the nearest enemy villager in reach
+// with continuous contact damage, the way raiders slay villagers
+// (brief contact wounds, sustained contact kills); defending
+// guards answer with their once-a-second strikes. Every death
+// costs exhaustion +2 on the war; a kill by a war party costs the
+// pair -8 relations. Deaths go through removeVillager, so they are
+// named, counted, and cost the home village people exactly like
+// any other death.
+function stepWarCombat(state, grid, dt) {
+  if (!(state.warParties || []).length) return;
+  for (const party of [...state.warParties]) {
+    const war = warWith(state, party.from, party.to);
+    if (!war) continue;
+    for (const v of partyFighters(state, party.id)) {
+      if (v.health <= 0) continue;
+      const enemy = nearestEnemyVillager(state, v.x, v.z, 1.3, party.to);
+      if (!enemy) continue;
+      enemy.health -= (6 + 2 * (v.tool || 0)) * dt;
+      enemy.fear = 85;
+      if (enemy.health <= 0) {
+        const ename = enemy.name, ehome = villageName(state, party.to);
+        removeVillager(state, enemy, "slain in the war");
+        war.exhaustion += 2;
+        war.lastBattleDay = state.day;
+        adjustRelation(state, party.from, party.to, WAR_KILL_RELATION);
+        log(state, "The war claims " + ename + " of " + ehome + " (" + WAR_KILL_RELATION + " relations).");
+      }
+    }
+  }
+  // Defending guards strike back: once per second, any guard of a
+  // village under attack hits the nearest fighter within reach.
+  // One pass after the party loop: a gate inside it would let the
+  // first party's guards strike and starve the second party's.
+  if (state.elapsed >= (state._warGuardAt || 0)) {
+    state._warGuardAt = state.elapsed + 1;
+    for (const g of state.villagers) {
+      if (g.job !== "guard" || g.health <= 0 || g.warParty) continue;
+      let best = null, bestD = 1.3, bestWar = null;
+      for (const party of state.warParties) {
+        if (party.to !== (g.village ?? 0)) continue;
+        for (const f of partyFighters(state, party.id)) {
+          const d = Math.hypot(f.x - g.x, f.z - g.z);
+          if (d < bestD) { bestD = d; best = f; bestWar = warWith(state, party.from, party.to); }
+        }
+      }
+      if (!best) continue;
+      best.health -= GUARD_DAMAGE_BASE + (g.tool || 0);
+      if (best.health <= 0) {
+        removeVillager(state, best, "slain defending the village");
+        if (bestWar) { bestWar.exhaustion += 2; bestWar.lastBattleDay = state.day; }
+      }
+    }
+  }
+}
+
+// Party-level stepping: arrival at the target wakes it, loot claims
+// tick while fighters stand on enemy ground, bloodied or laden
+// parties retreat, and a party that walks home alive banks its
+// loot. Goods leave the defender's stockpile ONLY on arrival home:
+// a claim is a promise until the party gets back with it.
+function stepWarParties(state, grid, dt) {
+  for (const party of [...(state.warParties || [])]) {
+    const living = partyFighters(state, party.id);
+    if (!living.length) {
+      state.warParties = state.warParties.filter((p) => p !== party);
+      log(state, "The war party of " + villageName(state, party.from) + " is destroyed. Its loot is lost.");
+      continue;
+    }
+    const [hx, hz] = warHomeCenter(state, party.from);
+    const [tx, tz] = warHomeCenter(state, party.to);
+    if (!party.retreating) {
+      if (living.length <= Math.max(1, Math.ceil(party.size * WAR_RETREAT_FRACTION)) && living.length < party.size) {
+        party.retreating = true;
+        log(state, villageName(state, party.from) + "'s war party falls back, bloodied.");
+      } else {
+        const onGround = living.some((f) => Math.hypot(f.x - tx, f.z - tz) < 20);
+        if (onGround) {
+          const rec = villageRecord(state, party.to);
+          if (rec) touchVillage(state, grid, rec);
+          if (state.elapsed >= (party._lootAt || 0)) {
+            party._lootAt = state.elapsed + WAR_LOOT_INTERVAL;
+            if (party.load < WAR_LOOT_CAP) {
+              const pile = stockpileFor(state, party.to);
+              const best = Object.keys(PRICES).map((g) => [g, pile[g] || 0]).sort((a, b) => b[1] - a[1])[0];
+              if (best && best[1] > 0) {
+                const take = Math.min(WAR_LOOT_TICK, WAR_LOOT_CAP - party.load, best[1]);
+                party.loot[best[0]] = (party.loot[best[0]] || 0) + take;
+                party.load += take;
+                if (party.load >= WAR_LOOT_CAP) {
+                  party.retreating = true;
+                  log(state, villageName(state, party.from) + "'s war party turns home laden with loot.");
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (party.retreating) {
+      const home = living.every((f) => Math.hypot(f.x - (hx + 0.5), f.z - (hz + 0.5)) < 4);
+      if (home) {
+        const defPile = stockpileFor(state, party.to);
+        const homePile = stockpileFor(state, party.from);
+        let moved = 0;
+        for (const [good, qty] of Object.entries(party.loot)) {
+          const take = Math.min(qty, defPile[good] || 0);
+          if (take > 0) { defPile[good] -= take; homePile[good] = (homePile[good] || 0) + take; moved += take; }
+        }
+        if (moved > 0) log(state, villageName(state, party.from) + "'s war party returns with " + moved + " looted goods.");
+        standDownParty(state, grid, party);
+      }
+    }
+  }
+}
+
+// One dawn of war: exhaustion accrues, quiet wars end in white
+// peace, weary wars are offered peace and accepted, rivalries seed
+// at most one border incident per season, and a leader whose
+// relations have cratered declares war. Leaders decide; the god
+// has no declaration path anywhere in this file.
+export function dawnWars(state, grid) {
+  const sKey = seasonKey(state);
+  for (const war of [...(state.wars || [])]) {
+    war.exhaustion += 1;
+    if (state.day - war.lastBattleDay >= WAR_WHITE_PEACE_DAYS) {
+      endWar(state, grid, war, "white");
+      continue;
+    }
+    if (war.exhaustion >= WAR_EXHAUSTION_PEACE) {
+      if (!war.peaceOffer) {
+        const from = war.offerCount % 2 === 0 ? war.a : war.b;
+        war.peaceOffer = { from, day: state.day };
+        war.offerCount++;
+        log(state, villageName(state, from) + " offers peace to " + villageName(state, from === war.a ? war.b : war.a) + ".");
+      } else if (state.day - war.peaceOffer.day >= 1) {
+        log(state, villageName(state, war.peaceOffer.from === war.a ? war.b : war.a) + " accepts the offer of peace.");
+        endWar(state, grid, war, "peace");
+      } else if (state.day - war.peaceOffer.day > ALLIANCE_OFFER_DAWNS) {
+        war.peaceOffer = null;
+        log(state, "The offer of peace lapses.");
+      }
+    }
+  }
+  const pairs = [[0, 1], [0, 2], [1, 2]];
+  for (const [a, b] of pairs) {
+    const rel = getRelation(state, a, b);
+    // Border incidents: rivalry seeds at most one per season — a
+    // log line and -2. Seeded on the village stream, so a world
+    // replays the same incidents.
+    if (rel <= WAR_RIVALRY && !warWith(state, a, b)) {
+      const flag = pairKey(a, b) + ":" + sKey;
+      if (!state.borderIncidents[flag] && villageRng(state)() < WAR_BORDER_INCIDENT_CHANCE) {
+        state.borderIncidents[flag] = true;
+        adjustRelation(state, a, b, -2);
+        log(state, "A border incident between " + villageName(state, a) + " and " + villageName(state, b) + " sours relations (-2).");
+      }
+    }
+    // Declaration: rivalry plus -70 plus a clear cooldown, never
+    // against an ally, never twice. The larger village declares:
+    // the stronger village is the one that marches.
+    if (warWith(state, a, b) || allied(state, a, b)) continue;
+    if (state.day < truceUntil(state, a, b)) continue;
+    if (rel > WAR_MIN_RELATION) continue;
+    const popA = a === 0 ? ownVillagers(state).length : villagePop(state, villageRecord(state, a));
+    const popB = b === 0 ? ownVillagers(state).length : villagePop(state, villageRecord(state, b));
+    const declarer = popA >= popB ? a : b;
+    const declarerPop = declarer === a ? popA : popB;
+    if (declarerPop < WAR_PARTY_MIN_POP) continue;
+    declareWar(state, grid, declarer, declarer === a ? b : a);
+  }
+}
+
 function stepRaiders(state, grid, dt) {
   if (!state.raiders.length) {
     if (state.raidActive) resolveRaid(state);
@@ -3392,6 +3793,9 @@ export function step(state, grid, dt) {
     // Neighbor villages live their own dawn: abstract ticks,
     // envoy arrivals, first traders, season drift, deactivation.
     dawnVillages(state, grid);
+    // Wars live their dawn too: exhaustion, peace, border
+    // incidents, and leaders' declarations.
+    dawnWars(state, grid);
     if (ownBuildings(state).some((b) => b.type === "shrine")) state.faith = clamp(state.faith + 3, 0, 100);
     // Calendar: a festival fires when the village can afford it.
     const fest = FESTIVALS[yearDayOf(state.day)];
@@ -3523,6 +3927,9 @@ export function step(state, grid, dt) {
     // before the shared vitals so the player's hunger, wells, and
     // healers never touch them.
     if ((v.village ?? 0) !== 0) { stepForeignVillager(state, grid, v, dt); continue; }
+    // War fighters march under the war step, before hunger, work,
+    // and fear: the war is their job until they stand down.
+    if (v.warParty) { stepWarFighter(state, grid, v, dt); continue; }
     // Hunger rises faster in winter cold and summer heat; water from a
     // well and rain both take the edge off. Snow and storms slow feet.
     let hungerRate = (v.ageDays ?? 25) < CHILD_DAYS ? 0.23 : hasWell ? 0.34 : 0.38;
@@ -3546,8 +3953,10 @@ export function step(state, grid, dt) {
     v.fear = clamp(v.fear - dt * 3, 0, 100);
     if (wkind === "storm") v.fear = clamp(v.fear + dt * 0.5, 0, 100);
     // A raider close by sends a villager running now, not at the
-    // next rethink: villagers never seek combat unarmed.
-    if (state.raiders.length && v.state !== "flee" && nearestRaider(state, v.x, v.z, 5)) {
+    // next rethink: villagers never seek combat unarmed. An enemy
+    // war fighter does the same.
+    if ((state.raiders.length || (state.warParties || []).length) && v.state !== "flee"
+      && (nearestRaider(state, v.x, v.z, 5) || nearestEnemyFighter(state, v.x, v.z, 5, 0))) {
       v.state = "flee"; v.rethinkAt = state.elapsed;
     }
     if (v.health <= 0) {
@@ -3640,18 +4049,38 @@ export function step(state, grid, dt) {
   // Caravans walk after raiders move, so a held-up caravan reacts
   // to the raiders' current positions, not last tick's.
   stepCaravans(state, grid, dt);
+  // War parties fight, loot, and retreat after caravans: combat
+  // resolves on positions the whole tick has already settled.
+  stepWarCombat(state, grid, dt);
+  stepWarParties(state, grid, dt);
 }
 
 // --- diplomacy intents: the validation every leader decision ---
 // passes through. Village leaders decide; the god proposes and
-// sends envoys. In Phase F the only live intents are trade offers
-// and envoys: relation moves (alliances, war) are validated as
-// rejected, honestly, until their phases land. A war declaration
-// is rejected through every path, including this one.
+// sends envoys. War declarations validate against the dawn gates
+// (rivalry, -70, cooldown, betrayal); the god's own declare_war
+// action is refused outright in applyGod.
 export function validateDiplomacyIntent(state, intent) {
   if (!intent || typeof intent.kind !== "string") return { ok: false, reason: "An intent needs a kind." };
   if (intent.kind === "declare_war") {
-    return { ok: false, reason: "The god cannot declare war, and no leader intent declares war in this phase." };
+    // War declarations validate against the same gates the dawn
+    // leader decision uses: rivalry plus -70 plus a clear
+    // cooldown, never against an ally except by betrayal, never
+    // twice. The god's own declare_war action is still refused
+    // outright in applyGod: this validates leader intents only.
+    const rec = villageRecord(state, intent.to);
+    if (!rec || !rec.known) return { ok: false, reason: "War is declared only on villages you have met." };
+    if (warWith(state, 0, intent.to)) return { ok: false, reason: "Those villages are already at war." };
+    if (allied(state, 0, intent.to)) return { ok: true, betrayal: true };
+    if (state.day < truceUntil(state, 0, intent.to)) return { ok: false, reason: "A truce holds. War must wait." };
+    if (getRelation(state, 0, intent.to) > WAR_MIN_RELATION) return { ok: false, reason: "War needs rivalry and relations at " + WAR_MIN_RELATION + " or worse." };
+    return { ok: true };
+  }
+  if (intent.kind === "offer_peace") {
+    const war = warWith(state, 0, intent.to);
+    if (!war) return { ok: false, reason: "Those villages are not at war." };
+    if (war.exhaustion < WAR_EXHAUSTION_PEACE) return { ok: false, reason: "The war is not weary enough for peace (exhaustion " + war.exhaustion + "/" + WAR_EXHAUSTION_PEACE + ")." };
+    return { ok: true };
   }
   if (intent.kind === "relation_move") {
     // Alliance moves validate; they do not execute here. A
@@ -3663,6 +4092,7 @@ export function validateDiplomacyIntent(state, intent) {
     if (!rec || !rec.known) return { ok: false, reason: "Relations move only with villages you have met." };
     if (intent.move === "propose_alliance") {
       if (allied(state, 0, intent.to)) return { ok: false, reason: "The villages are already allies." };
+      if (warWith(state, 0, intent.to)) return { ok: false, reason: "Those villages are at war. Make peace first." };
       if (getRelation(state, 0, intent.to) < ALLIANCE_MIN_RELATION) return { ok: false, reason: "Relations are too cold for an alliance (need " + ALLIANCE_MIN_RELATION + ")." };
       if (!allianceCooldownOk(state, 0, intent.to)) return { ok: false, reason: "A recent break must cool first." };
       if (rec.allyOffer) return { ok: false, reason: "A proposal is already before them." };
@@ -3897,8 +4327,9 @@ export function applyGod(state, grid, action, x = null, z = null, opts = {}) {
     }
     case "declare_war":
       // There is no path for the god to declare war: war is a
-      // leaders' decision, in a later phase. This case exists so the
-      // refusal is explicit and testable, not a silent unknown.
+      // leaders' decision, at dawn, behind the intent gates. This
+      // case exists so the refusal is explicit and testable, not
+      // a silent unknown.
       return { ok: false, reason: "The god cannot declare war. War is for village leaders, in a later phase." };
     case "visit": {
       // Walking there: the camera dwelling near a village stirs it
@@ -4041,6 +4472,11 @@ export function deserialize(json) {
   if (!state.pendingEnvoys) state.pendingEnvoys = [];
   if (!state.tradeSeasons) state.tradeSeasons = {};
   if (state._villageSeasonKey == null) state._villageSeasonKey = -1;
+  // Phase H war fields: backfilled on every load, no bump. A save
+  // written before war existed loads at peace with no truces.
+  if (!state.wars) state.wars = [];
+  if (!state.truces) state.truces = {};
+  if (!state.borderIncidents) state.borderIncidents = {};
   grid._villageSites = state.villageSites || [];
   // Regenerate every chunk the save had generated, so chunks with no
   // deltas still count as generated (render + save round-trips).

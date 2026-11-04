@@ -2,7 +2,9 @@
 // (god proposal, player leader weighs, neighbor answers at dawn),
 // capacity grows, allies send guards to raids, and alliances break
 // on cold relations, on a leader's decision, and after a cooldown.
-// The god can never force an alliance, and war stays refused.
+// The god can never force an alliance, and the god can never
+// declare war (Phase H validates leader war intents against the
+// dawn gates; the god's own action stays refused).
 // Run: npm test  (or: node tests/allies_smoke.mjs)
 import assert from "node:assert";
 import {
@@ -76,7 +78,7 @@ function meet(state, rec, relation) {
   console.log("lapse: too-small neighbor, offer expires after 3 dawns");
 }
 
-// --- intent validation: propose / accept / end, war still refused ---
+// --- intent validation: propose / accept / end, war gates (Phase H) ---
 {
   const { state } = newWorld(42);
   const rec = state.villages[0];
@@ -91,9 +93,18 @@ function meet(state, rec, relation) {
   formAlliance(state, 0, rec.id);
   assert.equal(validateDiplomacyIntent(state, { kind: "relation_move", move: "end_alliance", to: rec.id }).ok, true, "ending an alliance must validate");
   assert.equal(validateDiplomacyIntent(state, { kind: "relation_move", move: "annex", to: rec.id }).ok, false, "an unknown move must be refused");
-  assert.equal(validateDiplomacyIntent(state, { kind: "declare_war", to: rec.id }).ok, false, "war intents stay refused in this phase");
+  // Phase H: a war intent on an ally validates as betrayal (a
+  // leader intent, never a god action); on a non-ally at warm
+  // relations the -70 gate refuses it. The god's own action stays
+  // refused through every path.
+  const betrayal = validateDiplomacyIntent(state, { kind: "declare_war", to: rec.id });
+  assert.equal(betrayal.ok, true, "a betrayal declaration validates for a leader intent");
+  assert.equal(betrayal.betrayal, true, "it must be flagged as betrayal");
+  breakAlliance(state, 0, rec.id, "test break");
+  setRelation(state, 0, rec.id, 0);
+  assert.equal(validateDiplomacyIntent(state, { kind: "declare_war", to: rec.id }).ok, false, "the -70 gate refuses a war intent at warm relations");
   assert.equal(applyGod(state, null, "declare_war").ok, false, "the god still cannot declare war");
-  console.log("intents: propose/accept/end validate, war refused");
+  console.log("intents: propose/accept/end validate, betrayal flags, -70 gate holds, god cannot declare war");
 }
 
 // --- reinforcements: two guards march, fight by guard rules,

@@ -162,4 +162,15 @@ const TYPES = ["towncenter", "hut", "longhouse", "greathall", "granary", "well",
   }
 }
 
+// War fighters render dark with a spear and a sash in their
+// village's color: the look is code, so the source must carry it.
+{
+  const fs = await import("node:fs");
+  const src = fs.readFileSync(new URL("../src/render.js", import.meta.url), "utf8");
+  assert.ok(src.includes("VILLAGE_COLORS"), "render.js must define village colors for war sashes");
+  assert.ok(src.includes("v.warParty"), "render.js must give war fighters their dark tunic + sash look");
+  assert.ok(/0x2b2b2b/.test(src), "the war tunic must be dark");
+  console.log("war fighters: dark tunic, spear, village-color sash");
+}
+
 console.log("render smoke test passed: all building types build, sync fills and grows the group");
