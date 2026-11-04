@@ -91,6 +91,13 @@ export function delegateRoles(state, grid = null) {
     builder: state.buildQueue.length ? Math.min(2, pop) : (demands.length || (state.day >= 2 && hutCount < 2) ? 1 : 0),
     hauler: pop >= 8 ? 1 : 0,
     teacher: hasSchool && pop >= 6 ? 1 : 0,
+    // Production jobs exist only where their workplace stands: a
+    // carpenter needs a workshop, a potter a kiln, a smith a
+    // smithy, factory workers a factory.
+    carpenter: state.buildings.some((b) => b.type === "workshop") ? (pop >= 20 ? 2 : 1) : 0,
+    potter: state.buildings.some((b) => b.type === "kiln") ? 1 : 0,
+    smith: state.buildings.some((b) => b.type === "smithy") ? 1 : 0,
+    factory: state.buildings.some((b) => b.type === "factory") ? 2 : 0,
     // Guards: one per tower, plus one per gate once a real wall ring
     // exists (6+ wall segments), capped at GUARD_CAP and at one third
     // of the adults. No posts, no guards.
@@ -100,7 +107,7 @@ export function delegateRoles(state, grid = null) {
       return Math.min(GUARD_CAP, towers + (walls >= 6 ? 2 : 0), Math.floor(pop / 3));
     })(),
   };
-  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler", "teacher", "guard"];
+  const order = ["farmer", "fisher", "hunter", "woodcutter", "miner", "builder", "hauler", "teacher", "carpenter", "potter", "smith", "factory", "guard"];
   let total = order.reduce((a, j) => a + desired[j], 0);
   // Trimming must not zero a job the village needs while another job
   // still holds a surplus, and must not stall building or leave
@@ -222,7 +229,7 @@ function weighAllianceSuggestion(state, suggestion) {
   log(state, who + " proposes an alliance with " + rec.name + ". Their leader answers within " + ALLIANCE_OFFER_DAWNS + " dawns.");
 }
 
-function scoreJob(state, v, job) {
+export function scoreJob(state, v, job) {
   const s = state.stockpile;
   const deficit = (have, want) => Math.max(0, want - have);
   const skill = v.skills[job] ?? 1; // old saves predate the woodcutter job
@@ -239,6 +246,18 @@ function scoreJob(state, v, job) {
   if (job === "teacher") {
     // No school, no teaching: the score stays far below real work.
     score += state.buildings.some((b) => b.type === "school") ? 5 : -30;
+  }
+  // Production jobs: no workplace, no work (-30, like the teacher
+  // without a school); with one, the score follows the balance of
+  // the product in the stockpile against PRODUCTION_WANT: a deficit
+  // pulls workers in, a surplus pushes them to other work, so
+  // production stops piling up goods the village already holds. The
+  // stockpile read is || 0: saves written before the product goods
+  // existed have no key for them.
+  const prodWorkplace = { carpenter: "workshop", potter: "kiln", smith: "smithy", factory: "factory" }[job];
+  if (prodWorkplace) {
+    const prodOutput = { carpenter: "furniture", potter: "pottery", smith: "ironware", factory: "wares" }[job];
+    score += state.buildings.some((b) => b.type === prodWorkplace) ? (PRODUCTION_WANT - (s[prodOutput] || 0)) * 0.3 : -30;
   }
   if (v.assignedJob === job) score += 12; // leader delegation: strong nudge, still refuseable
   if (job === "fisher" && v.assignedJob === "fisher") score += 6; // a standing post: the delegated fisher stays at the shore instead of drifting to building/hauling while fish are plentiful
@@ -283,7 +302,8 @@ export function runMarket(state) {
           && (buyer.goods.food + buyer.goods.fish + buyer.goods.meat) === 0;
         const wantsMaterial = (g === "wood" || g === "stone") && buyer.job === "builder" && (buyer.goods[g] || 0) === 0;
         const wantsOre = g === "ore" && buyer.traits.includes("greedy") && (buyer.goods.ore || 0) === 0;
-        if ((!wantsFood && !wantsMaterial && !wantsOre) || buyer.coins < price) continue;
+        const wantsProduct = (g === "furniture" || g === "pottery" || g === "ironware" || g === "wares") && (buyer.goods[g] || 0) < 2 && buyer.coins >= price;
+        if ((!wantsFood && !wantsMaterial && !wantsOre && !wantsProduct) || buyer.coins < price) continue;
         const seller = own.find((s) => s !== buyer && (s.ageDays ?? 25) >= CHILD_DAYS && (s.goods[g] || 0) > 2);
         if (!seller) continue;
         seller.goods[g]--; buyer.goods[g] = (buyer.goods[g] || 0) + 1;
@@ -588,6 +608,13 @@ export function think(state, grid, v) {
   } else if (job === "teacher") {
     const school = state.buildings.find((b) => b.type === "school");
     if (school) setTarget(state, grid, v, school.x, school.z); else v.state = "idle";
+  } else if (job === "carpenter" || job === "potter" || job === "smith" || job === "factory") {
+    // Production workers walk to their workplace and work there; no
+    // workplace, no work. The workplace type per job mirrors the
+    // production recipes in doWork.
+    const workplace = { carpenter: "workshop", potter: "kiln", smith: "smithy", factory: "factory" }[job];
+    const site = ownBuildings(state).find((b) => b.type === workplace);
+    if (site) setTarget(state, grid, v, site.x, site.z); else v.state = "idle";
   } else if (job === "hauler") {
     // Haulers shuttle: go to the nearest productive cell, fill up, deposit.
     const ripe = nearestCell(grid, v.x, v.z, (c) => c.farm && c.crop === 3);
@@ -650,8 +677,24 @@ function workNeed(state, v, base) {
   return n;
 }
 
-export function doWork(state, grid, v, dt) {
-  const [tx, tz] = v.target || [];
+// Production recipes: the workplace a job works at, the stockpile
+// inputs one work action consumes, and the output it carries away.
+// The recipe IS the conservation rule: inputs consumed exactly,
+// outputs exactly per recipe, nothing created from nothing.
+// PRODUCTION_WANT is the stockpile level production aims at: scoreJob
+// rewards a deficit and penalises a surplus, and doWork stops
+// producing once the stockpile holds that much, so a carpenter can
+// never eat every stick of wood while the village still needs a
+// school (the wood famine that stalled seed 7 in the first pass).
+const PRODUCTION_WANT = 12;
+const PRODUCTION_RECIPES = {
+  carpenter: { workplace: "workshop", inputs: { wood: 2 }, output: "furniture", outAmt: 1 },
+  potter: { workplace: "kiln", inputs: { stone: 2 }, output: "pottery", outAmt: 1 },
+  smith: { workplace: "smithy", inputs: { ore: 1 }, output: "ironware", outAmt: 1 },
+  factory: { workplace: "factory", inputs: { wood: 1, stone: 1, ore: 1 }, output: "wares", outAmt: 2 },
+};
+
+export function doWork(state, grid, v, dt) {  const [tx, tz] = v.target || [];
   const cell = tx != null ? cellAt(grid, tx, tz) : null;
   v.workTimer += dt;
   const baseNeed = v.job === "builder" ? 2.5 : v.job === "fisher" ? 9.0 : v.job === "teacher" ? 2.0 : 1.6;
@@ -671,6 +714,25 @@ export function doWork(state, grid, v, dt) {
   if (v.job === "teacher") {
     // Lessons land at dawn (see dawnDemographics). The teacher just
     // needs to be at the school, visible to the village.
+  } else if (PRODUCTION_RECIPES[v.job]) {
+    // Production: inputs leave the stockpile only at the workplace,
+    // only when the whole recipe fits the villager's carry, and only
+    // while the stockpile holds less than PRODUCTION_WANT of the
+    // output. The output rides the existing addCarry -> haul ->
+    // deposit path (step.js), which keeps one unit as personal
+    // goods. A worker short of inputs, away from the workplace,
+    // without carry room, or facing a full stockpile produces
+    // nothing — never from thin air, and never at the cost of the
+    // wood the village needs to build with.
+    const recipe = PRODUCTION_RECIPES[v.job];
+    const atWorkplace = cell && cell.building === recipe.workplace;
+    const carryRoom = !v.carry || (v.carry.type === recipe.output && v.carry.amt + recipe.outAmt <= v.carryCap);
+    const hasInputs = Object.entries(recipe.inputs).every(([g, n]) => (state.stockpile[g] || 0) >= n);
+    const wantMet = (state.stockpile[recipe.output] || 0) >= PRODUCTION_WANT;
+    if (atWorkplace && carryRoom && hasInputs && !wantMet) {
+      for (const [g, n] of Object.entries(recipe.inputs)) state.stockpile[g] -= n;
+      addCarry(recipe.output, recipe.outAmt);
+    }
   } else if (v.job === "farmer" && cell && cell.farm) {
     if (cell.crop === 3) { cell.crop = 0; cell.cropGrow = 0; addCarry("food", 2 + (tech.level >= 1 ? 1 : 0) + (tech.level >= 2 ? 1 : 0) + fineBonus + steelBonus); }
     else if (state.elapsed >= state.effects.droughtUntil) { cell.crop = Math.min(3, cell.crop + 1); }
@@ -703,7 +765,7 @@ export function doWork(state, grid, v, dt) {
     if (q) {
       // Steam and brick doubles building speed: mills and cranes.
       q.progress += tech.level >= 4 ? 2 : 1;
-      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7, school: 8, healer: 6, wall: 4, tower: 8 }[q.type] || 6;
+      const needProgress = { granary: 8, marker: 3, well: 6, workshop: 8, shrine: 5, longhouse: 8, greathall: 10, farmhouse: 7, school: 8, healer: 6, wall: 4, tower: 8, kiln: 7, smithy: 8, factory: 12 }[q.type] || 6;
       if (q.progress >= needProgress) {
         state.buildQueue.shift();
         const cost = BUILD_COSTS[q.type] || { wood: 0, stone: 0, ore: 0 };
@@ -741,6 +803,15 @@ export function doWork(state, grid, v, dt) {
             } else if (type === "workshop") {
               cellAt(grid, q.x, q.z).blocked = true;
               log(state, "A workshop opens. Miners and woodcutters work with proper tools.");
+            } else if (type === "kiln") {
+              cellAt(grid, q.x, q.z).blocked = true;
+              log(state, "A kiln is fired up. Potters shape stone into pottery.");
+            } else if (type === "smithy") {
+              cellAt(grid, q.x, q.z).blocked = true;
+              log(state, "A smithy opens. The smith hammers ore into ironware.");
+            } else if (type === "factory") {
+              cellAt(grid, q.x, q.z).blocked = true;
+              log(state, "A factory opens its doors. Workers turn wood, stone, and ore into wares.");
             } else if (type === "shrine") {
               state.faith = clamp(state.faith + 5, 0, 100);
               log(state, "A shrine is raised. The people take heart.");

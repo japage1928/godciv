@@ -26,7 +26,7 @@
      the safe-area inset when one is reported, with a 10px floor so
      the chips never sit hard against the bar in plain Safari. */
   #hud { display: flex; flex-direction: column; gap: 6px; padding: 8px; background: #16240f; font-size: 14px; z-index: 5; }
-  .hud-row { display: flex; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
+  .hud-row { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
   .hud-row::-webkit-scrollbar { display: none; }
   .chip { background: #24351f; border: 1px solid #465e3a; border-radius: 999px; padding: 6px 12px; white-space: nowrap; }
   .chip b { color: #fff; }
@@ -98,21 +98,19 @@
       <span class="chip">🪵 <b id="stat-wood">0</b></span>
       <span class="chip">🪨 <b id="stat-stone">0</b></span>
       <span class="chip">⛏️ <b id="stat-ore">0</b></span>
+      <span class="chip">🪑 <b id="stat-furniture">0</b></span>
+      <span class="chip">🏺 <b id="stat-pottery">0</b></span>
+      <span class="chip">🔧 <b id="stat-ironware">0</b></span>
+      <span class="chip">📦 <b id="stat-wares">0</b></span>
       <span id="faith-wrap" class="chip">✨ <b id="stat-faith">55</b><span class="bar"><i id="faith-fill" style="width:55%"></i></span></span>
-    </div>
-    <div class="hud-row">
       <span class="chip" id="stat-day">Day 1</span>
       <span class="chip" id="stat-season">🌱 Spring</span>
       <span class="chip" id="stat-morale" title="Morale">💛 60</span>
       <span class="chip" id="stat-raid" style="display:none">⚔️ Raiders!</span>
       <span class="chip" id="stat-effects" style="display:none"></span>
-    </div>
-    <div class="hud-row">
       <span class="chip" id="stat-tech">⚒️ Stone tools</span>
       <span class="chip" id="stat-festival">🎉 Spring Bloom</span>
       <span class="chip">🧍 <b id="stat-pop">0/12</b></span>
-    </div>
-    <div class="hud-row">
       <span class="chip" id="stat-view">View 24,24</span>
       <span class="chip" id="stat-mode">This village</span>
       <span class="chip" id="version-chip">v12</span>

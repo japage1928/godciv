@@ -40,6 +40,7 @@ console.log("HUD ids: " + touched.size + " touched, all present, " + declared.le
 // stone, ore, each its own chip.
 const required = [
   "stat-food", "stat-fish", "stat-meat", "stat-wood", "stat-stone", "stat-ore",
+  "stat-furniture", "stat-pottery", "stat-ironware", "stat-wares",
   "stat-faith", "faith-fill", "stat-day", "stat-season", "stat-morale",
   "stat-tech", "stat-festival", "stat-pop", "stat-view", "stat-mode",
   "version-chip", "stat-raid", "stat-effects", "hud", "godbar", "top-actions",
@@ -54,6 +55,45 @@ const required = [
 ];
 for (const id of required) assert.ok(declaredSet.has(id), "v12 HUD id missing: " + id);
 console.log("v12 chips, toolbar, god bar, and raid chip all present");
+
+// Single chips row: #hud holds exactly 2 .hud-row blocks, the first
+// a single row with every chip in order (including the product
+// chips), the second the #top-actions toolbar. The single row must
+// scroll horizontally, never wrap.
+const hudStart = html.indexOf('<div id="hud">');
+assert.ok(hudStart >= 0, "#hud must exist in index.html");
+const hudEnd = html.indexOf('<div id="scene-wrap">', hudStart);
+assert.ok(hudEnd > hudStart, "#hud must end before #scene-wrap");
+const hudSection = html.slice(hudStart, hudEnd);
+const hudRows = [...hudSection.matchAll(/<div class="hud-row"[^>]*>/g)];
+assert.equal(hudRows.length, 2, "exactly 2 .hud-row blocks inside #hud (chips row + top-actions), found " + hudRows.length);
+const firstRow = hudSection.slice(hudRows[0].index, hudRows[1].index);
+const secondRow = hudSection.slice(hudRows[1].index);
+assert.ok(secondRow.includes('id="top-actions"'), "the second .hud-row must be #top-actions");
+const chipIdsInOrder = [
+  "stat-food", "stat-fish", "stat-meat", "stat-wood", "stat-stone", "stat-ore",
+  "stat-furniture", "stat-pottery", "stat-ironware", "stat-wares",
+  "faith-wrap", "stat-faith", "faith-fill", "stat-day", "stat-season", "stat-morale",
+  "stat-raid", "stat-effects", "stat-tech", "stat-festival", "stat-pop",
+  "stat-view", "stat-mode", "version-chip",
+];
+let prevIdx = -1;
+for (const id of chipIdsInOrder) {
+  const idx = firstRow.indexOf('id="' + id + '"');
+  assert.ok(idx >= 0, "first .hud-row must contain chip id: " + id);
+  assert.ok(idx > prevIdx, "first .hud-row chips must stay in order, out of order at: " + id);
+  prevIdx = idx;
+}
+for (const id of ["btn-panel", "btn-zoom-out", "btn-zoom-in", "btn-rotate-l", "btn-rotate-r", "btn-speed", "btn-pause", "btn-save", "btn-settings"]) {
+  assert.ok(secondRow.includes('id="' + id + '"'), "the #top-actions row must contain toolbar button: " + id);
+}
+const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/);
+assert.ok(styleMatch, "index.html must carry a <style> block");
+const hudRowRule = styleMatch[1].match(/\.hud-row\s*\{[^}]*\}/);
+assert.ok(hudRowRule, "the .hud-row CSS rule must exist");
+assert.ok(hudRowRule[0].includes("flex-wrap: nowrap"), "the .hud-row CSS rule must contain flex-wrap: nowrap");
+assert.ok(!hudRowRule[0].includes("flex-wrap: wrap"), "the .hud-row CSS rule must not contain flex-wrap: wrap");
+console.log("single chips row: 2 .hud-row blocks, all chips in order, toolbar separate, no wrapping");
 
 // God actions: all six mockup actions must be offered as data-god
 // buttons in the bar (main.js dispatches them via dataset.god).

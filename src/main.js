@@ -56,6 +56,10 @@ function renderHUD() {
   $("stat-wood").textContent = s.stockpile.wood;
   $("stat-stone").textContent = s.stockpile.stone;
   $("stat-ore").textContent = s.stockpile.ore;
+  $("stat-furniture").textContent = s.stockpile.furniture || 0;
+  $("stat-pottery").textContent = s.stockpile.pottery || 0;
+  $("stat-ironware").textContent = s.stockpile.ironware || 0;
+  $("stat-wares").textContent = s.stockpile.wares || 0;
   $("stat-faith").textContent = Math.round(s.faith);
   $("faith-fill").style.width = s.faith + "%";
   $("stat-day").textContent = "Day " + s.day + " · " + fmtTime(s) + " · " + phaseOf(s.time);

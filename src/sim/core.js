@@ -22,7 +22,7 @@ export const OLD_SIZE = 48;
 export const SIZE = WORLD_SIZE; // map side; kept as the name the UI/tests already use
 export const CHUNKS_ACROSS = WORLD_SIZE / CHUNK;
 export const DAY_LENGTH = 180; // sim seconds per day: 45 real seconds at 4x, 22.5 at 8x
-export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher", "guard"];
+export const JOBS = ["farmer", "woodcutter", "miner", "fisher", "hunter", "builder", "hauler", "teacher", "carpenter", "potter", "smith", "factory", "guard"];
 export const TRAITS = ["devout", "skeptic", "brave", "cautious", "industrious", "lazy", "kind", "greedy"];
 export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "Hob", "Ilsa", "Jory", "Kessa", "Lorn", "Mira", "Nils", "Odessa", "Perrin", "Quill", "Rosa", "Soren", "Tilda", "Ulric", "Vera", "Wren", "Yannick"];
 
@@ -30,7 +30,7 @@ export const NAMES = ["Ash", "Bram", "Cora", "Dun", "Elowen", "Fenn", "Greta", "
 // trade them with each other at the town-center market, and buy food
 // from the communal stockpile. Nobody starves for poverty: a villager
 // with no coins still gets a communal ration.
-export const PRICES = { food: 2, fish: 2, meat: 3, wood: 1, stone: 1, ore: 4 };
+export const PRICES = { food: 2, fish: 2, meat: 3, wood: 1, stone: 1, ore: 4, furniture: 6, pottery: 4, ironware: 8, wares: 10 };
 export const BUILD_COSTS = {
   hut: { wood: 12, stone: 6 },
   granary: { wood: 20, stone: 10 },
@@ -45,6 +45,9 @@ export const BUILD_COSTS = {
   healer: { wood: 16, stone: 8 },
   wall: { wood: 6, stone: 4 },
   tower: { wood: 10, stone: 14, ore: 2 },
+  kiln: { wood: 14, stone: 12 },
+  smithy: { wood: 18, stone: 12, ore: 4 },
+  factory: { wood: 40, stone: 30, ore: 10 },
 };
 export const CHILD_DAYS = 3; // a newborn works after 3 dawns
 export const ELDER_DAYS = 45; // old-age death rolls start here

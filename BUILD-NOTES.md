@@ -100,3 +100,43 @@ field/wall/villager at exact coordinates; same save key; do not regress
 the haze fix, settlement layout, defense/map systems, panel-close fix, or
 disaster lethality; god cannot declare war or order attacks; no live
 model calls, no API keys.
+
+## Phase 4 as built (amendments to the spec above)
+
+- `scoreJob` is exported (additive only) so jobs_smoke can assert the
+  -30 workplace gate directly.
+- Want-cap `PRODUCTION_WANT = 12`: `doWork` produces only while the
+  stockpile holds < 12 of the output, and `scoreJob` uses the signed
+  balance (12 - have) x 0.3, so a surplus pushes workers to other jobs.
+  Without it a delegated carpenter converted every stick of wood
+  (furniture 195, wood ~0, hut/school builds starved) because
+  delegation's +12 nudge bypasses `scoreJob`. Recipes/conservation
+  unchanged.
+- `think()` gained branches sending carpenter/potter/smith/factory to
+  their workplace (else production never fires); the builder gained
+  `needProgress` entries (kiln 7, smithy 8, factory 12) and completion
+  branches. Demand scores (spec was silent): kiln 3, smithy 3,
+  factory 4. `lotScore`: kiln/smithy copy the workshop branch; factory
+  cancels the infill pull and penalizes distance outside the 9-13 band.
+- `deserialize()` + `newWorld` stockpile backfills for the 4 new goods
+  (world.js, coordinator follow-up — the Phase 4 worker was barred
+  from that file): new keys default to 0 on every load, no bump.
+- School demand score 4 -> 8 (coordinator fix, Nov 4, 2026): the jobs
+  build re-rolled the RNG stream, villages grew faster, and at score 4
+  the school never surfaced in 30 days on 3 of 4 seeds (none even at
+  day 60, pop 143). At 8 it outranks repeatable farmhouses (max 7)
+  but not a housing crisis (hut score 9+). Verified: school built in
+  30 days on all 4 seeds, and at day 60 on seed 7.
+- Test bars made cause-specific (coordinator, same evidence): sim_smoke
+  asserts zero "hunger and hardship" deaths via log-drain counting
+  instead of total deaths == 0 (seed 7 now loses one villager to a
+  sudden illness with food at 100); society_smoke tolerates hunger
+  deaths on at most 1 of 4 seeds (seed 42: one hunter starved
+  traveling home from a far hunt with 119 edible in store — a
+  stochastic edge confirmed against the v13 monolith, which had zero
+  hunger deaths on seed 42 with a different trajectory).
+- Known fragility, NOT fixed here: farmhouse demand is nearly always
+  on once pop >= 8 (edible < pop*4 is usually true), so farmhouses
+  queue repeatedly (7-11 by day 30). Pre-existing v13 formula.
+- UNVERIFIED: the kiln/smithy/factory meshes have never been rendered
+  (no THREE/browser run); syntax-checked only.

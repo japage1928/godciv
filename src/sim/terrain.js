@@ -181,6 +181,7 @@ export function makeVillageRecord(seed, id, site, otherIds = []) {
     ore: Math.floor(hash01(seed, id, 14, 501) * 8),
     fish: Math.floor(hash01(seed, id, 15, 501) * 20),
     meat: Math.floor(hash01(seed, id, 16, 501) * 12),
+    furniture: 0, pottery: 0, ironware: 0, wares: 0,
   };
   const relations = {};
   for (const oid of otherIds) relations[oid] = 0;

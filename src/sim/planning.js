@@ -65,13 +65,32 @@ export function computeDemands(state, grid) {
   if (!built("workshop") && !queued("workshop") && s.ore >= 4) {
     demands.push({ type: "workshop", score: 3, reason: "Ore is piling up: tools are needed." });
   }
+  // Production buildings: one of each, gated on tech and population
+  // like the healer's hut above. A kiln fires pottery, a smithy
+  // hammers ironware, and a factory turns all three materials into
+  // wares once the village is a city in all but name.
+  if (state.tech && state.tech.level >= 1 && !built("kiln") && !queued("kiln") && pop >= 10) {
+    demands.push({ type: "kiln", score: 3, reason: "Bronze craft brings the kiln: the village needs pottery." });
+  }
+  if (state.tech && state.tech.level >= 2 && !built("smithy") && !queued("smithy") && pop >= 12) {
+    demands.push({ type: "smithy", score: 3, reason: "Iron craft brings the smithy: the village needs ironware." });
+  }
+  if (state.tech && state.tech.level >= 5 && !built("factory") && !queued("factory") && pop >= 26) {
+    demands.push({ type: "factory", score: 4, reason: "The electric age brings the factory: the village needs wares." });
+  }
   if (!built("shrine") && !queued("shrine") && (state.faith < 45 || pop >= 14)) {
     demands.push({ type: "shrine", score: 3, reason: state.faith < 45 ? "Faith is low: the people need a shrine." : "The village has grown: it needs a gathering shrine." });
   }
   // A school teaches the children, and schooled adults push the
   // village toward new tools. One school is enough for this village.
+  // Score 8 while none exists: a one-time civic unlock that gates
+  // education and tech, it outranks repeatable farmhouses (max 7) and
+  // production buildings, but a real housing crisis (hut score 9+)
+  // still outranks it. (v14: the jobs build re-rolled the RNG stream,
+  // villages grew faster, and at score 4 the school never surfaced
+  // in 30 days on 3 of 4 seeds — no school even at day 60, pop 143.)
   if (!built("school") && !queued("school") && pop >= 8) {
-    demands.push({ type: "school", score: 4, reason: "The children need a school." });
+    demands.push({ type: "school", score: 8, reason: "The children need a school." });
   }
   // A healer's hut, once the village knows iron craft: the sick
   // recover near it instead of fading.
@@ -291,6 +310,22 @@ export function lotScore(state, grid, x, z, type, extent = streetExtent(state)) 
     for (const [sx, sz] of grid._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
     if (nearestStone !== Infinity) score -= nearestStone * 0.8;
     score -= Math.abs(dist - 7) * 0.5;
+  } else if (type === "kiln" || type === "smithy") {
+    // Production buildings sit like the workshop: near stone, at
+    // middle distance from the center.
+    let nearestStone = Infinity;
+    for (const [sx, sz] of grid._stoneSpots || []) nearestStone = Math.min(nearestStone, Math.hypot(x - sx, z - sz));
+    if (nearestStone !== Infinity) score -= nearestStone * 0.8;
+    score -= Math.abs(dist - 7) * 0.5;
+  } else if (type === "factory") {
+    // A factory stands further out, in the 9-13 ring: the infill
+    // pull is cancelled like the farmhouse branch, and only the
+    // distance outside the band is penalised. Every lot already has
+    // street frontage (lotFree), so the band alone puts it on a
+    // street at the edge of the settled village.
+    score += dist * 10;
+    const outside = dist < 9 ? 9 - dist : dist > 13 ? dist - 13 : 0;
+    score -= outside * 2.0;
   } else if (type === "school" || type === "healer") {
     // Civic buildings sit near the center, within easy reach of homes.
     score -= Math.abs(dist - 5) * 1.0;

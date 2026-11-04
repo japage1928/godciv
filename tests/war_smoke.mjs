@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   newWorld, step, setRelation, discoverVillage, formAlliance, allied,
   validateDiplomacyIntent, declareWar, warWith, villageRecord, villagePop,
-  ownVillagers, stockpileFor, applyGod, serialize, deserialize,
+  ownVillagers, stockpileFor, applyGod, serialize, deserialize, activateVillage,
 } from "../src/sim.js";
 
 const DAY = 180 * 4;
@@ -59,8 +59,20 @@ function centerOf(state, id) {
 {
   const { state, grid, a } = warWorld();
   setRelation(state, 0, a.id, -75);
-  runDays(state, grid, 1);
-  const party = state.warParties[0];
+  // Deterministic: declare our war directly. The dawn decision picks
+  // its declarer from the RNG stream, and the v14 jobs re-roll lets
+  // the neighbor declare first instead — but the assertions below
+  // are about OUR party's kills, so the marching party must be ours.
+  const war0 = declareWar(state, grid, 0, a.id);
+  assert.ok(war0, "our declaration creates the war");
+  const party = state.warParties.find((p) => p.from === 0);
+  assert.ok(party, "our war party marches");
+  // Wake the target village first: activation spawns its people at
+  // once, so defenders exist when the fighters arrive. Without it
+  // the party loots an empty center and retreats before anyone
+  // spawns, and the kill assertions below can never fire.
+  activateVillage(state, grid, a);
+  assert.ok(state.villagers.some((v) => v.village === a.id), "defenders stand at the target village");
   const [tcx, tcz] = centerOf(state, party.to);
   // March the party to the target center, then let it fight.
   const fighters = state.villagers.filter((v) => v.warParty === party.id);

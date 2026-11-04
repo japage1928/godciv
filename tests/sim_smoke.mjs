@@ -69,8 +69,24 @@ console.log("sim smoke test passed: day", state.day, "villagers", state.villager
 // per-seed on seed 7.
 {
   const w5 = newWorld(7);
-  for (let i = 0; i < 4320; i++) step(w5.state, w5.grid, 0.25);
-  assert.equal(w5.state.stats.deaths, 0, "no villager should starve in 6 days, deaths=" + w5.state.stats.deaths);
+  // Drain the god log as the run goes so death causes never scroll off
+  // the capped 60-entry log before they can be counted (same pattern
+  // as society_smoke). The bar is cause-specific: no STARVATION deaths.
+  // Total deaths is stream-sensitive (any behavior change re-rolls
+  // the shared RNG stream — the v14 jobs build re-rolled it, and seed 7
+  // now loses one villager to a sudden illness in 6 days with food at
+  // 100 and population growing 6 -> 19). An illness death is not the
+  // starvation the setTarget freeze caused, so it must not fail this.
+  const causes = {};
+  for (let i = 0; i < 4320; i++) {
+    step(w5.state, w5.grid, 0.25);
+    if (i % 360 === 0) {
+      for (const l of w5.state.log) { const m = /dies \((.*)\)/.exec(l.text || ""); if (m) causes[m[1]] = (causes[m[1]] || 0) + 1; }
+      w5.state.log.length = 0;
+    }
+  }
+  for (const l of w5.state.log) { const m = /dies \((.*)\)/.exec(l.text || ""); if (m) causes[m[1]] = (causes[m[1]] || 0) + 1; }
+  assert.equal(causes["hunger and hardship"] || 0, 0, "no villager should starve in 6 days, causes=" + JSON.stringify(causes));
   assert.ok(w5.state.villagers.length > 6, "population must grow past the founding 6, got " + w5.state.villagers.length);
   assert.ok(w5.state.buildings.some((b) => b.type === "hut" && (b.x !== w5.state._cx - 2 || b.z !== w5.state._cz - 3)), "a second hut must be built");
   let totalBirths = 0, seedsWithBirth = 0;

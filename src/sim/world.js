@@ -24,7 +24,7 @@ export function newWorld(seed) {
 
   const state = {
     version: SAVE_VERSION, seed, day: 1, time: 0.3, speed: 1, paused: false,
-    stockpile: { food: 24, wood: 24, stone: 12, ore: 0, fish: 0, meat: 0 },
+    stockpile: { food: 24, wood: 24, stone: 12, ore: 0, fish: 0, meat: 0, furniture: 0, pottery: 0, ironware: 0, wares: 0 },
     faith: 55, morale: 60, moraleReasons: [], populationCap: 12, expandAt: 10, delegateAt: 5,
     season: "spring", weather: { kind: "clear", until: 60 },
     celebration: null, celebrationBoostUntil: -1,
@@ -171,6 +171,10 @@ export function deserialize(json) {
   // Phase F record fields: backfilled on every load, so a save
   // written by an earlier v5 build gains them without a bump.
   for (const rec of state.villages || []) {
+    // v14 products: neighbor records from older saves lack the new
+    // stockpile keys; backfill to 0 like the main stockpile below.
+    if (!rec.stockpile) rec.stockpile = {};
+    for (const g of Object.keys(PRICES)) if (rec.stockpile[g] == null) rec.stockpile[g] = 0;
     if (rec.traderDay == null) rec.traderDay = 2 + Math.floor(hash01(data.seed, rec.id, 7, 504) * 8);
     if (rec.traderSent == null) rec.traderSent = false;
     if (rec.lastEvent === undefined) rec.lastEvent = null;
@@ -199,6 +203,12 @@ export function deserialize(json) {
   state.raiders = [];
   state._raidStats = null;
   state.version = SAVE_VERSION;
+  // v14 products: a save written before the new jobs existed has no
+  // furniture/pottery/ironware/wares keys in its stockpile. Backfill
+  // them to 0 on every load, no bump — the villager loop below does
+  // the same for personal goods via Object.keys(PRICES).
+  if (!state.stockpile) state.stockpile = {};
+  for (const g of Object.keys(PRICES)) if (state.stockpile[g] == null) state.stockpile[g] = 0;
   for (const v of state.villagers) {
     for (const j of JOBS) if (v.skills[j] == null) v.skills[j] = 1;
     if (v.assignedJob == null) v.assignedJob = null;

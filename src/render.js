@@ -10,7 +10,7 @@
 import * as THREE from "../vendor/three.module.js";
 import { SIZE, CHUNK, chunkKey, peekChunk, phaseOf, eraStageOf, WALL_RING_R, streetFrontage, cellAt, peekCell, towerManned, terrainHeight } from "./sim.js";
 
-const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, guard: 0x546e7a, student: 0x78909c, child: 0xb0bec5 };
+const JOB_COLORS = { farmer: 0x4caf50, woodcutter: 0x6d4c41, miner: 0x9e9e9e, fisher: 0x2196f3, hunter: 0xd84315, builder: 0xff9800, hauler: 0x8d6e63, teacher: 0x7e57c2, carpenter: 0xa1887f, potter: 0xba68c8, smith: 0x607d8b, factory: 0xf9a825, guard: 0x546e7a, student: 0x78909c, child: 0xb0bec5 };
 // Village colors, shared with the standing-stone markers: a war
 // party reads as its village at a glance.
 const VILLAGE_COLORS = { 0: 0xb71c1c, 1: 0xd7a94e, 2: 0x00897b };
@@ -1113,6 +1113,44 @@ export class Renderer {
         if (era >= 3) partBox(body, 0.2, 0.2, 0.2, 0, 2.85, 0, 0xfff9c4);
       }
       return finish(body, win, []);
+    } else if (type === "kiln") {
+      // A squat brick kiln with a round chimney: smoke rises from the
+      // stack, and the fire mouth glows on the front face.
+      const body = [], win = [];
+      partBox(body, 1.7, 0.3, 1.7, 0, 0.15, 0, 0x9e9e9e);
+      partBox(body, 1.4, 1.0, 1.4, 0, 0.8, 0, pal.wallMat);
+      partBox(body, 1.0, 0.5, 1.0, 0, 1.55, 0, 0xb5654a);
+      partCyl(body, 0.14, 0.18, 0.9, 8, 0.55, 1.6, -0.45, 0x8a8a8a);
+      partBox(body, 0.5, 0.6, 0.06, 0, 0.55, 0.73, 0x3e2723);
+      partBox(win, 0.3, 0.25, 0.06, 0, 0.55, 0.76, 0xffffff);
+      chimneyTop = [0.55, 2.05, -0.45];
+      return finish(body, win, [], null, [1.7, 1.7]);
+    } else if (type === "smithy") {
+      // Stone walls, a pitched roof, a round chimney, and the anvil
+      // out front: darker and heavier than the workshop next door.
+      const body = [], win = [];
+      partBox(body, 2.0, 1.2, 1.6, 0, 0.78, 0, pal.wallMat, 0, 0, 0, "wall");
+      partPrism(body, 2.3, 0.8, 1.9, 0, 1.38, 0, pal.roof, 0, "roof");
+      partCyl(body, 0.14, 0.18, 1.0, 8, 0.7, 1.9, -0.45, 0x8a8a8a);
+      partBox(body, 0.5, 0.7, 0.06, 0, 0.53, 0.83, 0x3e2723);
+      partBox(body, 0.7, 0.35, 0.3, -0.6, 0.18, 0.95, 0x37474f);
+      partBox(win, 0.32, 0.34, 0.06, 0.6, 0.8, 0.83, 0xffffff);
+      chimneyTop = [0.7, 2.4, -0.45];
+      return finish(body, win, [], null, [2.0, 1.6]);
+    } else if (type === "factory") {
+      // A taller block with a row of windows and a tall chimney: the
+      // largest production building in the village.
+      const body = [], win = [];
+      partBox(body, 2.2, 2.6, 1.8, 0, 1.48, 0, pal.wall, 0, 0, 0, "wall");
+      partBox(body, 2.4, 0.2, 2.0, 0, 2.88, 0, pal.roof, 0, 0, 0, "roof");
+      partCyl(body, 0.16, 0.22, 1.4, 8, 0.85, 3.5, -0.6, 0x8a8a8a);
+      partBox(body, 0.6, 0.9, 0.06, 0, 0.63, 0.93, 0x3e2723);
+      for (const wx of [-0.7, 0, 0.7]) {
+        partBox(win, 0.4, 0.4, 0.06, wx, 1.9, 0.93, 0xffffff);
+        partBox(win, 0.4, 0.4, 0.06, wx, 1.1, 0.93, 0xffffff);
+      }
+      chimneyTop = [0.85, 4.2, -0.6];
+      return finish(body, win, [], null, [2.2, 1.8]);
     }
     // Unknown type: a plain timber block, so a new building never
     // renders invisible.
