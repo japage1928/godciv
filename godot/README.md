@@ -50,7 +50,7 @@ godot/
     world/               terrain.gd, world.gd, sim_grid.gd, camera.gd, lighting.gd
     sim/                 village.gd, villager.gd, economy.gd, deer.gd
     ui/                  hud.gd, villager_card.gd, evolution_sidebar.gd,
-                         phone_ui.gd, animated_backdrop.gd,
+                         phone_ui.gd, godciv_theme.gd, animated_backdrop.gd,
                          loading_screen.gd, main_menu.gd
   assets/
     art/                 (empty for now — art lands here in later phases)
@@ -159,43 +159,54 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   loop. Deer are not in the terrain; the village owns the tick and
   restores the herd at dawn (cap 4, winter 2). Phase 3 adds
   antlers and legs.
-- `scripts/ui/hud.gd` — top bar, four rows: Day/Season/time/phase
-  + status + Save + Evolution; village numbers (Pop, Food, Wood,
-  Stone, Ore, Faith, Morale); economy numbers (Fish, Meat,
-  Furniture, Pottery, Ironware, Wares, Fund); god bar (Bless
-  button with cooldown, Whisper field + button). No tech text up
-  top — that lives in the sidebar. Log panel, bottom left, last
-  6 lines. Hosts the villager card and the Evolution sidebar on
-  the right. Mobile pass: on a portrait phone fonts scale ~2.6x,
+- `scripts/ui/hud.gd` — designed top information bar: gold clock
+  chip (Day/Season/time/phase) + status + styled Save (secondary)
+  and Evolution (gold primary) buttons; village and economy
+  numbers as stat pills (dim label + bright value); god bar
+  (Bless button with cooldown, styled Whisper field + button).
+  No tech text up top — that lives in the sidebar. Log panel,
+  bottom left, last 6 lines (hidden on a portrait phone while a
+  side panel is open). Hosts the villager card and the Evolution
+  sidebar, docked below the top bar so Bless/Whisper stay
+  tappable. Mobile pass: on a portrait phone fonts scale ~2.6x,
   every button is a real thumb target (min ~44 CSS px), the
-  village/economy rows split across two lines so they fit, and
+  village/economy pills split across two rows so they fit, and
   the log is wider with readable text; rotating the phone
   rebuilds the top bar for the new orientation.
-- `scripts/ui/evolution_sidebar.gd` — collapsible Evolution
-  sidebar (collapsed by default): current discovery + progress,
-  next discovery, the full tech tree, villager progression.
-  Mobile pass: most of the screen width on a portrait phone,
-  phone-sized text, plain ASCII "X" close button on a
-  thumb-sized target.
+- `scripts/ui/evolution_sidebar.gd` — Evolution sidebar: current
+  discovery with a gold progress bar, next discovery, the full
+  tech tree as rows with NOW / DONE / LOCKED pills, villager
+  progression. Slides in from the right on a tween, collapses
+  fully away when closed; docked below the top bar; most of the
+  screen width on a portrait phone, phone-sized text, plain
+  ASCII "X" close button on a thumb-sized target.
+- `scripts/ui/godciv_theme.gd` — shared visual language: moss
+  panels with gold borders, stat pills, styled buttons (gold
+  primary / dark-wood secondary / dark-red close) with
+  normal/hover/pressed/disabled states, label/progress/LineEdit
+  styling. No unicode symbols the default font may lack.
 - `scripts/ui/phone_ui.gd` — shared phone/desktop sizing:
   portrait detection from the live viewport, font scales,
   thumb-sized button factory, plain-"X" close-button factory.
+  Button factories route through GodCivTheme.
 - `scripts/ui/animated_backdrop.gd` — procedural animated
   backdrop (sky, sun, drifting clouds, birds, hills, walking
   villagers) shared by the menu and the loading screen; drawn
   in code, no assets.
 - `scripts/ui/loading_screen.gd` — animated loading screen
-  shown while the world generates: animated title, backdrop,
-  live progress bar tied to generation_progress.
+  shown while the world generates: gold animated title, backdrop,
+  gold progress bar tied to generation_progress.
 - `scripts/ui/main_menu.gd` — title screen on launch: Continue
   (only when a v2 save exists), New Game (asks first when a
-  save exists), How to Play blurb. No generation or sim until
-  the player enters the game.
+  save exists), How to Play blurb. Gold title, themed buttons
+  and overlay panels. No generation or sim until the player
+  enters the game.
 - `scripts/ui/villager_card.gd` — read-only villager card: name and
-  class, job and assignment, age and sex, traits, education and
-  tool, coins and standing, all 13 skills, carried goods, home and
-  household members, parents, and hunger/energy/health. No god
-  actions per villager. Phase 3 calls the towncenter a town hall.
+  class, labeled rows (job, age, traits, education, coins,
+  carrying, home, household, parents), skills as pills, vitals
+  as three chips. Slides in from the right on a tween, docked
+  below the top bar. No god actions per villager. Phase 3 calls
+  the towncenter a town hall.
 
 ## Terrain port notes
 
