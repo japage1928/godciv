@@ -7,8 +7,7 @@ extends CanvasLayer
 # information bar — dark moss panel with a gold border, the
 # day/season/time in one gold clock chip, every resource as its
 # own pill (dim label + bright value), and real styled buttons
-# (gold primary: Evolution, Bless; dark wood secondary: Save,
-# Whisper). The top bar stays simple, per John's Nov 5 rule: all
+# (dark wood secondary: Save). The top bar stays simple, per John's Nov 5 rule: all
 # tech/discovery detail lives in the sidebar, never up top.
 #
 # Single-line bar (John, Nov 5, 2026): the info line is ONE
@@ -21,14 +20,16 @@ extends CanvasLayer
 # below the bar. Picking a speed applies it and closes the
 # dropdown; tapping the time again or anywhere else closes it
 # without changing speed. While paused, the phase label reads
-# "Paused". The game actions (Save, Evolution, Bless, Whisper)
-# live on a slim action row beneath the info line.
+# "Paused". The Save button lives on a slim action row beneath
+# the info line. (John, Nov 5, 2026: Bless, Whisper and Evolution
+# were removed from the HUD — the god-action logic and the
+# Evolution sidebar code stay in the codebase, just not surfaced.)
 #
-# The Evolution sidebar and villager card dock BELOW the top bar
-# (they used to overlap the Whisper button), slide in from the
-# right edge on a tween, and collapse fully away when closed so
-# the whole screen is visible again. On a portrait phone the log
-# panel hides while a side panel is open (it would sit under it).
+# The Evolution sidebar and villager card dock BELOW the top bar,
+# slide in from the right edge on a tween, and collapse fully away
+# when closed so the whole screen is visible again. On a portrait
+# phone the log panel hides while a side panel is open (it would
+# sit under it).
 #
 # Phone portrait: the whole 1280-unit canvas is squeezed into
 # ~390 CSS px, so fonts scale ~2.6x, every button is a real
@@ -37,6 +38,9 @@ extends CanvasLayer
 # desktop layout.
 
 signal save_requested
+# God-action signals: kept so main.gd's wiring and the village
+# bless/whisper logic stay intact. Nothing in the HUD emits them
+# anymore (John removed the Bless/Whisper buttons, Nov 5, 2026).
 signal bless_requested
 signal whisper_requested(text: String)
 signal time_control_requested(speed: float, paused: bool)
@@ -57,17 +61,13 @@ var _phase_label: Label
 var _status_label: Label
 var _chip_values: Dictionary = {}
 var _last_chip: Dictionary = {}
-var _bless_button: Button
 var _save_button: Button
-var _evolution_button: Button
-var _whisper_edit: LineEdit
 var _log_label: Label
 var _log_text: String = ""
 var _villager_card: GodCivVillagerCard
 var _evolution_sidebar: GodCivEvolutionSidebar
 var _phone: bool = false
 var _last_clock_text: String = ""
-var _last_bless_text: String = ""
 var _speed: float = SPEED_1X
 var _paused: bool = false
 var _speed_buttons: Dictionary = {}
@@ -128,7 +128,6 @@ func _build_top_bar() -> void:
 	if is_instance_valid(_speed_overlay):
 		_speed_overlay.free()
 	_last_clock_text = ""
-	_last_bless_text = ""
 	_chip_values.clear()
 	_last_chip.clear()
 	_speed_buttons.clear()
@@ -235,28 +234,14 @@ func _build_top_bar() -> void:
 		_status_label = Label.new()
 		GodCivTheme.style_label(_status_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_DIM, _phone)
 		row.add_child(_status_label)
-	# Row 2 — the slim action row. The info line is John's
-	# single line; the actions (Save, Evolution, Bless, Whisper)
-	# live here so nothing is lost and the bar stays readable.
+	# Row 2 — the slim action row, Save only. (John, Nov 5,
+	# 2026: Bless, Whisper and Evolution were removed from the
+	# HUD — the god-action logic and the Evolution sidebar code
+	# stay in the codebase, just not surfaced here.)
 	var arow := _add_row(column)
 	_save_button = GodCivPhoneUI.big_button(vp, "Save", "secondary")
 	_save_button.pressed.connect(_on_save_button_pressed)
 	arow.add_child(_save_button)
-	_evolution_button = GodCivPhoneUI.big_button(vp, "Evolution", "primary")
-	_evolution_button.pressed.connect(_on_evolution_button_pressed)
-	arow.add_child(_evolution_button)
-	_bless_button = GodCivPhoneUI.big_button(vp, "Bless", "primary")
-	_bless_button.pressed.connect(_on_bless_button_pressed)
-	arow.add_child(_bless_button)
-	_whisper_edit = LineEdit.new()
-	_whisper_edit.placeholder_text = "Whisper to the village…"
-	_whisper_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	GodCivTheme.style_line_edit(_whisper_edit, _phone, GodCivPhoneUI.button_font(vp))
-	_whisper_edit.custom_minimum_size = Vector2(0, GodCivPhoneUI.thumb_min(vp).y)
-	arow.add_child(_whisper_edit)
-	var whisper_button := GodCivPhoneUI.big_button(vp, "Whisper", "secondary")
-	whisper_button.pressed.connect(_on_whisper_pressed)
-	arow.add_child(whisper_button)
 	# Speed dropdown: a small panel that hangs below the top
 	# bar, opened by tapping the time chip. Same four options
 	# as the old SPEED row (Pause / 1x / 2x / 4x), same gold
@@ -322,8 +307,7 @@ func _build_log_panel() -> void:
 	_log_panel.add_child(_log_label)
 
 
-# Side panels dock below the top bar so Bless/Whisper stay
-# visible and tappable while one is open. Runs deferred after
+# Side panels dock below the top bar. Runs deferred after
 # the top bar is built and on every top-bar resize (rotation).
 # The speed dropdown hangs below the bar too, at its left edge
 # under the time chip.
@@ -365,12 +349,6 @@ func _on_viewport_resized() -> void:
 	call_deferred("_position_panels")
 
 
-func _on_whisper_pressed() -> void:
-	_close_speed_dropdown()
-	whisper_requested.emit(_whisper_edit.text)
-	_whisper_edit.text = ""
-
-
 # Speed dropdown: tapping the time chip toggles it; picking an
 # option applies it and closes; tapping the time again or
 # anywhere outside closes it without changing speed.
@@ -406,11 +384,6 @@ func _on_speed_overlay_input(event: InputEvent) -> void:
 func _on_save_button_pressed() -> void:
 	_close_speed_dropdown()
 	save_requested.emit()
-
-
-func _on_bless_button_pressed() -> void:
-	_close_speed_dropdown()
-	bless_requested.emit()
 
 
 func update_clock(p_day: int, p_year: int, season_name: String, time_str: String, phase_name: String) -> void:
@@ -473,13 +446,6 @@ func hide_evolution_sidebar() -> void:
 	_update_log_visibility()
 
 
-func _on_evolution_button_pressed() -> void:
-	_close_speed_dropdown()
-	hide_villager_card()
-	_evolution_sidebar.toggle_sidebar()
-	_update_log_visibility()
-
-
 func _add_speed_button(parent: Container, group: ButtonGroup, label: String, key: String) -> void:
 	var b := GodCivPhoneUI.big_button(get_viewport(), label, "secondary")
 	GodCivTheme.style_speed_button(b, _phone)
@@ -535,13 +501,11 @@ func refresh_villager_card() -> void:
 	_villager_card.refresh()
 
 
-func set_bless_cooldown(remaining: float) -> void:
-	var text: String = "Bless" if remaining <= 0.0 else "Bless (%ds)" % int(ceil(remaining))
-	if text == _last_bless_text:
-		return
-	_last_bless_text = text
-	_bless_button.text = text
-	_bless_button.disabled = remaining > 0.0
+# Kept as a no-op so main.gd's per-update call still works: the
+# Bless button it used to drive is gone (John, Nov 5, 2026), but
+# the village bless logic itself is untouched.
+func set_bless_cooldown(_remaining: float) -> void:
+	pass
 
 
 func set_log(lines: Array) -> void:
