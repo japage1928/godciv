@@ -137,7 +137,9 @@ func set_target(tx: int, tz: int) -> void:
 	if p == null:
 		path = []
 	else:
-		path = p
+		path = []
+		for c in (p as Array):
+			path.append(c as Vector2i)
 
 
 func _spread_target(ax: int, az: int, min_r: float, max_r: float, salt: int) -> void:
