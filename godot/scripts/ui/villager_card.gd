@@ -137,9 +137,15 @@ func apply_layout() -> void:
 	_rest_left = -panel_w
 	offset_right = -8
 	if _dock_top >= 0.0:
+		# anchor_bottom must be 1 or offset_bottom=-8 puts the
+		# bottom edge 8px above the TOP of the screen: negative
+		# panel height, zero-height ScrollContainer, and the whole
+		# body clipped invisible (only the title row showed).
+		anchor_bottom = 1.0
 		offset_top = _dock_top + 12
 		offset_bottom = -8
 	else:
+		anchor_bottom = 0.0
 		offset_top = -520
 		offset_bottom = 520
 	if visible and _slide_tween == null:
