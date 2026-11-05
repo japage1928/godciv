@@ -62,7 +62,6 @@ var wander_n: int = 0
 var education: int = 2
 var class_level: int = 0
 var parents: Array = []
-var tool_tick: int = 0
 var post = null # Guard post (Vector2i), Phase 3: no posts exist yet.
 
 var sim: Node = null
