@@ -89,6 +89,7 @@ func _tap_select(screen_pos: Vector2) -> void:
 		hud.show_villager_card(best, village)
 	else:
 		hud.hide_villager_card()
+		hud.hide_evolution_sidebar()
 
 
 func _notification(what: int) -> void:

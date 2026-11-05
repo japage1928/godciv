@@ -1,0 +1,136 @@
+class_name GodCivEvolutionSidebar
+extends PanelContainer
+
+# Collapsible sidebar for the evolution layer, Phase 3 fix (John,
+# Nov 5, 2026): the top HUD stays simple — basic info only — and
+# the whole evolution of tech advancements lives here, collapsed by
+# default, opened by one tap on the Evolution button in the top bar.
+# It shows the current discovery and its progress, the next
+# discovery, the full tech tree (discovered / current / locked),
+# and villager progression (class ladder, jobs unlocked per
+# discovery, tool tiers). It only reads GodCivEconomy tables and
+# the tech level/progress the HUD passes in — no sim rules live
+# here. It closes via the X button, the Evolution button again, or
+# a tap outside it (the HUD hides it when a villager card opens or
+# an empty tap lands). It sits on the right edge and never covers
+# the whole screen.
+
+var _body_label: Label
+var _tech_level: int = 0
+var _tech_progress: int = 0
+var _last_text: String = ""
+
+
+func _ready() -> void:
+	visible = false
+	set_anchors_preset(Control.PRESET_CENTER_RIGHT)
+	offset_left = -368
+	offset_top = -300
+	offset_right = -8
+	offset_bottom = 300
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.0, 0.0, 0.0, 0.82)
+	style.content_margin_left = 12.0
+	style.content_margin_right = 12.0
+	style.content_margin_top = 10.0
+	style.content_margin_bottom = 10.0
+	add_theme_stylebox_override("panel", style)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	add_child(column)
+	var title_row := HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 8)
+	column.add_child(title_row)
+	var title_label := Label.new()
+	title_label.text = "Evolution"
+	title_label.add_theme_font_size_override("font_size", 20)
+	title_label.add_theme_color_override("font_color", Color(1, 1, 1))
+	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_child(title_label)
+	var close_button := Button.new()
+	close_button.text = "✕"
+	close_button.pressed.connect(hide_sidebar)
+	title_row.add_child(close_button)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	column.add_child(scroll)
+	_body_label = Label.new()
+	_body_label.add_theme_font_size_override("font_size", 16)
+	_body_label.add_theme_color_override("font_color", Color(1, 1, 1))
+	_body_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_body_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_body_label)
+
+
+func show_sidebar() -> void:
+	_fill()
+	visible = true
+
+
+func hide_sidebar() -> void:
+	visible = false
+
+
+func toggle_sidebar() -> void:
+	if visible:
+		hide_sidebar()
+	else:
+		show_sidebar()
+
+
+func is_open() -> bool:
+	return visible
+
+
+func set_progress(level: int, progress: int) -> void:
+	if level == _tech_level and progress == _tech_progress:
+		return
+	_tech_level = level
+	_tech_progress = progress
+	if visible:
+		_fill()
+
+
+func _fill() -> void:
+	var level: int = clampi(_tech_level, 0, GodCivEconomy.DISCOVERIES.size() - 1)
+	var progress: int = _tech_progress
+	var lines: Array[String] = []
+	var maxed: bool = level >= GodCivEconomy.DISCOVERIES.size() - 1
+	var cur: Dictionary = GodCivEconomy.TECH_TIERS[level] as Dictionary
+	lines.append("Now: %s" % String(cur.get("name", "—")))
+	if maxed:
+		lines.append("Every discovery made.")
+	else:
+		var need: int = int(GodCivEconomy.TECH_THRESHOLDS[level])
+		lines.append("Progress: %d/%d" % [progress, need])
+		var next_tier: Dictionary = GodCivEconomy.TECH_TIERS[level + 1] as Dictionary
+		lines.append("Next: %s — %s" % [String(next_tier.get("name", "—")), GodCivEconomy.unlocks_text(level + 1)])
+	lines.append(String(cur.get("blurb", "")))
+	lines.append("")
+	lines.append("Discoveries:")
+	for i in range(GodCivEconomy.DISCOVERIES.size()):
+		var d: Dictionary = GodCivEconomy.DISCOVERIES[i] as Dictionary
+		var mark: String = "✓" if i < level else ("»" if i == level else "·")
+		var locked: String = "" if i <= level else " (locked)"
+		lines.append("%s %s — %s%s" % [mark, String(d.get("name", "—")), String(d.get("unlocks", "")), locked])
+	lines.append("")
+	lines.append("Villagers:")
+	var classes: Array[String] = []
+	for i in range(GodCivEconomy.CLASS_NAMES.size()):
+		classes.append("%s %d" % [String(GodCivEconomy.CLASS_NAMES[i]), int(GodCivEconomy.CLASS_THRESHOLDS[i])])
+	lines.append("Classes (standing): " + ", ".join(classes))
+	for i in range(GodCivEconomy.DISCOVERIES.size()):
+		var d2: Dictionary = GodCivEconomy.DISCOVERIES[i] as Dictionary
+		var jobs: Array = d2.get("jobs", [])
+		if not jobs.is_empty():
+			var names: Array[String] = []
+			for j in jobs:
+				names.append(String(j))
+			lines.append("%s jobs: %s" % [String(d2.get("name", "—")), ", ".join(names)])
+	lines.append("Tools: crude → sturdy → fine → steel (sturdy needs Bronze, fine needs Iron, steel needs Steel works)")
+	var text: String = "\n".join(lines)
+	if text == _last_text:
+		return
+	_last_text = text
+	_body_label.text = text

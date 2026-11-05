@@ -1,12 +1,13 @@
 class_name GodCivHud
 extends CanvasLayer
 
-# HUD, Phase 3: one top bar with five rows — the clock row (Phase 0),
+# HUD, Phase 3 fix: one top bar with four rows — the clock row (Phase 0),
 # a village row (population, stockpile, faith, morale), an economy
-# row (fish, meat, products, fund, tech), an evolution row (what the
-# village has discovered and what unlocks next), and the god bar
-# (Bless + Whisper) — plus a log panel at the bottom left and a
-# villager card on the right when a villager is tapped.
+# row (fish, meat, products, fund), and the god bar (Bless + Whisper)
+# — plus a log panel at the bottom left, a villager card on the right
+# when a villager is tapped, and a collapsible Evolution sidebar
+# (collapsed by default). The top bar stays simple, per John's Nov 5
+# rule: all tech/discovery detail lives in the sidebar, never up top.
 
 signal save_requested
 signal bless_requested
@@ -19,15 +20,15 @@ var _phase_label: Label
 var _status_label: Label
 var _village_label: Label
 var _economy_label: Label
-var _evolution_label: Label
 var _bless_button: Button
+var _evolution_button: Button
 var _whisper_edit: LineEdit
 var _log_label: Label
 var _villager_card: GodCivVillagerCard
+var _evolution_sidebar: GodCivEvolutionSidebar
 var _last_clock_text: String = ""
 var _last_village_text: String = ""
 var _last_economy_text: String = ""
-var _last_evolution_text: String = ""
 var _last_bless_text: String = ""
 
 
@@ -62,6 +63,10 @@ func _ready() -> void:
 	save_button.text = "Save"
 	save_button.pressed.connect(func() -> void: save_requested.emit())
 	row.add_child(save_button)
+	_evolution_button = Button.new()
+	_evolution_button.text = "Evolution"
+	_evolution_button.pressed.connect(_on_evolution_button_pressed)
+	row.add_child(_evolution_button)
 	# Row 2: village numbers.
 	var vrow := HBoxContainer.new()
 	vrow.add_theme_constant_override("separation", 18)
@@ -72,16 +77,9 @@ func _ready() -> void:
 	var erow := HBoxContainer.new()
 	erow.add_theme_constant_override("separation", 18)
 	column.add_child(erow)
-	_economy_label = _make_label(erow, "Fish 0 · Meat 0 · Furniture 0 · Pottery 0 · Ironware 0 · Wares 0 · Fund 20 · Tech Stone tools 0/80")
+	_economy_label = _make_label(erow, "Fish 0 · Meat 0 · Furniture 0 · Pottery 0 · Ironware 0 · Wares 0 · Fund 20")
 	_economy_label.add_theme_font_size_override("font_size", 17)
-	# Row 4: evolution (Phase 3) — what the village has discovered
-	# and what unlocks next, so the tech gate is visible, not silent.
-	var evrow := HBoxContainer.new()
-	evrow.add_theme_constant_override("separation", 18)
-	column.add_child(evrow)
-	_evolution_label = _make_label(evrow, "Stone tools 0/80 — Next: Bronze craft (granary, workshop, kiln, farmhouse, school, longhouse)")
-	_evolution_label.add_theme_font_size_override("font_size", 17)
-	# Row 5: god bar.
+	# Row 4: god bar.
 	var grow := HBoxContainer.new()
 	grow.add_theme_constant_override("separation", 10)
 	column.add_child(grow)
@@ -123,6 +121,10 @@ func _ready() -> void:
 	# Villager card, right side, hidden until a villager is tapped.
 	_villager_card = GodCivVillagerCard.new()
 	add_child(_villager_card)
+	# Evolution sidebar, right side, collapsed by default. It holds
+	# all tech/discovery detail so the top bar stays simple.
+	_evolution_sidebar = GodCivEvolutionSidebar.new()
+	add_child(_evolution_sidebar)
 
 
 func _make_label(parent: Control, text: String) -> Label:
@@ -151,9 +153,9 @@ func update_clock(p_day: int, p_year: int, season_name: String, time_str: String
 
 
 func update_village(stats: Dictionary) -> void:
-	# Each row updates on its own text: tech progress can move at
-	# dawn without any village number changing, and the evolution
-	# row must still show it.
+	# Each row updates on its own text. Tech progress moves at dawn
+	# without any village number changing, so the sidebar gets the
+	# fresh tech level/progress on every stats update too.
 	var combined := "Pop %d/%d · Food %d · Wood %d · Stone %d · Ore %d · Faith %d · Morale %d" % [
 		int(stats.get("pop", 0)), int(stats.get("pop_cap", 0)),
 		int(stats.get("food", 0)), int(stats.get("wood", 0)),
@@ -163,49 +165,35 @@ func update_village(stats: Dictionary) -> void:
 	if combined != _last_village_text:
 		_last_village_text = combined
 		_village_label.text = combined
-	var tech_level: int = int(stats.get("tech_level", 0))
-	var tech_name: String = "—"
-	var tech_need: int = 0
-	if tech_level < GodCivEconomy.TECH_TIERS.size():
-		tech_name = String((GodCivEconomy.TECH_TIERS[tech_level] as Dictionary).get("name", "—"))
-	if tech_level < GodCivEconomy.TECH_THRESHOLDS.size():
-		tech_need = int(GodCivEconomy.TECH_THRESHOLDS[tech_level])
-	var economy := "Fish %d · Meat %d · Furniture %d · Pottery %d · Ironware %d · Wares %d · Fund %d · Tech %s %d/%d" % [
+	var economy := "Fish %d · Meat %d · Furniture %d · Pottery %d · Ironware %d · Wares %d · Fund %d" % [
 		int(stats.get("fish", 0)), int(stats.get("meat", 0)),
 		int(stats.get("furniture", 0)), int(stats.get("pottery", 0)),
 		int(stats.get("ironware", 0)), int(stats.get("wares", 0)),
-		int(stats.get("fund", 0)), tech_name,
-		int(stats.get("tech_progress", 0)), tech_need,
+		int(stats.get("fund", 0)),
 	]
 	if economy != _last_economy_text:
 		_last_economy_text = economy
 		_economy_label.text = economy
-	var evolution: String = _evolution_text(tech_level, int(stats.get("tech_progress", 0)))
-	if evolution != _last_evolution_text:
-		_last_evolution_text = evolution
-		_evolution_label.text = evolution
+	_evolution_sidebar.set_progress(int(stats.get("tech_level", 0)), int(stats.get("tech_progress", 0)))
 	refresh_villager_card()
 
 
-## What the village has discovered and what unlocks next. At the
-## last tier there is nothing left to discover.
-func _evolution_text(level: int, progress: int) -> String:
-	if level >= GodCivEconomy.DISCOVERIES.size() - 1:
-		return "Modern city — every discovery made."
-	var next_level: int = level + 1
-	var cur_name: String = String((GodCivEconomy.TECH_TIERS[level] as Dictionary).get("name", "—"))
-	var next_name: String = String((GodCivEconomy.TECH_TIERS[next_level] as Dictionary).get("name", "—"))
-	var need: int = int(GodCivEconomy.TECH_THRESHOLDS[level]) if level < GodCivEconomy.TECH_THRESHOLDS.size() else 0
-	var unlocks: String = GodCivEconomy.unlocks_text(next_level)
-	return "%s %d/%d — Next: %s (%s)" % [cur_name, progress, need, next_name, unlocks]
-
-
 func show_villager_card(v: Node, village: Node) -> void:
+	_evolution_sidebar.hide_sidebar()
 	_villager_card.show_card(v, village)
 
 
 func hide_villager_card() -> void:
 	_villager_card.hide_card()
+
+
+func hide_evolution_sidebar() -> void:
+	_evolution_sidebar.hide_sidebar()
+
+
+func _on_evolution_button_pressed() -> void:
+	hide_villager_card()
+	_evolution_sidebar.toggle_sidebar()
 
 
 func refresh_villager_card() -> void:
