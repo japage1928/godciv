@@ -11,6 +11,19 @@ extends CanvasLayer
 # Whisper). The top bar stays simple, per John's Nov 5 rule: all
 # tech/discovery detail lives in the sidebar, never up top.
 #
+# Single-line bar (John, Nov 5, 2026): the info line is ONE
+# horizontal line — day, year, season, time, phase, population
+# and every resource, never two rows. The resource pills ride in
+# a horizontal scroll container, so on a narrow phone the line
+# scrolls sideways instead of wrapping. The old SPEED row of
+# buttons is gone: the TIME itself is a tappable chip, and
+# tapping it opens a dropdown (Pause / 1x / 2x / 4x) hanging
+# below the bar. Picking a speed applies it and closes the
+# dropdown; tapping the time again or anywhere else closes it
+# without changing speed. While paused, the phase label reads
+# "Paused". The game actions (Save, Evolution, Bless, Whisper)
+# live on a slim action row beneath the info line.
+#
 # The Evolution sidebar and villager card dock BELOW the top bar
 # (they used to overlap the Whisper button), slide in from the
 # right edge on a tween, and collapse fully away when closed so
@@ -19,8 +32,7 @@ extends CanvasLayer
 #
 # Phone portrait: the whole 1280-unit canvas is squeezed into
 # ~390 CSS px, so fonts scale ~2.6x, every button is a real
-# thumb target (min ~44 CSS px), and the village/economy chips
-# split across two rows so they fit. Rotating the phone rebuilds
+# thumb target (min ~44 CSS px). Rotating the phone rebuilds
 # the top bar for the new orientation. Landscape keeps the
 # desktop layout.
 
@@ -40,7 +52,7 @@ var _top_panel: PanelContainer
 var _log_panel: PanelContainer
 var _day_label: Label
 var _season_label: Label
-var _time_label: Label
+var _time_button: Button
 var _phase_label: Label
 var _status_label: Label
 var _chip_values: Dictionary = {}
@@ -59,6 +71,10 @@ var _last_bless_text: String = ""
 var _speed: float = SPEED_1X
 var _paused: bool = false
 var _speed_buttons: Dictionary = {}
+var _speed_dropdown: PanelContainer
+var _speed_overlay: Control
+var _info_scroll: ScrollContainer
+var _info_chip_row: HBoxContainer
 
 
 func _ready() -> void:
@@ -88,16 +104,16 @@ func _add_row(column: VBoxContainer) -> HBoxContainer:
 	return r
 
 
-# One stat pill in a chip row. The pill stretches to fill the row
-# evenly with its siblings; the value label is kept so
-# update_village can rewrite it without rebuilding the row.
+# One stat pill in a chip row. The pill sizes to its content
+# (the info line scrolls sideways instead of stretching pills
+# to fill); the value label is kept so update_village can
+# rewrite it without rebuilding the row.
 func _add_chip(row: HBoxContainer, key: String, label_text: String) -> void:
 	var vp := get_viewport()
 	var c: Dictionary = GodCivTheme.make_chip(
 		row, label_text, _phone,
 		36 if _phone else 14, GodCivPhoneUI.body_font(vp)
 	)
-	(c["panel"] as Control).size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_chip_values[key] = c["value"]
 
 
@@ -107,12 +123,29 @@ func _build_top_bar() -> void:
 	# new labels, and everything is rebuilt for the new class.
 	if is_instance_valid(_top_panel):
 		_top_panel.free()
+	if is_instance_valid(_speed_dropdown):
+		_speed_dropdown.free()
+	if is_instance_valid(_speed_overlay):
+		_speed_overlay.free()
 	_last_clock_text = ""
 	_last_bless_text = ""
 	_chip_values.clear()
 	_last_chip.clear()
 	_speed_buttons.clear()
+	_speed_dropdown = null
+	_speed_overlay = null
 	var vp := get_viewport()
+	# Invisible full-screen catcher, BELOW the top bar in draw
+	# order: while the speed dropdown is open, any tap outside
+	# it (or the bar) closes the dropdown without changing
+	# speed. It never blocks the bar itself (built after it) or
+	# the side panels (built after the bar).
+	_speed_overlay = Control.new()
+	_speed_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_speed_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_speed_overlay.visible = false
+	_speed_overlay.gui_input.connect(_on_speed_overlay_input)
+	add_child(_speed_overlay)
 	_top_panel = PanelContainer.new()
 	_top_panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	_top_panel.add_theme_stylebox_override(
@@ -123,7 +156,11 @@ func _build_top_bar() -> void:
 	var column := VBoxContainer.new()
 	column.add_theme_constant_override("separation", 10 if _phone else 6)
 	_top_panel.add_child(column)
-	# Row 1: clock chip + status + Save + Evolution.
+	# Row 1 — the ONE info line (John, Nov 5, 2026): day, year,
+	# season, time, phase, population and every resource, all on
+	# a single horizontal line. The chips ride in a horizontal
+	# scroll container, so on a narrow phone the line scrolls
+	# sideways instead of wrapping to a second row.
 	var row := _add_row(column)
 	var clock_chip := PanelContainer.new()
 	clock_chip.add_theme_stylebox_override("panel", GodCivTheme.chip_style(_phone))
@@ -142,88 +179,109 @@ func _build_top_bar() -> void:
 	GodCivTheme.style_label(_season_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_MAIN, _phone)
 	_season_label.text = "Spring"
 	clock_row.add_child(_season_label)
-	_time_label = Label.new()
-	GodCivTheme.style_label(_time_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_MAIN, _phone)
-	_time_label.text = "07:41"
-	clock_row.add_child(_time_label)
+	# The time is a tappable chip: tapping it opens the speed
+	# dropdown (Pause / 1x / 2x / 4x). A flat button reads as
+	# plain text but takes taps; the trailing "v" marks it as a
+	# dropdown. (No unicode arrow: the default font may lack it.)
+	_time_button = Button.new()
+	_time_button.name = "TimeChip"
+	_time_button.flat = true
+	_time_button.focus_mode = Control.FOCUS_NONE
+	_time_button.add_theme_font_size_override("font_size", GodCivPhoneUI.body_font(vp))
+	_time_button.add_theme_color_override("font_color", GodCivTheme.TEXT_MAIN)
+	_time_button.add_theme_color_override("font_hover_color", GodCivTheme.GOLD)
+	_time_button.add_theme_color_override("font_pressed_color", GodCivTheme.GOLD)
+	_time_button.add_theme_color_override("font_shadow_color", GodCivTheme.TEXT_SHADOW)
+	_time_button.add_theme_constant_override("shadow_offset_x", 2 if _phone else 1)
+	_time_button.add_theme_constant_override("shadow_offset_y", 2 if _phone else 1)
+	_time_button.text = "07:41 v"
+	_time_button.pressed.connect(_toggle_speed_dropdown)
+	clock_row.add_child(_time_button)
 	_phase_label = Label.new()
 	GodCivTheme.style_label(_phase_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_MAIN, _phone)
 	_phase_label.text = "Day"
 	clock_row.add_child(_phase_label)
 	row.add_child(clock_chip)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
-	# The status line ("Saved.") lives in the clock row on
-	# desktop. On a phone it would push the buttons off the
-	# right edge when it appears, so there the Save button
-	# itself flashes "Saved!" instead (see set_status).
+	_info_scroll = ScrollContainer.new()
+	_info_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_info_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_info_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_info_scroll.follow_focus = false
+	row.add_child(_info_scroll)
+	_info_chip_row = HBoxContainer.new()
+	_info_chip_row.add_theme_constant_override("separation", 10 if _phone else 8)
+	_info_scroll.add_child(_info_chip_row)
+	_add_chip(_info_chip_row, "pop", "POP")
+	_add_chip(_info_chip_row, "food", "FOOD")
+	_add_chip(_info_chip_row, "wood", "WOOD")
+	_add_chip(_info_chip_row, "stone", "STONE")
+	_add_chip(_info_chip_row, "ore", "ORE")
+	_add_chip(_info_chip_row, "faith", "FAITH")
+	_add_chip(_info_chip_row, "morale", "MORALE")
+	_add_chip(_info_chip_row, "fish", "FISH")
+	_add_chip(_info_chip_row, "meat", "MEAT")
+	_add_chip(_info_chip_row, "furniture", "FURNITURE")
+	_add_chip(_info_chip_row, "pottery", "POTTERY")
+	_add_chip(_info_chip_row, "ironware", "IRONWARE")
+	_add_chip(_info_chip_row, "wares", "WARES")
+	_add_chip(_info_chip_row, "fund", "FUND")
+	# The status line ("Saved.") lives at the right end of the
+	# info line on desktop. On a phone it would push the chips
+	# off the edge, so there the Save button itself flashes
+	# "Saved!" instead (see set_status).
 	if _phone:
 		_status_label = null
 	else:
 		_status_label = Label.new()
 		GodCivTheme.style_label(_status_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_DIM, _phone)
 		row.add_child(_status_label)
+	# Row 2 — the slim action row. The info line is John's
+	# single line; the actions (Save, Evolution, Bless, Whisper)
+	# live here so nothing is lost and the bar stays readable.
+	var arow := _add_row(column)
 	_save_button = GodCivPhoneUI.big_button(vp, "Save", "secondary")
-	_save_button.pressed.connect(func() -> void: save_requested.emit())
-	row.add_child(_save_button)
+	_save_button.pressed.connect(_on_save_button_pressed)
+	arow.add_child(_save_button)
 	_evolution_button = GodCivPhoneUI.big_button(vp, "Evolution", "primary")
 	_evolution_button.pressed.connect(_on_evolution_button_pressed)
-	row.add_child(_evolution_button)
-	# Village numbers as pills: one row on desktop, two on phone
-	# so the row fits the narrow screen at phone font size.
-	var vrow := _add_row(column)
-	_add_chip(vrow, "pop", "POP")
-	_add_chip(vrow, "food", "FOOD")
-	_add_chip(vrow, "wood", "WOOD")
-	_add_chip(vrow, "stone", "STONE")
-	if _phone:
-		vrow = _add_row(column)
-	_add_chip(vrow, "ore", "ORE")
-	_add_chip(vrow, "faith", "FAITH")
-	_add_chip(vrow, "morale", "MORALE")
-	# Economy numbers as pills: same split as the village row.
-	var erow := _add_row(column)
-	_add_chip(erow, "fish", "FISH")
-	_add_chip(erow, "meat", "MEAT")
-	_add_chip(erow, "furniture", "FURNITURE")
-	_add_chip(erow, "pottery", "POTTERY")
-	if _phone:
-		erow = _add_row(column)
-	_add_chip(erow, "ironware", "IRONWARE")
-	_add_chip(erow, "wares", "WARES")
-	_add_chip(erow, "fund", "FUND")
-	# God bar.
-	var grow := HBoxContainer.new()
-	grow.add_theme_constant_override("separation", 14 if _phone else 10)
-	column.add_child(grow)
+	arow.add_child(_evolution_button)
 	_bless_button = GodCivPhoneUI.big_button(vp, "Bless", "primary")
-	_bless_button.pressed.connect(func() -> void: bless_requested.emit())
-	grow.add_child(_bless_button)
+	_bless_button.pressed.connect(_on_bless_button_pressed)
+	arow.add_child(_bless_button)
 	_whisper_edit = LineEdit.new()
 	_whisper_edit.placeholder_text = "Whisper to the village…"
 	_whisper_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	GodCivTheme.style_line_edit(_whisper_edit, _phone, GodCivPhoneUI.button_font(vp))
 	_whisper_edit.custom_minimum_size = Vector2(0, GodCivPhoneUI.thumb_min(vp).y)
-	grow.add_child(_whisper_edit)
+	arow.add_child(_whisper_edit)
 	var whisper_button := GodCivPhoneUI.big_button(vp, "Whisper", "secondary")
 	whisper_button.pressed.connect(_on_whisper_pressed)
-	grow.add_child(whisper_button)
-	# Time speed controls: Pause + 1x / 2x / 4x. Toggle buttons in
-	# one group, so exactly one is selected; the selected one
-	# turns gold (see GodCivTheme.style_speed_button). 1x is the
-	# clock's default 3.0 sim-seconds per real second.
-	var srow := _add_row(column)
-	var speed_label := Label.new()
-	GodCivTheme.style_label(speed_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_DIM, _phone)
-	speed_label.text = "SPEED"
-	srow.add_child(speed_label)
+	arow.add_child(whisper_button)
+	# Speed dropdown: a small panel that hangs below the top
+	# bar, opened by tapping the time chip. Same four options
+	# as the old SPEED row (Pause / 1x / 2x / 4x), same gold
+	# selected state; picking one applies it and closes the
+	# dropdown. Hidden until opened; positioned by
+	# _position_panels once the bar has laid out.
+	_speed_dropdown = PanelContainer.new()
+	_speed_dropdown.name = "SpeedDropdown"
+	_speed_dropdown.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_speed_dropdown.add_theme_stylebox_override(
+		"panel", GodCivTheme.panel_style(_phone, GodCivTheme.PANEL_BG_SOLID)
+	)
+	_speed_dropdown.visible = false
+	add_child(_speed_dropdown)
+	var drop_col := VBoxContainer.new()
+	drop_col.add_theme_constant_override("separation", 8 if _phone else 6)
+	_speed_dropdown.add_child(drop_col)
 	var speed_group := ButtonGroup.new()
-	_add_speed_button(srow, speed_group, "Pause", "pause")
-	_add_speed_button(srow, speed_group, "1x", "1x")
-	_add_speed_button(srow, speed_group, "2x", "2x")
-	_add_speed_button(srow, speed_group, "4x", "4x")
+	_add_speed_button(drop_col, speed_group, "Pause", "pause")
+	_add_speed_button(drop_col, speed_group, "1x", "1x")
+	_add_speed_button(drop_col, speed_group, "2x", "2x")
+	_add_speed_button(drop_col, speed_group, "4x", "4x")
 	_apply_speed_states()
+	_speed_dropdown.reset_size()
+	_position_panels()
 
 
 func _build_log_panel() -> void:
@@ -267,6 +325,8 @@ func _build_log_panel() -> void:
 # Side panels dock below the top bar so Bless/Whisper stay
 # visible and tappable while one is open. Runs deferred after
 # the top bar is built and on every top-bar resize (rotation).
+# The speed dropdown hangs below the bar too, at its left edge
+# under the time chip.
 func _position_panels() -> void:
 	if not is_instance_valid(_top_panel):
 		return
@@ -282,6 +342,8 @@ func _position_panels() -> void:
 		_evolution_sidebar.set_docked_top(h)
 	if is_instance_valid(_villager_card):
 		_villager_card.set_docked_top(h)
+	if is_instance_valid(_speed_dropdown):
+		_speed_dropdown.position = Vector2(8, h + 4)
 
 
 func _update_log_visibility() -> void:
@@ -304,19 +366,65 @@ func _on_viewport_resized() -> void:
 
 
 func _on_whisper_pressed() -> void:
+	_close_speed_dropdown()
 	whisper_requested.emit(_whisper_edit.text)
 	_whisper_edit.text = ""
 
 
+# Speed dropdown: tapping the time chip toggles it; picking an
+# option applies it and closes; tapping the time again or
+# anywhere outside closes it without changing speed.
+func _toggle_speed_dropdown() -> void:
+	if is_instance_valid(_speed_dropdown) and _speed_dropdown.visible:
+		_close_speed_dropdown()
+	else:
+		_open_speed_dropdown()
+
+
+func _open_speed_dropdown() -> void:
+	if not is_instance_valid(_speed_dropdown):
+		return
+	_apply_speed_states()
+	_speed_dropdown.visible = true
+	_speed_overlay.visible = true
+
+
+func _close_speed_dropdown() -> void:
+	if is_instance_valid(_speed_dropdown):
+		_speed_dropdown.visible = false
+	if is_instance_valid(_speed_overlay):
+		_speed_overlay.visible = false
+
+
+func _on_speed_overlay_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			_close_speed_dropdown()
+
+
+func _on_save_button_pressed() -> void:
+	_close_speed_dropdown()
+	save_requested.emit()
+
+
+func _on_bless_button_pressed() -> void:
+	_close_speed_dropdown()
+	bless_requested.emit()
+
+
 func update_clock(p_day: int, p_year: int, season_name: String, time_str: String, phase_name: String) -> void:
-	var combined := "%d|%d|%s|%s|%s" % [p_day, p_year, season_name, time_str, phase_name]
+	# The paused state is part of the key: pausing freezes the
+	# clock text, so without it the "Paused" phase label would
+	# never refresh.
+	var combined := "%d|%d|%s|%s|%s|%s" % [p_day, p_year, season_name, time_str, phase_name, "P" if _paused else ""]
 	if combined == _last_clock_text:
 		return
 	_last_clock_text = combined
 	_day_label.text = "Day %d · Year %d" % [p_day, p_year]
 	_season_label.text = season_name
-	_time_label.text = time_str
-	_phase_label.text = phase_name
+	_time_button.text = "%s v" % time_str
+	_phase_label.text = "Paused" if _paused else phase_name
 
 
 func update_village(stats: Dictionary) -> void:
@@ -366,12 +474,13 @@ func hide_evolution_sidebar() -> void:
 
 
 func _on_evolution_button_pressed() -> void:
+	_close_speed_dropdown()
 	hide_villager_card()
 	_evolution_sidebar.toggle_sidebar()
 	_update_log_visibility()
 
 
-func _add_speed_button(row: HBoxContainer, group: ButtonGroup, label: String, key: String) -> void:
+func _add_speed_button(parent: Container, group: ButtonGroup, label: String, key: String) -> void:
 	var b := GodCivPhoneUI.big_button(get_viewport(), label, "secondary")
 	GodCivTheme.style_speed_button(b, _phone)
 	b.toggle_mode = true
@@ -386,7 +495,7 @@ func _add_speed_button(row: HBoxContainer, group: ButtonGroup, label: String, ke
 		elif key == "4x":
 			s = SPEED_4X
 		b.pressed.connect(func() -> void: _on_speed_button(s))
-	row.add_child(b)
+	parent.add_child(b)
 	_speed_buttons[key] = b
 
 
@@ -410,6 +519,7 @@ func set_speed_state(speed: float, paused: bool) -> void:
 func _on_pause_button() -> void:
 	_paused = true
 	_apply_speed_states()
+	_close_speed_dropdown()
 	time_control_requested.emit(_speed, true)
 
 
@@ -417,6 +527,7 @@ func _on_speed_button(s: float) -> void:
 	_speed = s
 	_paused = false
 	_apply_speed_states()
+	_close_speed_dropdown()
 	time_control_requested.emit(s, false)
 
 
@@ -439,9 +550,9 @@ func set_log(lines: Array) -> void:
 
 
 func set_status(text: String) -> void:
-	# Desktop shows the status in the clock row; on a phone
-	# that would shove the buttons off-screen, so the Save
-	# button flashes the confirmation instead.
+	# Desktop shows the status at the right end of the info
+	# line; on a phone that would shove the chips off-screen,
+	# so the Save button flashes the confirmation instead.
 	if _phone:
 		if _save_button != null:
 			_save_button.text = "Saved!" if text != "" else "Save"
