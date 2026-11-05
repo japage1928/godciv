@@ -33,6 +33,7 @@ var _village_label_b: Label
 var _economy_label: Label
 var _economy_label_b: Label
 var _bless_button: Button
+var _save_button: Button
 var _evolution_button: Button
 var _whisper_edit: LineEdit
 var _log_label: Label
@@ -110,10 +111,17 @@ func _build_top_bar() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(spacer)
-	_status_label = _make_label(row, "", GodCivPhoneUI.body_font(vp))
-	var save_button := GodCivPhoneUI.big_button(vp, "Save")
-	save_button.pressed.connect(func() -> void: save_requested.emit())
-	row.add_child(save_button)
+	# The status line ("Saved.") lives in the clock row on
+	# desktop. On a phone it would push the buttons off the
+	# right edge when it appears, so there the Save button
+	# itself flashes "Saved!" instead (see set_status).
+	if _phone:
+		_status_label = null
+	else:
+		_status_label = _make_label(row, "", GodCivPhoneUI.body_font(vp))
+	_save_button = GodCivPhoneUI.big_button(vp, "Save")
+	_save_button.pressed.connect(func() -> void: save_requested.emit())
+	row.add_child(_save_button)
 	_evolution_button = GodCivPhoneUI.big_button(vp, "Evolution")
 	_evolution_button.pressed.connect(_on_evolution_button_pressed)
 	row.add_child(_evolution_button)
@@ -291,4 +299,11 @@ func set_log(lines: Array) -> void:
 
 
 func set_status(text: String) -> void:
-	_status_label.text = text
+	# Desktop shows the status in the clock row; on a phone
+	# that would shove the buttons off-screen, so the Save
+	# button flashes the confirmation instead.
+	if _phone:
+		if _save_button != null:
+			_save_button.text = "Saved!" if text != "" else "Save"
+	elif _status_label != null:
+		_status_label.text = text
