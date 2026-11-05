@@ -10,6 +10,7 @@ extends PanelContainer
 
 var _title_label: Label
 var _body_label: Label
+var _close_button: Button
 var _villager: Node = null
 var _village: Node = null
 
@@ -17,42 +18,61 @@ var _village: Node = null
 func _ready() -> void:
 	visible = false
 	set_anchors_preset(Control.PRESET_CENTER_RIGHT)
-	offset_left = -384
-	offset_top = -260
-	offset_right = -8
-	offset_bottom = 260
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.0, 0.0, 0.0, 0.82)
-	style.content_margin_left = 12.0
-	style.content_margin_right = 12.0
-	style.content_margin_top = 10.0
-	style.content_margin_bottom = 10.0
+	style.content_margin_left = 16.0
+	style.content_margin_right = 16.0
+	style.content_margin_top = 12.0
+	style.content_margin_bottom = 12.0
 	add_theme_stylebox_override("panel", style)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 6)
+	column.add_theme_constant_override("separation", 8)
 	add_child(column)
 	var title_row := HBoxContainer.new()
-	title_row.add_theme_constant_override("separation", 8)
+	title_row.add_theme_constant_override("separation", 10)
 	column.add_child(title_row)
 	_title_label = Label.new()
-	_title_label.add_theme_font_size_override("font_size", 20)
 	_title_label.add_theme_color_override("font_color", Color(1, 1, 1))
 	_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_row.add_child(_title_label)
-	var close_button := Button.new()
-	close_button.text = "✕"
-	close_button.pressed.connect(hide_card)
-	title_row.add_child(close_button)
+	_close_button = GodCivPhoneUI.make_close_button(get_viewport())
+	_close_button.pressed.connect(hide_card)
+	title_row.add_child(_close_button)
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	column.add_child(scroll)
 	_body_label = Label.new()
-	_body_label.add_theme_font_size_override("font_size", 16)
 	_body_label.add_theme_color_override("font_color", Color(1, 1, 1))
 	_body_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_body_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_body_label)
+	apply_layout()
+
+
+# Geometry + fonts for the current orientation. Called from
+# _ready and from the HUD when the viewport flips. Mobile pass
+# (John, Nov 5, 2026): on a portrait phone the card is most of
+# the screen width with phone-sized text, and the X is a plain
+# ASCII "X" on a real thumb-sized button — the old "✕" glyph
+# rendered as a fallback box on some fonts and the last
+# play-check could not confirm it closed anything.
+func apply_layout() -> void:
+	var vp := get_viewport()
+	var phone: bool = GodCivPhoneUI.is_portrait(vp)
+	var w: float = vp.get_visible_rect().size.x
+	if phone:
+		offset_left = -w * 0.88
+		offset_top = -520
+		offset_bottom = 520
+	else:
+		offset_left = -384
+		offset_top = -260
+		offset_bottom = 260
+	offset_right = -8
+	_title_label.add_theme_font_size_override("font_size", GodCivPhoneUI.title_font(vp))
+	_body_label.add_theme_font_size_override("font_size", 44 if phone else 16)
+	GodCivPhoneUI.style_close_button(_close_button, vp)
 
 
 func show_card(v: Node, village: Node) -> void:
