@@ -34,11 +34,12 @@ static func thumb_min(vp: Viewport) -> Vector2:
 		return Vector2(170, 130)
 	return Vector2(72, 52)
 
-static func big_button(vp: Viewport, text: String) -> Button:
+static func big_button(vp: Viewport, text: String, kind: String = "secondary") -> Button:
 	var b := Button.new()
 	b.text = text
 	b.add_theme_font_size_override("font_size", button_font(vp))
 	b.custom_minimum_size = thumb_min(vp)
+	GodCivTheme.style_button(b, is_portrait(vp), kind)
 	return b
 
 # The close button. Plain ASCII "X": the old "✕" glyph rendered
@@ -54,3 +55,4 @@ static func style_close_button(b: Button, vp: Viewport) -> void:
 	b.tooltip_text = "Close"
 	b.add_theme_font_size_override("font_size", 56 if is_portrait(vp) else 28)
 	b.custom_minimum_size = Vector2(120, 120) if is_portrait(vp) else Vector2(64, 64)
+	GodCivTheme.style_button(b, is_portrait(vp), "close")
