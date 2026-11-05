@@ -274,8 +274,14 @@ func _position_panels() -> void:
 	if h < 10.0:
 		# Layout hasn't run yet; resized will fire again.
 		return
-	_evolution_sidebar.set_docked_top(h)
-	_villager_card.set_docked_top(h)
+	# _build_top_bar runs before the panels are created, and its
+	# resized signal can fire during layout — guard the nils so
+	# the early call is a no-op; the deferred call at the end of
+	# _ready docks them once they exist.
+	if is_instance_valid(_evolution_sidebar):
+		_evolution_sidebar.set_docked_top(h)
+	if is_instance_valid(_villager_card):
+		_villager_card.set_docked_top(h)
 
 
 func _update_log_visibility() -> void:
