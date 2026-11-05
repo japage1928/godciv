@@ -27,6 +27,14 @@ extends CanvasLayer
 signal save_requested
 signal bless_requested
 signal whisper_requested(text: String)
+signal time_control_requested(speed: float, paused: bool)
+
+# Time speeds: 1x is the clock's default 3.0 sim-seconds per real
+# second; 2x / 4x are multiples of it. Pause is not a speed, it
+# sets clock.paused.
+const SPEED_1X: float = 3.0
+const SPEED_2X: float = 6.0
+const SPEED_4X: float = 12.0
 
 var _top_panel: PanelContainer
 var _log_panel: PanelContainer
@@ -48,6 +56,9 @@ var _evolution_sidebar: GodCivEvolutionSidebar
 var _phone: bool = false
 var _last_clock_text: String = ""
 var _last_bless_text: String = ""
+var _speed: float = SPEED_1X
+var _paused: bool = false
+var _speed_buttons: Dictionary = {}
 
 
 func _ready() -> void:
@@ -100,6 +111,7 @@ func _build_top_bar() -> void:
 	_last_bless_text = ""
 	_chip_values.clear()
 	_last_chip.clear()
+	_speed_buttons.clear()
 	var vp := get_viewport()
 	_top_panel = PanelContainer.new()
 	_top_panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
@@ -197,6 +209,21 @@ func _build_top_bar() -> void:
 	var whisper_button := GodCivPhoneUI.big_button(vp, "Whisper", "secondary")
 	whisper_button.pressed.connect(_on_whisper_pressed)
 	grow.add_child(whisper_button)
+	# Time speed controls: Pause + 1x / 2x / 4x. Toggle buttons in
+	# one group, so exactly one is selected; the selected one
+	# turns gold (see GodCivTheme.style_speed_button). 1x is the
+	# clock's default 3.0 sim-seconds per real second.
+	var srow := _add_row(column)
+	var speed_label := Label.new()
+	GodCivTheme.style_label(speed_label, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_DIM, _phone)
+	speed_label.text = "SPEED"
+	srow.add_child(speed_label)
+	var speed_group := ButtonGroup.new()
+	_add_speed_button(srow, speed_group, "Pause", "pause")
+	_add_speed_button(srow, speed_group, "1x", "1x")
+	_add_speed_button(srow, speed_group, "2x", "2x")
+	_add_speed_button(srow, speed_group, "4x", "4x")
+	_apply_speed_states()
 
 
 func _build_log_panel() -> void:
@@ -336,6 +363,55 @@ func _on_evolution_button_pressed() -> void:
 	hide_villager_card()
 	_evolution_sidebar.toggle_sidebar()
 	_update_log_visibility()
+
+
+func _add_speed_button(row: HBoxContainer, group: ButtonGroup, label: String, key: String) -> void:
+	var b := GodCivPhoneUI.big_button(get_viewport(), label, "secondary")
+	GodCivTheme.style_speed_button(b, _phone)
+	b.toggle_mode = true
+	b.button_group = group
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	if key == "pause":
+		b.pressed.connect(_on_pause_button)
+	else:
+		var s: float = SPEED_1X
+		if key == "2x":
+			s = SPEED_2X
+		elif key == "4x":
+			s = SPEED_4X
+		b.pressed.connect(func() -> void: _on_speed_button(s))
+	row.add_child(b)
+	_speed_buttons[key] = b
+
+
+func _apply_speed_states() -> void:
+	if _speed_buttons.is_empty():
+		return
+	(_speed_buttons["pause"] as Button).button_pressed = _paused
+	(_speed_buttons["1x"] as Button).button_pressed = not _paused and _speed == SPEED_1X
+	(_speed_buttons["2x"] as Button).button_pressed = not _paused and _speed == SPEED_2X
+	(_speed_buttons["4x"] as Button).button_pressed = not _paused and _speed == SPEED_4X
+
+
+# Called by main after generation/loading so the buttons show
+# the clock's real state (a save may hold 2x or 4x).
+func set_speed_state(speed: float, paused: bool) -> void:
+	_speed = speed
+	_paused = paused
+	_apply_speed_states()
+
+
+func _on_pause_button() -> void:
+	_paused = true
+	_apply_speed_states()
+	time_control_requested.emit(_speed, true)
+
+
+func _on_speed_button(s: float) -> void:
+	_speed = s
+	_paused = false
+	_apply_speed_states()
+	time_control_requested.emit(s, false)
 
 
 func refresh_villager_card() -> void:

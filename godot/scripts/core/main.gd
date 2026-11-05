@@ -155,11 +155,20 @@ func _on_generation_finished() -> void:
 	village.setup(world, clock, world.seed, _save_data)
 	hud.bless_requested.connect(village.try_bless)
 	hud.whisper_requested.connect(village.try_whisper)
+	hud.time_control_requested.connect(_on_time_control_requested)
 	village.log_changed.connect(hud.set_log)
 	village.stats_changed.connect(_on_village_stats)
 	hud.set_log(village.last_log_lines())
 	_on_village_stats()
 	clock.paused = false
+	# The clock may hold a saved speed (2x / 4x from a previous
+	# session); show it on the HUD's speed buttons.
+	hud.set_speed_state(clock.speed, clock.paused)
+
+
+func _on_time_control_requested(speed: float, paused: bool) -> void:
+	clock.speed = speed
+	clock.paused = paused
 
 
 func _on_village_stats() -> void:

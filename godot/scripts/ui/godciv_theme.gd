@@ -183,6 +183,25 @@ static func style_button(b: Button, phone: bool, kind: String = "secondary") -> 
 	b.focus_mode = Control.FOCUS_NONE
 
 
+# Time-speed toggle buttons (Pause / 1x / 2x / 4x). Unselected
+# they look like secondary buttons; the selected one turns gold,
+# so the active speed is obvious at a glance. Used with
+# toggle_mode + a ButtonGroup, so the "pressed" stylebox is what
+# the selected button shows.
+static func style_speed_button(b: Button, phone: bool) -> void:
+	b.add_theme_stylebox_override("normal", _button_box(phone, "secondary", "normal"))
+	b.add_theme_stylebox_override("hover", _button_box(phone, "secondary", "hover"))
+	b.add_theme_stylebox_override("pressed", _button_box(phone, "primary", "normal"))
+	b.add_theme_stylebox_override("disabled", _button_box(phone, "secondary", "disabled"))
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	b.add_theme_color_override("font_color", TEXT_MAIN)
+	b.add_theme_color_override("font_hover_color", TEXT_MAIN)
+	b.add_theme_color_override("font_pressed_color", TEXT_DARK)
+	b.add_theme_color_override("font_disabled_color", TEXT_DIM)
+	b.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.0))
+	b.focus_mode = Control.FOCUS_NONE
+
+
 # --- Labels ---
 static func style_label(l: Label, font_size: int, color: Color, phone: bool) -> void:
 	l.add_theme_font_size_override("font_size", font_size)
