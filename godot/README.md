@@ -49,7 +49,9 @@ godot/
     core/                main.gd, game_clock.gd, save_manager.gd, rng.gd
     world/               terrain.gd, world.gd, sim_grid.gd, camera.gd, lighting.gd
     sim/                 village.gd, villager.gd, economy.gd, deer.gd
-    ui/                  hud.gd, villager_card.gd
+    ui/                  hud.gd, villager_card.gd, evolution_sidebar.gd,
+                         phone_ui.gd, animated_backdrop.gd,
+                         loading_screen.gd, main_menu.gd
   assets/
     art/                 (empty for now — art lands here in later phases)
     audio/               (empty for now — audio lands here in later phases)
@@ -68,13 +70,20 @@ in `project.godot` and the main script in `scenes/main.tscn`.
 ## Files
 
 - `scripts/core/main.gd` — wires clock, world, lighting, camera,
-  HUD, and village; loads the save or starts fresh on seed 42;
-  saves on Save / on close. The village is founded (or restored)
-  only after world generation finishes, because it needs the
-  terrain. Tap-to-select: a tap (press + release under 12px and
-  500ms) opens the nearest villager's card within 24px, or closes
-  it when nothing is near. Phase 3 passes the season to the
-  lighting so the light follows the seasons.
+  HUD, village, main menu, and loading screen. The player lands
+  on the title menu first; the world only generates after
+  Continue or New Game, so no sim days pass on the menu.
+  Continue loads the v2 save exactly as before; New Game starts
+  fresh (the old save is erased only after the menu's confirm).
+  Saves on Save / on close, only once a village exists. The
+  village is founded (or restored) only after world generation
+  finishes, because it needs the terrain. Tap-to-select: a tap
+  (press + release within tolerance and 500ms) opens the nearest
+  villager's card within the tap radius, or closes it when
+  nothing is near. On a portrait phone the tap radius (64) and
+  press tolerance (32) are bigger than desktop (24 / 12), so
+  villagers are tappable with a thumb. Phase 3 passes the season
+  to the lighting so the light follows the seasons.
 - `scripts/core/game_clock.gd` — day/time/season/year, PWA phase
   boundaries (night 0.00–0.22 / 0.84–1.00, dawn 0.22–0.32, day
   0.32–0.72, dusk 0.72–0.84), 180 sim-seconds per day.
@@ -150,13 +159,38 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   loop. Deer are not in the terrain; the village owns the tick and
   restores the herd at dawn (cap 4, winter 2). Phase 3 adds
   antlers and legs.
-- `scripts/ui/hud.gd` — top bar, five rows: Day/Season/time/phase
-  + status + Save; village numbers (Pop, Food, Wood, Stone, Ore,
-  Faith, Morale); economy numbers (Fish, Meat, Furniture, Pottery,
-  Ironware, Wares, Fund, Tech); evolution (current discovery,
-  progress, and what unlocks next); god bar (Bless button with
-  cooldown, Whisper field + button). Log panel, bottom left, last
-  6 lines. Hosts the villager card on the right.
+- `scripts/ui/hud.gd` — top bar, four rows: Day/Season/time/phase
+  + status + Save + Evolution; village numbers (Pop, Food, Wood,
+  Stone, Ore, Faith, Morale); economy numbers (Fish, Meat,
+  Furniture, Pottery, Ironware, Wares, Fund); god bar (Bless
+  button with cooldown, Whisper field + button). No tech text up
+  top — that lives in the sidebar. Log panel, bottom left, last
+  6 lines. Hosts the villager card and the Evolution sidebar on
+  the right. Mobile pass: on a portrait phone fonts scale ~2.6x,
+  every button is a real thumb target (min ~44 CSS px), the
+  village/economy rows split across two lines so they fit, and
+  the log is wider with readable text; rotating the phone
+  rebuilds the top bar for the new orientation.
+- `scripts/ui/evolution_sidebar.gd` — collapsible Evolution
+  sidebar (collapsed by default): current discovery + progress,
+  next discovery, the full tech tree, villager progression.
+  Mobile pass: most of the screen width on a portrait phone,
+  phone-sized text, plain ASCII "X" close button on a
+  thumb-sized target.
+- `scripts/ui/phone_ui.gd` — shared phone/desktop sizing:
+  portrait detection from the live viewport, font scales,
+  thumb-sized button factory, plain-"X" close-button factory.
+- `scripts/ui/animated_backdrop.gd` — procedural animated
+  backdrop (sky, sun, drifting clouds, birds, hills, walking
+  villagers) shared by the menu and the loading screen; drawn
+  in code, no assets.
+- `scripts/ui/loading_screen.gd` — animated loading screen
+  shown while the world generates: animated title, backdrop,
+  live progress bar tied to generation_progress.
+- `scripts/ui/main_menu.gd` — title screen on launch: Continue
+  (only when a v2 save exists), New Game (asks first when a
+  save exists), How to Play blurb. No generation or sim until
+  the player enters the game.
 - `scripts/ui/villager_card.gd` — read-only villager card: name and
   class, job and assignment, age and sex, traits, education and
   tool, coins and standing, all 13 skills, carried goods, home and
@@ -287,6 +321,25 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   flag, defaulting to dirt on Phase 2 saves); stalls save as
   buildings with type `stall_*`; nothing else is added to the
   save. A Phase 2 save loads with Phase 3 defaults.
+
+## Mobile pass notes (John, Nov 5, 2026)
+
+John plays on his iPhone in portrait Safari; the info bar and
+every button were too small to see or touch. The whole
+1280-unit canvas is squeezed into ~390 CSS px, so desktop-sized
+UI is ~6 CSS px tall. The fix is a portrait class, detected
+from the live viewport (`GodCivPhoneUI.is_portrait`): fonts
+scale ~2.6x, buttons get a min ~44 CSS px thumb target, the
+village/economy rows split across two lines, the sidebar and
+villager card go to 88% of the screen width, and the tap
+radius (64) and press tolerance (32) grow so villagers are
+tappable. The close buttons are plain ASCII "X" — the old "✕"
+glyph rendered as a fallback box on some fonts and the last
+play-check could not confirm it closed anything. Rotating the
+phone rebuilds the HUD for the new orientation. The same pass
+adds a title menu (Continue / New Game / How to Play) before
+the game and an animated loading screen during generation;
+save format stays v2 and no sim rules were touched.
 
 ## Run it
 
