@@ -1,13 +1,15 @@
 class_name GodCivSave
 extends RefCounted
 
-# Versioned save/load for a fresh Godot world. Save format version 1,
-# written from the start; there is no PWA save import by design.
-# The terrain itself is deterministic from the seed, so the save only
-# stores the seed, the clock, and the camera — never the 320x320 grid.
-# A version mismatch starts a fresh world instead of migrating blindly.
+# Versioned save/load for a fresh Godot world. Save format version 2
+# (Phase 1): version 1 stored only the seed, clock, and camera; v2
+# adds the village section (see GodCivVillage.to_save). The terrain
+# itself is deterministic from the seed, so the save never stores
+# the 320x320 grid — only the village's mutations of it. A version
+# mismatch starts a fresh world instead of migrating blindly, so a
+# Phase 0 (v1) save loads as a fresh village, not a broken one.
 
-const SAVE_VERSION: int = 1
+const SAVE_VERSION: int = 2
 const SAVE_PATH: String = "user://savegame.json"
 
 

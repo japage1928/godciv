@@ -1,10 +1,11 @@
 class_name GodCivWorld
 extends Node2D
 
-# The 320x320 world as two TileMapLayers (ground + features), generated
-# from GodCivTerrain in chunks across frames so startup stays responsive.
-# The TileSet texture is generated procedurally in code — no binary
-# assets — so the whole project stays UTF-8 text.
+# The 320x320 world as three TileMapLayers (ground + features +
+# buildings), generated from GodCivTerrain in chunks across frames
+# so startup stays responsive. The TileSet texture is generated
+# procedurally in code — no binary assets — so the whole project
+# stays UTF-8 text.
 #
 # Ground tile by height band is a RENDER choice, not a sim rule: water
 # and shore follow the PWA exactly (water = lake disc + h < 0.62;
@@ -25,12 +26,22 @@ const TILE_ROCK: int = 5
 const TILE_TREE: int = 6
 const TILE_STONE: int = 7
 const TILE_ORE: int = 8
-const TILE_COUNT: int = 9
+const TILE_HUT: int = 9
+const TILE_GRANARY: int = 10
+const TILE_TOWNCENTER: int = 11
+const TILE_ALTAR: int = 12
+const TILE_ROAD: int = 13
+const TILE_FARM: int = 14
+const TILE_CROP1: int = 15
+const TILE_CROP2: int = 16
+const TILE_CROP3: int = 17
+const TILE_COUNT: int = 18
 
 var seed: int = 42
 var terrain: GodCivTerrain
 var ground_layer: TileMapLayer
 var feature_layer: TileMapLayer
+var building_layer: TileMapLayer
 var generating: bool = false
 
 var _tile_source_id: int = 0
@@ -96,12 +107,63 @@ func _paint_chunk(cx: int, cz: int) -> void:
 			var x: int = cx * GodCivTerrain.CHUNK + lx
 			var z: int = cz * GodCivTerrain.CHUNK + lz
 			var cell := Vector2i(x, z)
-			ground_layer.set_cell(cell, _tile_source_id, Vector2i(_classify_ground(x, z), 0))
+			if terrain.is_farm(x, z):
+				ground_layer.set_cell(cell, _tile_source_id, Vector2i(TILE_FARM, 0))
+			else:
+				ground_layer.set_cell(cell, _tile_source_id, Vector2i(_classify_ground(x, z), 0))
 			if terrain.has_tree(x, z):
 				feature_layer.set_cell(cell, _tile_source_id, Vector2i(TILE_TREE, 0))
 			elif terrain.has_stone(x, z):
 				var tile: int = TILE_ORE if terrain.has_ore(x, z) else TILE_STONE
 				feature_layer.set_cell(cell, _tile_source_id, Vector2i(tile, 0))
+
+
+## Phase 1 cell setters, called by the village as the sim mutates
+## the world. Ground layer carries roads and crop stages; the
+## feature layer carries trees and stone; the building layer
+## carries raised buildings.
+
+func cell_to_px(cell: Vector2i) -> Vector2:
+	return Vector2(float(cell.x) * TILE_SIZE + 8.0, float(cell.y) * TILE_SIZE + 8.0)
+
+
+func set_building_cell(x: int, z: int, building_type: String) -> void:
+	var tile: int = TILE_HUT
+	match building_type:
+		"granary":
+			tile = TILE_GRANARY
+		"towncenter":
+			tile = TILE_TOWNCENTER
+		"altar":
+			tile = TILE_ALTAR
+	building_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(tile, 0))
+
+
+func clear_building_cell(x: int, z: int) -> void:
+	building_layer.erase_cell(Vector2i(x, z))
+
+
+func set_road_cell(x: int, z: int) -> void:
+	ground_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(TILE_ROAD, 0))
+
+
+func set_crop_cell(x: int, z: int, stage: int) -> void:
+	var tile: int = TILE_FARM
+	if stage == 1:
+		tile = TILE_CROP1
+	elif stage == 2:
+		tile = TILE_CROP2
+	elif stage >= 3:
+		tile = TILE_CROP3
+	ground_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(tile, 0))
+
+
+func set_feature_cell(x: int, z: int, tile: int) -> void:
+	feature_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(tile, 0))
+
+
+func clear_feature_cell(x: int, z: int) -> void:
+	feature_layer.erase_cell(Vector2i(x, z))
 
 
 func _build_tileset() -> void:
@@ -121,6 +183,10 @@ func _build_tileset() -> void:
 	feature_layer.name = "Features"
 	feature_layer.tile_set = tile_set
 	add_child(feature_layer)
+	building_layer = TileMapLayer.new()
+	building_layer.name = "Buildings"
+	building_layer.tile_set = tile_set
+	add_child(building_layer)
 
 
 func _make_tiles_texture() -> ImageTexture:
@@ -135,6 +201,15 @@ func _make_tiles_texture() -> ImageTexture:
 	_draw_tree_tile(img, TILE_TREE)
 	_draw_stone_tile(img, TILE_STONE, Color(0.58, 0.58, 0.55))
 	_draw_ore_tile(img, TILE_ORE)
+	_draw_hut_tile(img, TILE_HUT)
+	_draw_granary_tile(img, TILE_GRANARY)
+	_draw_towncenter_tile(img, TILE_TOWNCENTER)
+	_draw_altar_tile(img, TILE_ALTAR)
+	_draw_road_tile(img, TILE_ROAD)
+	_draw_crop_tile(img, TILE_FARM, 0)
+	_draw_crop_tile(img, TILE_CROP1, 1)
+	_draw_crop_tile(img, TILE_CROP2, 2)
+	_draw_crop_tile(img, TILE_CROP3, 3)
 	return ImageTexture.create_from_image(img)
 
 
@@ -178,3 +253,91 @@ func _draw_ore_tile(img: Image, tile: int) -> void:
 	var ore_color := Color(0.85, 0.5, 0.2, 1.0)
 	for p in [Vector2i(5, 9), Vector2i(10, 8), Vector2i(8, 12), Vector2i(11, 11)]:
 		img.set_pixel(ox + p.x, p.y, ore_color)
+
+
+func _draw_hut_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var wall := Color(0.55, 0.42, 0.28)
+	var roof := Color(0.72, 0.60, 0.32)
+	for py in range(9, TILE_SIZE):
+		for px in range(2, 14):
+			img.set_pixel(ox + px, py, wall)
+	for py in range(3, 10):
+		var half: int = py - 2
+		for px in range(8 - half, 8 + half):
+			img.set_pixel(ox + px, py, roof)
+	for py in range(11, TILE_SIZE):
+		for px in range(7, 9):
+			img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+
+
+func _draw_granary_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var wall := Color(0.60, 0.46, 0.30)
+	var roof := Color(0.68, 0.52, 0.28)
+	for py in range(7, TILE_SIZE):
+		for px in range(1, 15):
+			img.set_pixel(ox + px, py, wall)
+	for py in range(2, 8):
+		var half: int = py - 1
+		for px in range(8 - half, 8 + half):
+			img.set_pixel(ox + px, py, roof)
+	for py in [9, 12]:
+		for px in range(1, 15):
+			img.set_pixel(ox + px, py, Color(0.42, 0.30, 0.18))
+
+
+func _draw_towncenter_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var stone := Color(0.62, 0.60, 0.56)
+	var roof := Color(0.45, 0.30, 0.22)
+	for py in range(8, TILE_SIZE):
+		for px in range(1, 15):
+			img.set_pixel(ox + px, py, stone)
+	for py in range(3, 9):
+		var half: int = py - 2
+		for px in range(8 - half, 8 + half):
+			img.set_pixel(ox + px, py, roof)
+	for py in range(0, 4):
+		img.set_pixel(ox + 8, py, Color(0.30, 0.25, 0.20))
+	for px in range(9, 13):
+		img.set_pixel(ox + px, 1, Color(0.75, 0.25, 0.20))
+
+
+func _draw_altar_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var stone := Color(0.66, 0.64, 0.60)
+	for py in range(8, TILE_SIZE):
+		for px in range(4, 12):
+			img.set_pixel(ox + px, py, stone)
+	for py in range(6, 8):
+		for px in range(3, 13):
+			img.set_pixel(ox + px, py, stone)
+	img.set_pixel(ox + 8, 5, Color(0.95, 0.80, 0.30))
+
+
+func _draw_road_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var base := Color(0.72, 0.60, 0.42)
+	for py in TILE_SIZE:
+		for px in TILE_SIZE:
+			var n: float = GodCivRng.hash01(777, tile * 1000 + px, py, 31)
+			var f: float = 0.9 + n * 0.2
+			img.set_pixel(ox + px, py, Color(base.r * f, base.g * f, base.b * f, 1.0))
+
+
+func _draw_crop_tile(img: Image, tile: int, stage: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var soil := Color(0.42, 0.30, 0.18)
+	for py in TILE_SIZE:
+		for px in TILE_SIZE:
+			img.set_pixel(ox + px, py, soil)
+	for px in [3, 7, 11, 14]:
+		for py in TILE_SIZE:
+			img.set_pixel(ox + px, py, Color(0.32, 0.22, 0.12))
+	if stage >= 1:
+		var sprout := Color(0.30, 0.60, 0.22) if stage < 3 else Color(0.85, 0.70, 0.25)
+		var height: int = 2 if stage == 1 else (4 if stage == 2 else 6)
+		for px in [2, 5, 8, 12]:
+			for py in range(14 - height, 14):
+				img.set_pixel(ox + px, py, sprout)

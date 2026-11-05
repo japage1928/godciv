@@ -1,10 +1,13 @@
+class_name GodCivMain
 extends Node2D
 
-# Phase 0 scaffold: wires the clock, world, lighting, camera, and HUD.
-# Loads the save if one exists (version-checked), otherwise starts a
-# fresh world on the default seed. Saves on the HUD Save button and on
-# window close. The clock stays paused until the world finishes
-# generating so no days pass during the load.
+# Phase 1 vertical slice: wires the clock, world, lighting, camera,
+# HUD, and the village. Loads the save if one exists
+# (version-checked), otherwise starts a fresh world on the default
+# seed. Saves on the HUD Save button and on window close. The clock
+# stays paused until the world finishes generating so no days pass
+# during the load; the village is founded (or restored) only after
+# generation, because it needs the terrain.
 
 const DEFAULT_SEED: int = 42
 const VILLAGE_CENTER_PX: Vector2 = Vector2(392, 392)
@@ -14,6 +17,9 @@ var camera: GodCivCamera
 var clock: GodCivClock
 var lighting: GodCivLighting
 var hud: GodCivHud
+var village: GodCivVillage
+
+var _save_data: Dictionary = {}
 
 
 func _ready() -> void:
@@ -32,6 +38,7 @@ func _ready() -> void:
 	world.generation_progress.connect(_on_generation_progress)
 	world.generation_finished.connect(_on_generation_finished)
 	var save_data := GodCivSave.load_game()
+	_save_data = save_data
 	var seed_value: int = int(save_data.get("seed", DEFAULT_SEED))
 	clock.from_save(save_data)
 	var cam_pos := Vector2(
@@ -60,8 +67,27 @@ func _on_generation_progress(f: float) -> void:
 
 
 func _on_generation_finished() -> void:
+	# The village needs the terrain, so it is founded only now that
+	# generation is done. It restores its own save section when one
+	# exists, otherwise it founds a fresh village on seed 42.
+	village = GodCivVillage.new()
+	add_child(village)
+	village.setup(world, clock, world.seed, _save_data)
+	hud.bless_requested.connect(village.try_bless)
+	hud.whisper_requested.connect(village.try_whisper)
+	village.log_changed.connect(hud.set_log)
+	village.stats_changed.connect(_on_village_stats)
+	hud.set_log(village.last_log_lines())
+	_on_village_stats()
 	clock.paused = false
 	hud.set_status("")
+
+
+func _on_village_stats() -> void:
+	if village == null:
+		return
+	hud.update_village(village.stats_dict())
+	hud.set_bless_cooldown(village.bless_cooldown_remaining())
 
 
 func _on_save_requested() -> void:
@@ -76,4 +102,6 @@ func _save_game() -> void:
 	data["camera_x"] = camera.target_position.x
 	data["camera_y"] = camera.target_position.y
 	data["camera_zoom"] = camera.target_zoom.x
+	if village != null:
+		data.merge(village.to_save())
 	GodCivSave.save_game(data)
