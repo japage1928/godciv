@@ -211,11 +211,11 @@ func score_job(p_job: String) -> float:
 	if traits.has("lazy"):
 		score -= 2.0
 	if p_job == "farmer":
-		score += deficit(float(s.get("food", 0)) + float(s.get("fish", 0)) + float(s.get("meat", 0)), 40.0) * 0.35
+		score += deficit.call(float(s.get("food", 0)) + float(s.get("fish", 0)) + float(s.get("meat", 0)), 40.0) * 0.35
 	elif p_job == "woodcutter":
-		score += deficit(float(s.get("wood", 0)), 30.0) * 0.4 + (2.0 if (sim.build_queue as Array).size() > 0 else 0.0)
+		score += deficit.call(float(s.get("wood", 0)), 30.0) * 0.4 + (2.0 if (sim.build_queue as Array).size() > 0 else 0.0)
 	elif p_job == "miner":
-		score += deficit(float(s.get("stone", 0)), 24.0) * 0.25 + deficit(float(s.get("ore", 0)), 6.0) * 0.3
+		score += deficit.call(float(s.get("stone", 0)), 24.0) * 0.25 + deficit.call(float(s.get("ore", 0)), 6.0) * 0.3
 	elif p_job == "builder":
 		score += 8.0 if (sim.build_queue as Array).size() > 0 else -4.0
 	if assigned_job == p_job:
