@@ -1,7 +1,7 @@
 class_name GodCivMain
 extends Node2D
 
-# Phase 2 vertical slice: wires the clock, world, lighting, camera,
+# Phase 3 vertical slice: wires the clock, world, lighting, camera,
 # HUD, and the village. Loads the save if one exists
 # (version-checked), otherwise starts a fresh world on the default
 # seed. Saves on the HUD Save button and on window close. The clock
@@ -59,7 +59,7 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	lighting.update_for_time(clock.time, camera)
+	lighting.update_for_time(clock.time, camera, GodCivClock.season_of(clock.day))
 	hud.update_clock(clock.day, clock.year(), GodCivClock.season_name_of(clock.day), clock.time_string(), clock.phase())
 
 

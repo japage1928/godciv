@@ -1,23 +1,42 @@
-# GodCiv — Godot rebuild, Phase 2 (Economy + people)
+# GodCiv — Godot rebuild, Phase 3 (Detail + evolution)
 
 Godot 4.7, Compatibility renderer, 2D top-down. Branch `godot-rebuild`.
 The PWA on `main` is untouched and stays live until cutover.
 
-## What Phase 2 is
+## What Phase 3 is
 
-The village becomes an economy: all 13 jobs (farmer, woodcutter,
-miner, fisher, hunter, builder, hauler, teacher, carpenter, potter,
-smith, factory, guard); a town-center market where villagers trade
-surplus goods and buy better tools; a school that teaches children
-(education 0–10, faster with a teacher, who is paid from the fund);
-a class ladder (commoner / artisan / merchant / gentry) from
-standing, and housing tiers that follow the best occupant; tech
-progress from educated adults (Stone tools → Modern city); deer
-that wander, flee, and get hunted; households (everyone sharing a
-home); and a tap-to-open villager card with job, traits, skills,
-education, tool, class, coins, goods, home, household, and parents.
-Phase 1's playable loop is still underneath it all: the village,
-the 4 core jobs, hut + granary, Bless + Whisper, and the log.
+Phase 2's systems were invisible at a glance — John's verdict was
+"Looks exactly the same as last phase." Phase 3 fixes that with
+two pillars, both visible when John plays:
+
+**Visual detail.** Villagers are people now: varied hair and job
+hats (farmer's straw hat, builder's cap, hunter's hood), stepping
+legs, a tool in hand per job, a class sash, a gold circlet for the
+leader, children visibly smaller. Houses are distinct and improve
+with their occupants: hut / longhouse / great hall / farmhouse each
+with its own roof and size, and tier 1+ dwellings grow a chimney,
+trim, and windows. The towncenter is a recognizable town hall
+(stone hall, arched door, windows, steps, banner). Dirt roads link
+every building the village builds, not just the plaza. A market
+square with striped stalls stands from founding (food, goods) and
+grows with discoveries (crafts, grocer). Trees come in three looks
+(round, pine, broadleaf), meadows dot the grass, and the seasons
+change the look: autumn turns the leaves orange and the light warm,
+winter leaves the trees bare and cools the light, spring brings the
+flowers back. Roofs and walls grow up with the tech levels — the
+PWA's era stages (timber/thatch → stone/tile → brick/paved →
+concrete/glass).
+
+**Evolution.** Nothing advanced is buildable until discovered.
+Every building, job, and product gates on a tech discovery
+(`GodCivEconomy.DISCOVERIES`): the village starts primitive (huts,
+wells, shrines; farmer, woodcutter, miner, fisher, hunter, builder,
+hauler) and unlocks in sequence as tech advances. The HUD shows
+the evolution — what the village has discovered and what unlocks
+next — and a discovery is announced in the log with its unlocks.
+Locked buildings are never demanded, so they never appear as
+builds before their time; a Phase 2 save loads with its buildings
+grandfathered in and its stalls, lamps, and look restored.
 
 ## File structure
 
@@ -54,17 +73,17 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   only after world generation finishes, because it needs the
   terrain. Tap-to-select: a tap (press + release under 12px and
   500ms) opens the nearest villager's card within 24px, or closes
-  it when nothing is near.
+  it when nothing is near. Phase 3 passes the season to the
+  lighting so the light follows the seasons.
 - `scripts/core/game_clock.gd` — day/time/season/year, PWA phase
   boundaries (night 0.00–0.22 / 0.84–1.00, dawn 0.22–0.32, day
   0.32–0.72, dusk 0.72–0.84), 180 sim-seconds per day.
 - `scripts/core/save_manager.gd` — save format version 2
   (`user://savegame.json`). Stores seed, clock, camera, plus the
-  village section (see `village.gd`). Phase 2 keeps version 2:
-  the new fields (tech, market timer, deer, households, building
-  tiers, villager education/class/parents/tool tick) live inside
-  the v2 village section and every reader defaults them, so a
-  Phase 1 save loads with Phase 2 defaults. Terrain is
+  village section (see `village.gd`). Phase 3 keeps version 2:
+  the new fields (paved-road flag per road, stalls as buildings)
+  live inside the v2 village section and every reader defaults
+  them, so a Phase 2 save loads with Phase 3 defaults. Terrain is
   deterministic from the seed. Version mismatch starts a fresh
   world. No PWA save import.
 - `scripts/core/rng.gd` — mulberry32 + hash01, ported bit-for-bit
@@ -78,7 +97,12 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   + buildings) with a procedurally generated TileSet texture (no
   binary assets); chunked async generation with progress. Phase 2
   adds workshop / kiln / smithy / factory / school / healer / well
-  / shrine / longhouse / greathall / farmhouse tiles.
+  / shrine / longhouse / greathall / farmhouse tiles. Phase 3 adds
+  three tree looks, meadow ground, paved roads, market stalls,
+  street lamps, housing-tier dwelling variants, a rebuilt town
+  hall, and a texture that is rebuilt when the season or the
+  visual era stage changes (`apply_season` / `apply_era_stage` /
+  `apply_look`).
 - `scripts/world/sim_grid.gd` — mutable sim state on top of the
   immutable terrain: chopped/regrown trees, mined/weathered stone
   and ore, crop stages, buildings, roads. BFS pathfinding and
@@ -86,46 +110,58 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   shores. Phase 2 adds shore cells (fishing), farm-district
   helpers (west block + N/E/S satellite wedges), and farm-bed
   cells cleared beside a new farmhouse (cap 144 farm cells).
+  Phase 3 adds the paved-road flag per road cell.
 - `scripts/world/camera.gd` — smooth pan/zoom; mouse drag + wheel,
   touch drag + pinch, WASD/arrows; zoom 0.25x–4x, clamped to the
   world.
 - `scripts/world/lighting.gd` — CanvasModulate day/night tint + a
-  soft sun/moon PointLight2D following the camera.
+  soft sun/moon PointLight2D following the camera. Phase 3 adds a
+  season tint multiplied over the day/night color (autumn warm,
+  winter cool).
 - `scripts/sim/village.gd` — the village: founding (towncenter,
-  altar, hut, plaza roads, 6 villagers), the 20s expansion / 15s
-  delegation / 30s tree-regrow, stone-weather, and market timers,
-  dawn (spoilage, births/deaths, teacher pay, schooling, tech,
-  shrine blessing, deer top-up, homes, classes, housing tiers,
-  morale, low-morale leavers, famine warnings), the full
-  `computeDemands` (hut/longhouse/greathall/farmhouse/granary/
-  well/workshop/kiln/smithy/factory/shrine/school/healer), the
-  Bless and Whisper god powers, and the save/load section.
+  altar, hut, plaza roads, market stalls, 6 villagers), the 20s
+  expansion / 15s delegation / 30s tree-regrow, stone-weather, and
+  market timers, dawn (spoilage, births/deaths, teacher pay,
+  schooling, tech, shrine blessing, deer top-up, homes, classes,
+  housing tiers, morale, low-morale leavers, famine warnings), the
+  full `computeDemands` (hut/longhouse/greathall/farmhouse/granary/
+  well/workshop/kiln/smithy/factory/shrine/school/healer), the Bless
+  and Whisper god powers, and the save/load section. Phase 3 gates
+  every demand on its tech discovery, links each new building to
+  the road network, opens market stalls with their discoveries,
+  paves the roads at Steel works, lights the lamps at the
+  Electric age, and drives the season/era look.
 - `scripts/sim/villager.gd` — one villager: data, utility brain,
   movement, and drawing. Ported from `brain.js` think / scoreJob /
-  doWork and the `step.js` villager loop, all 13 jobs. Drawn as a
-  simple figure with a walk bob, a work swing, a carry bundle, and
-  a gold dot for the leader — the animated-sprite look is a later
-  phase.
-- `scripts/sim/economy.gd` — NEW in Phase 2. The market, tools,
-  class ladder, housing tiers, and tech data. Static functions
-  taking the village node, ported from `brain.js` runMarket /
-  updateClasses / updateHousingTiers and `core.js` standing /
-  class / tier / prices / recipes / tech tables.
-- `scripts/sim/deer.gd` — NEW in Phase 2. A deer: wanders, flees
-  hunters, gets hunted. Ported from `core.js` makeDeer and the
-  `step.js` deer loop. Deer are not in the terrain; the village
-  owns the tick and restores the herd at dawn (cap 4, winter 2).
-- `scripts/ui/hud.gd` — top bar, four rows: Day/Season/time/phase
+  doWork and the `step.js` villager loop, all 13 jobs. Phase 3
+  draws a person (hair or job hat, stepping legs, tool in hand,
+  class sash, leader circlet, smaller children) and gates the
+  teacher and production jobs on their discovery.
+- `scripts/sim/economy.gd` — the market, tools, class ladder,
+  housing tiers, and tech data. Static functions taking the
+  village node, ported from `brain.js` runMarket / updateClasses /
+  updateHousingTiers and `core.js` standing / class / tier /
+  prices / recipes / tech tables. Phase 3 adds the DISCOVERIES
+  table (what each tech level unlocks), the era-stage mapping,
+  and the gate lookups; housing-tier changes now refresh the
+  dwelling's tile.
+- `scripts/sim/deer.gd` — a deer: wanders, flees hunters, gets
+  hunted. Ported from `core.js` makeDeer and the `step.js` deer
+  loop. Deer are not in the terrain; the village owns the tick and
+  restores the herd at dawn (cap 4, winter 2). Phase 3 adds
+  antlers and legs.
+- `scripts/ui/hud.gd` — top bar, five rows: Day/Season/time/phase
   + status + Save; village numbers (Pop, Food, Wood, Stone, Ore,
   Faith, Morale); economy numbers (Fish, Meat, Furniture, Pottery,
-  Ironware, Wares, Fund, Tech); god bar (Bless button with
+  Ironware, Wares, Fund, Tech); evolution (current discovery,
+  progress, and what unlocks next); god bar (Bless button with
   cooldown, Whisper field + button). Log panel, bottom left, last
   6 lines. Hosts the villager card on the right.
-- `scripts/ui/villager_card.gd` — NEW in Phase 2. Read-only
-  villager card: name and class, job and assignment, age and sex,
-  traits, education and tool, coins and standing, all 13 skills,
-  carried goods, home and household members, parents, and
-  hunger/energy/health. No god actions per villager.
+- `scripts/ui/villager_card.gd` — read-only villager card: name and
+  class, job and assignment, age and sex, traits, education and
+  tool, coins and standing, all 13 skills, carried goods, home and
+  household members, parents, and hunger/energy/health. No god
+  actions per villager. Phase 3 calls the towncenter a town hall.
 
 ## Terrain port notes
 
@@ -175,7 +211,7 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   no record. The deliberation/intent/model-call parts of the
   design doc are NOT ported: no LLM anywhere in this project, ever.
 - Building demands are the PWA's `computeDemands` minus wall and
-  tower (Phase 3). Upgrades grow in place: a longhouse replaces
+  tower (Phase 4). Upgrades grow in place: a longhouse replaces
   the oldest hut (+4 cap), a great hall the oldest longhouse (+6).
   A farmhouse clears one 3x3 bed beside itself (cap 144 farm
   cells) and houses 2. The lot spot is still the simplified
@@ -194,7 +230,7 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   tech, the shrine's +3 faith, the deer top-up, homes, classes,
   housing tiers, morale (including the comfortable-homes +4 when a
   quarter or more of dwellings are tier 1+), low-morale leavers,
-  and famine warnings. Weather is always clear until Phase 3;
+  and famine warnings. Weather is always clear until Phase 4;
   there are no festivals, raiders, or disasters yet.
 - Bless is the PWA's god action verbatim (+10 food, +5 faith,
   +2 morale, 20 sim-second cooldown). Whisper logs the text.
@@ -203,6 +239,54 @@ in `project.godot` and the main script in `scenes/main.tscn`.
   stages, stone/tree/road deltas, deer, tech, market timer,
   households, timers, cooldowns, stats, and the last 20 log lines.
   The grid itself is rebuilt from the seed on load.
+
+## Phase 3 port notes
+
+- The unlock chain (`GodCivEconomy.DISCOVERIES`) is PWA-faithful
+  where the PWA gates it: kiln needs Bronze craft, smithy and
+  healer need Iron craft, factory needs level 5, tool tiers need
+  levels 1 / 3, and the era stages are the PWA's `eraStageOf`.
+  The granary (Storage), school, longhouse, and farmhouse gates
+  are new: the PWA has no tech gate on them. Wall, tower, and
+  guard posts are Phase 4 — their PWA tech path (level 2) exists,
+  the buildings do not yet.
+- Unlock chain, discovery → what it unlocks:
+  - L0 Stone tools (start): hut, well, shrine; farmer, woodcutter,
+    miner, fisher, hunter, builder, hauler; crude tools.
+  - L1 Bronze craft (80): granary (Storage), workshop, kiln,
+    farmhouse, school, longhouse; carpenter, potter, teacher;
+    furniture, pottery; sturdy tools; crafts stall opens.
+  - L2 Iron craft (120): smithy, healer's hut, great hall; smith;
+    ironware; fine tools; era stage 1 (stone/tile roofs).
+  - L3 Steel works (200): steel tools; all roads paved, new roads
+    paved; era stage 2 (brick/paved).
+  - L4 Steam and brick (300): grocer's stall opens; builders work
+    twice as fast (PWA rule, already in Phase 2).
+  - L5 Electric age (420): factory; factory job; wares; street
+    lamps on the plaza ring; work runs faster (PWA rule); era
+    stage 3 (concrete/glass).
+  - L6 Modern city (560): room for 10 more souls (PWA rule).
+  Every building and job is reachable by some tech path — no dead
+  ends. A Phase 2 save loads with its buildings grandfathered in:
+  a pre-Bronze granary keeps working, but nothing new is demanded
+  before its discovery.
+- Visual detail is all procedural: the TileSet texture is generated
+  in code and rebuilt on season or era change (the atlas source
+  texture is reassigned; the layers keep their cells). Tree look
+  is deterministic per cell from the seed (pine / broadleaf /
+  round), so regrown trees match the forest. Meadow ground is ~8%
+  of mid grass. Roads are laid by BFS from each new building to
+  the nearest road, so the street network grows with the village.
+  Stalls are buildings (they block their cell and show on the
+  map) but are never demanded or queued — the village places them
+  when their discovery arrives, on the first free ring around the
+  plaza. Lamps are feature-layer tiles on plaza-ring road cells;
+  they are re-placed on load from a tech 5+ save because the
+  feature layer is rebuilt from the terrain, not the save.
+- Save format stays version 2: roads gain a third element (paved
+  flag, defaulting to dirt on Phase 2 saves); stalls save as
+  buildings with type `stall_*`; nothing else is added to the
+  save. A Phase 2 save loads with Phase 3 defaults.
 
 ## Run it
 

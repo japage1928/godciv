@@ -6,17 +6,28 @@ extends Node2D
 # newWorld, src/sim/step.js timers + dawn, src/sim/brain.js
 # delegateRoles/recomputeMorale/dawnDemographics/runMarket,
 # src/sim/planning.js computeDemands/expandVillage/clearFarmBed,
-# src/sim/actions.js bless/whisper), Phase 2:
+# src/sim/actions.js bless/whisper), Phase 3:
 #
 # - All 13 jobs, market, tools, school/education, class ladder,
 #   housing tiers, households, tech progress.
-# - Wall/tower demands, guard posts, markers, street paving, and
-#   farm-bed expansion are Phase 3; find_lot_spot here is the
-#   simplified infill scorer (distance + cluster + dwelling
-#   spacing + out of the farm district), and clear_farm_bed clears
-#   one 3x3 bed beside a new farmhouse instead of the PWA's
-#   district-scored bed search.
-# - Weather is always clear in Phase 2 (weather rolls are Phase 3).
+# - EVOLUTION: every building demand gates on a tech discovery
+#   (GodCivEconomy.DISCOVERIES) — the village starts primitive
+#   (huts, farms, woodcutter/farmer/hauler/miner/builder only) and
+#   unlocks in sequence; a discovery logs its unlocks, opens its
+#   market stall, paves the roads at Steel works, and lights the
+#   lamps at the Electric age. The granary is gated too — Phase 2
+#   let a day-1 village build one.
+# - DETAIL: dirt roads link every building the village builds
+#   (BFS from the new building to the nearest road); a market
+#   square with food/goods stalls stands from founding, crafts
+#   and grocer stalls open with their discoveries; the world
+#   texture follows the seasons and the era stage.
+# - Wall/tower demands, guard posts, and farm-bed expansion are
+#   Phase 4; find_lot_spot here is the simplified infill scorer
+#   (distance + cluster + dwelling spacing + out of the farm
+#   district), and clear_farm_bed clears one 3x3 bed beside a new
+#   farmhouse instead of the PWA's district-scored bed search.
+# - Weather is always clear in Phase 3 (weather rolls are Phase 4).
 # - No LLM anywhere: delegation and demands are the PWA's rules.
 
 signal log_changed(lines: Array)
@@ -110,6 +121,15 @@ func setup(p_world: GodCivWorld, p_clock: GodCivClock, p_seed: int, save_data: D
 		_found()
 	else:
 		_from_save(save_data["village"])
+	# Phase 3: the market square is never empty — a Phase 2 save
+	# has no stalls, so they open here (idempotent: a fresh found
+	# already has its food and goods stalls). Lamps and the look
+	# (season + era) are restored the same way, so a loaded village
+	# looks like the one that was saved.
+	_ensure_market_stalls()
+	if int(tech.get("level", 0)) >= 5:
+		_place_lamps(true)
+	world.apply_look(season, GodCivEconomy.era_stage_of(int(tech.get("level", 0))))
 
 
 func _found() -> void:
@@ -130,6 +150,10 @@ func _found() -> void:
 		grid.set_building(int(b["x"]), int(b["z"]), String(b["type"]))
 		world.set_building_cell(int(b["x"]), int(b["z"]), String(b["type"]))
 	_pave_plaza()
+	# The market square opens with the village: a food stall and a
+	# goods stall beside the plaza, before anyone has a trade.
+	_add_stall("stall_food")
+	_add_stall("stall_goods")
 	for i in 6:
 		_spawn_villager(SPAWN_SPOTS[i].x, SPAWN_SPOTS[i].y, i == 0)
 	assign_homes()
@@ -451,6 +475,12 @@ func _leader() -> GodCivVillager:
 func compute_demands() -> Array:
 	var edible: int = int(stockpile.get("food", 0)) + int(stockpile.get("fish", 0)) + int(stockpile.get("meat", 0))
 	var pop: int = villagers.size()
+	# Phase 3 evolution: every demand gates on its discovery
+	# (GodCivEconomy.DISCOVERIES). The village starts primitive and
+	# unlocks in sequence — no granary, school, workshop, or
+	# longhouse before Bronze craft; no smithy, healer, or great
+	# hall before Iron craft; no factory before the Electric age.
+	var tech_level: int = int(tech.get("level", 0))
 	var built := func(t: String) -> bool:
 		for b in buildings:
 			if String(b["type"]) == t:
@@ -461,6 +491,10 @@ func compute_demands() -> Array:
 			if String(q["type"]) == t:
 				return true
 		return false
+	# Discovery gate, single-sourced from GodCivEconomy.DISCOVERIES:
+	# a building is demandable only once its tech level is reached.
+	var gate := func(t: String) -> bool:
+		return tech_level >= GodCivEconomy.tech_gate_for_building(t)
 	var homeless: int = homeless_count()
 	var hut_total: int = 0
 	for b in buildings:
@@ -482,7 +516,7 @@ func compute_demands() -> Array:
 				"type": "hut", "score": hut_score,
 				"reason": (str(homeless) + " homeless villager" + ("s" if homeless > 1 else "") + " need" + ("" if homeless > 1 else "s") + " a home.") if homeless > 0 else "The village is outgrowing its huts.",
 			})
-		else:
+		elif gate.call("longhouse"):
 			demands.append({"type": "longhouse", "score": hut_score, "reason": "No room for new huts: an old hut must grow."})
 	# Housing evolution: as demand rises and the village spreads,
 	# growing an existing dwelling beats sprawling further. Two
@@ -503,9 +537,12 @@ func compute_demands() -> Array:
 		oldest_hut_age = clock.day - oldest_built
 	var prosperous: bool = int(stockpile.get("wood", 0)) >= 40 and int(stockpile.get("stone", 0)) >= 20 and oldest_hut_age >= 8
 	var near_crowded: bool = pop >= population_cap - 4
-	if (near_crowded or prosperous) and dwellings.size() >= 4 and not huts.is_empty() and not queued.call("longhouse"):
+	# A longhouse is a Bronze craft discovery: the village must
+	# learn to work bronze before its huts can grow.
+	if gate.call("longhouse") and (near_crowded or prosperous) and dwellings.size() >= 4 and not huts.is_empty() and not queued.call("longhouse"):
 		demands.append({"type": "longhouse", "score": 5.0 + float(dwellings.size()) * 0.5 + (2.0 if prosperous else 0.0), "reason": "The village is spreading: grow a hut into a longhouse instead."})
-	if (near_crowded or prosperous) and not longhouses.is_empty() and not queued.call("greathall"):
+	# A great hall is an Iron craft discovery.
+	if gate.call("greathall") and (near_crowded or prosperous) and not longhouses.is_empty() and not queued.call("greathall"):
 		demands.append({"type": "greathall", "score": 6.0 + float(dwellings.size()) * 0.5 + (2.0 if prosperous else 0.0), "reason": "A longhouse must grow into a great hall for the growing village."})
 	# Farmsteads: a farmhouse anchors a farm district. Demand rises
 	# with mouths to feed and with fields that have no farmhouse
@@ -524,30 +561,36 @@ func compute_demands() -> Array:
 				break
 		if not anchored:
 			unanchored += 1
-	if not queued.call("farmhouse") and (edible < farm_need or unanchored >= 12) and pop >= 8:
+	# A farmhouse is a Bronze craft discovery: fields get an anchor
+	# only once the village can build more than huts.
+	if gate.call("farmhouse") and not queued.call("farmhouse") and (edible < farm_need or unanchored >= 12) and pop >= 8:
 		demands.append({"type": "farmhouse", "score": 4 + mini(3, int(unanchored / 6)), "reason": "The fields need a farmhouse to work from."})
-	if not built.call("granary") and not queued.call("granary"):
+	# A granary is a Bronze craft discovery (Storage): before it,
+	# surplus food spoils in the open air.
+	if gate.call("granary") and not built.call("granary") and not queued.call("granary"):
 		var sc: int = 3 if edible >= 25 else (2 if spoiled > 0 else 0)
 		if sc > 0:
 			demands.append({"type": "granary", "score": sc, "reason": "Surplus food needs storing."})
 	if not built.call("well") and not queued.call("well") and pop >= 10:
 		demands.append({"type": "well", "score": 3, "reason": "The village needs water close at hand."})
-	if not built.call("workshop") and not queued.call("workshop") and int(stockpile.get("ore", 0)) >= 4:
+	# A workshop is a Bronze craft discovery, like the kiln.
+	if gate.call("workshop") and not built.call("workshop") and not queued.call("workshop") and int(stockpile.get("ore", 0)) >= 4:
 		demands.append({"type": "workshop", "score": 3, "reason": "Ore is piling up: tools are needed."})
 	# Production buildings: one of each, gated on tech and
 	# population like the healer's hut.
-	var tech_level: int = int(tech.get("level", 0))
-	if tech_level >= 1 and not built.call("kiln") and not queued.call("kiln") and pop >= 10:
+	if gate.call("kiln") and not built.call("kiln") and not queued.call("kiln") and pop >= 10:
 		demands.append({"type": "kiln", "score": 3, "reason": "Bronze craft brings the kiln: the village needs pottery."})
-	if tech_level >= 2 and not built.call("smithy") and not queued.call("smithy") and pop >= 12:
+	if gate.call("smithy") and not built.call("smithy") and not queued.call("smithy") and pop >= 12:
 		demands.append({"type": "smithy", "score": 3, "reason": "Iron craft brings the smithy: the village needs ironware."})
-	if tech_level >= 5 and not built.call("factory") and not queued.call("factory") and pop >= 26:
+	if gate.call("factory") and not built.call("factory") and not queued.call("factory") and pop >= 26:
 		demands.append({"type": "factory", "score": 4, "reason": "The electric age brings the factory: the village needs wares."})
 	if not built.call("shrine") and not queued.call("shrine") and (faith < 45.0 or pop >= 14):
 		demands.append({"type": "shrine", "score": 3, "reason": "Faith is low: the people need a shrine." if faith < 45.0 else "The village has grown: it needs a gathering shrine."})
-	if not built.call("school") and not queued.call("school") and pop >= 8:
+	# A school is a Bronze craft discovery: the village must learn
+	# to teach before its children can learn.
+	if gate.call("school") and not built.call("school") and not queued.call("school") and pop >= 8:
 		demands.append({"type": "school", "score": 8, "reason": "The children need a school."})
-	if tech_level >= 2 and not built.call("healer") and not queued.call("healer") and pop >= 10:
+	if gate.call("healer") and not built.call("healer") and not queued.call("healer") and pop >= 10:
 		demands.append({"type": "healer", "score": 4, "reason": "Iron craft brings medicine: the village needs a healer's hut."})
 	demands.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["score"]) > float(b["score"]))
 	return demands
@@ -658,25 +701,172 @@ func _lot_score(x: int, z: int, building_type: String) -> float:
 func _pave_plaza() -> void:
 	# Founding square: a road ring two cells out from the town
 	# center, plus a straight farm road west to the fields.
-	var lay := func(px: int, pz: int) -> void:
-		if not grid.in_bounds(px, pz):
-			return
-		if grid.is_water(px, pz) or grid.building_at(px, pz) != "" or grid.is_farm(px, pz) or grid.is_road(px, pz):
-			return
-		if grid.has_tree(px, pz):
-			grid.set_tree(px, pz, false)
-			world.clear_feature_cell(px, pz)
-		if grid.stone_at(px, pz) > 0:
-			grid.set_stone(px, pz, 0, 0)
-			world.clear_feature_cell(px, pz)
-		grid.set_road(px, pz)
-		world.set_road_cell(px, pz)
 	for dx in range(-2, 3):
 		for dz in range(-2, 3):
 			if maxi(absi(dx), absi(dz)) == 2:
-				lay.call(CENTER.x + dx, CENTER.y + dz)
+				_lay_road(CENTER.x + dx, CENTER.y + dz, false)
 	for px in range(CENTER.x - 3, CENTER.x - 7, -1):
-		lay.call(px, CENTER.y)
+		_lay_road(px, CENTER.y, false)
+
+
+## Lay one road cell (dirt, or paved from Steel works on): clear
+## trees and stone, never overwrite water, buildings, or farm.
+## Re-laying a dirt road with paved=true upgrades it in place.
+func _lay_road(px: int, pz: int, paved: bool) -> void:
+	if not grid.in_bounds(px, pz):
+		return
+	if grid.is_water(px, pz) or grid.building_at(px, pz) != "" or grid.is_farm(px, pz):
+		return
+	if grid.is_road(px, pz):
+		if paved and not grid.is_road_paved(px, pz):
+			grid.set_road_paved(px, pz)
+			world.set_road_cell(px, pz, true)
+		return
+	if grid.has_tree(px, pz):
+		grid.set_tree(px, pz, false)
+		world.clear_feature_cell(px, pz)
+	if grid.stone_at(px, pz) > 0:
+		grid.set_stone(px, pz, 0, 0)
+		world.clear_feature_cell(px, pz)
+	grid.set_road(px, pz)
+	if paved:
+		grid.set_road_paved(px, pz)
+	world.set_road_cell(px, pz, paved)
+
+
+## Link a new building to the road network: BFS from the building
+## to the nearest road cell, laying dirt (or paved, from Steel
+## works on) along the way. If a road already touches the building
+## there is nothing to do. Trees and stone on the path are cleared.
+func _pave_path_to_road(bx: int, bz: int) -> void:
+	var paved: bool = int(tech.get("level", 0)) >= 3
+	for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		if grid.is_road(bx + d.x, bz + d.y):
+			return
+	var prev := {}
+	var queue: Array[Vector2i] = [Vector2i(bx, bz)]
+	prev["%d,%d" % [bx, bz]] = ""
+	var qi: int = 0
+	var found := Vector2i(-1, -1)
+	var steps: int = 0
+	while qi < queue.size() and steps < 4000:
+		steps += 1
+		var cur: Vector2i = queue[qi]
+		qi += 1
+		if grid.is_road(cur.x, cur.y):
+			found = cur
+			break
+		for d2 in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nx: int = cur.x + d2.x
+			var nz: int = cur.y + d2.y
+			if not grid.in_bounds(nx, nz):
+				continue
+			var k: String = "%d,%d" % [nx, nz]
+			if prev.has(k):
+				continue
+			if grid.is_water(nx, nz) or grid.building_at(nx, nz) != "" or grid.is_farm(nx, nz):
+				continue
+			prev[k] = "%d,%d" % [cur.x, cur.y]
+			queue.append(Vector2i(nx, nz))
+	if found.x < 0:
+		return
+	var back: String = "%d,%d" % [found.x, found.y]
+	while back != "":
+		var parts := back.split(",")
+		_lay_road(int(parts[0]), int(parts[1]), paved)
+		back = String(prev[back])
+
+
+## Steel works (level 3): every dirt road in the village is paved
+## with stone, in place, and every road laid after it is paved.
+func _upgrade_roads_to_paved() -> void:
+	for k in grid.roads.keys():
+		var parts := String(k).split(",")
+		var rx: int = int(parts[0])
+		var rz: int = int(parts[1])
+		grid.set_road_paved(rx, rz)
+		world.set_road_cell(rx, rz, true)
+	add_log("The streets are paved with stone. The village feels like a town.")
+
+
+## Market stalls. The food and goods stalls open with the village;
+## the crafts stall opens with Bronze craft and the grocer's stall
+## with Steam and brick. A stall is a building (it blocks its cell
+## and shows on the map) but it is never demanded or queued — the
+## village places it when its discovery arrives. Spots ring the
+## plaza; if the square is full, the search widens.
+func _add_stall(stall_type: String) -> void:
+	if has_building(stall_type):
+		return
+	var spot := _find_stall_spot()
+	if spot.x < 0:
+		return
+	buildings.append({"type": stall_type, "x": spot.x, "z": spot.y, "built_day": clock.day, "tier": 0})
+	grid.set_building(spot.x, spot.y, stall_type)
+	world.set_building_cell(spot.x, spot.y, stall_type)
+	var stall_name: String = {"stall_food": "food stall", "stall_goods": "goods stall", "stall_craft": "crafts stall", "stall_grocer": "grocer's stall"}.get(stall_type, "stall")
+	add_log("A " + stall_name + " opens on the market square.")
+
+
+func _find_stall_spot() -> Vector2i:
+	for ring in range(3, 7):
+		for dx in range(-ring, ring + 1):
+			for dz in range(-ring, ring + 1):
+				if maxi(absi(dx), absi(dz)) != ring:
+					continue
+				var sx: int = CENTER.x + dx
+				var sz: int = CENTER.y + dz
+				if not grid.in_bounds(sx, sz):
+					continue
+				if grid.is_water(sx, sz) or grid.building_at(sx, sz) != "" or grid.is_farm(sx, sz) or grid.is_road(sx, sz):
+					continue
+				if grid.has_tree(sx, sz) or grid.stone_at(sx, sz) > 0:
+					continue
+				return Vector2i(sx, sz)
+	return Vector2i(-1, -1)
+
+
+## A save from Phase 2 has no stalls; a fresh found has its first
+## two. This fills whatever the tech level has earned, idempotently.
+func _ensure_market_stalls() -> void:
+	if not has_building("stall_food"):
+		_add_stall("stall_food")
+	if not has_building("stall_goods"):
+		_add_stall("stall_goods")
+	if int(tech.get("level", 0)) >= 2 and not has_building("stall_craft"):
+		_add_stall("stall_craft")
+	if int(tech.get("level", 0)) >= 4 and not has_building("stall_grocer"):
+		_add_stall("stall_grocer")
+
+
+## Electric age (level 5): lamp posts on the plaza ring, so the
+## square is lit at night. Re-placed quietly on load from a tech
+## 5+ save; the feature layer is rebuilt from the terrain, not the
+## save, so lamps must be re-added every load.
+func _place_lamps(quiet: bool = false) -> void:
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			if maxi(absi(dx), absi(dz)) != 2:
+				continue
+			var lx: int = CENTER.x + dx
+			var lz: int = CENTER.y + dz
+			if grid.is_road(lx, lz):
+				world.set_lamp_cell(lx, lz)
+	if not quiet:
+		add_log("Lamps light the streets. Night in the village is no longer dark.")
+
+
+## What a new discovery does to the village, beyond the log line:
+## its market stall opens, roads pave at Steel works, lamps light
+## at the Electric age.
+func _on_discovery(level: int) -> void:
+	var stall_kind: String = String((GodCivEconomy.DISCOVERIES[level] as Dictionary).get("stall", ""))
+	if stall_kind != "":
+		_add_stall(stall_kind)
+	if level == 3:
+		_upgrade_roads_to_paved()
+	if level == 5:
+		_place_lamps()
 
 
 ## Called by a builder villager when a queued build finishes.
@@ -747,6 +937,10 @@ func complete_build(q: Dictionary, builder: GodCivVillager) -> void:
 		elif building_type == "healer":
 			add_log("A healer's hut opens. The sick will mend faster near it.")
 	assign_homes()
+	# Every building gets a road to the village: the new building
+	# (or the upgraded dwelling, in place) is linked to the nearest
+	# road, so the village grows a street network as it grows.
+	_pave_path_to_road(bx, bz)
 	# Builders are paid from the village fund for finished work.
 	if fund >= 2:
 		fund -= 2
@@ -840,7 +1034,7 @@ func _regrow_trees() -> void:
 		if Vector2(x - CENTER.x, z - CENTER.y).length() <= 8.0:
 			continue
 		grid.set_tree(x, z, true)
-		world.set_feature_cell(x, z, GodCivWorld.TILE_TREE)
+		world.set_feature_cell(x, z, world.tree_tile_for(x, z))
 
 
 func _weather_stone() -> void:
@@ -870,6 +1064,7 @@ func _on_dawn(new_day: int) -> void:
 	var new_season: String = GodCivClock.season_of(new_day)
 	if new_season != season:
 		season = new_season
+		world.apply_season(season)
 		match season:
 			"winter":
 				add_log("Winter arrives. The cold bites; food keeps longer, but hunger grows.")
@@ -1026,11 +1221,17 @@ func _dawn_demographics(birth_need: int) -> void:
 		if int(tech.get("progress", 0)) >= need and villagers.size() >= pop_gate:
 			tech["level"] = int(tech.get("level", 0)) + 1
 			tech["progress"] = 0
-			if int(tech.get("level", 0)) == GodCivEconomy.TECH_TIERS.size() - 1:
+			var new_level: int = int(tech.get("level", 0))
+			if new_level == GodCivEconomy.TECH_TIERS.size() - 1:
 				population_cap += 10
 				add_log("The modern city rises. Room for " + str(population_cap) + " souls now.")
-			var tier: Dictionary = GodCivEconomy.TECH_TIERS[int(tech.get("level", 0))]
-			add_log("The village learns " + String(tier["name"]) + ". " + String(tier["blurb"]))
+			var tier: Dictionary = GodCivEconomy.TECH_TIERS[new_level]
+			var unlocks: String = GodCivEconomy.unlocks_text(new_level)
+			add_log("The village learns " + String(tier["name"]) + ". " + String(tier["blurb"]) + (" Now possible: " + unlocks + "." if unlocks != "" else ""))
+			# The village visibly grows up: roofs and walls follow
+			# the era stage, and the discovery reshapes the square.
+			world.apply_era_stage(GodCivEconomy.era_stage_of(new_level))
+			_on_discovery(new_level)
 	rate_history.append({"day": clock.day, "births": births, "deaths": deaths})
 	if rate_history.size() > 10:
 		rate_history.remove_at(0)
@@ -1221,7 +1422,9 @@ func to_save() -> Dictionary:
 	var road_list: Array = []
 	for k in grid.roads.keys():
 		var parts3 := String(k).split(",")
-		road_list.append([int(parts3[0]), int(parts3[1])])
+		# Third element is the paved flag (Steel works). Phase 2
+		# saves have two elements and load as dirt, as before.
+		road_list.append([int(parts3[0]), int(parts3[1]), 1 if grid.is_road_paved(int(parts3[0]), int(parts3[1])) else 0])
 	var building_list: Array = []
 	for b in buildings:
 		building_list.append([String(b["type"]), int(b["x"]), int(b["z"]), int(b.get("built_day", 1)), int(b.get("tier", 0))])
@@ -1291,7 +1494,7 @@ func _from_save(data: Dictionary) -> void:
 		var b := {"type": String(arr[0]), "x": int(arr[1]), "z": int(arr[2]), "built_day": int(arr[3]), "tier": int(arr[4]) if arr.size() > 4 else 0}
 		buildings.append(b)
 		grid.set_building(int(arr[1]), int(arr[2]), String(arr[0]))
-		world.set_building_cell(int(arr[1]), int(arr[2]), String(arr[0]))
+		world.set_building_cell(int(arr[1]), int(arr[2]), String(arr[0]), int(b.get("tier", 0)))
 	build_queue = []
 	for entry in data.get("build_queue", []):
 		var arr2: Array = entry
@@ -1311,13 +1514,16 @@ func _from_save(data: Dictionary) -> void:
 		var arr5: Array = entry
 		grid.set_tree(int(arr5[0]), int(arr5[1]), int(arr5[2]) == 1)
 		if int(arr5[2]) == 1:
-			world.set_feature_cell(int(arr5[0]), int(arr5[1]), GodCivWorld.TILE_TREE)
+			world.set_feature_cell(int(arr5[0]), int(arr5[1]), world.tree_tile_for(int(arr5[0]), int(arr5[1])))
 		else:
 			world.clear_feature_cell(int(arr5[0]), int(arr5[1]))
 	for entry in data.get("roads", []):
 		var arr6: Array = entry
+		var paved6: bool = arr6.size() > 2 and int(arr6[2]) == 1
 		grid.set_road(int(arr6[0]), int(arr6[1]))
-		world.set_road_cell(int(arr6[0]), int(arr6[1]))
+		if paved6:
+			grid.set_road_paved(int(arr6[0]), int(arr6[1]))
+		world.set_road_cell(int(arr6[0]), int(arr6[1]), paved6)
 	for entry in data.get("deer", []):
 		var arr8: Array = entry
 		_spawn_deer_at(float(arr8[0]), float(arr8[1]))

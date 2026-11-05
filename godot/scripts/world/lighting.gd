@@ -5,7 +5,9 @@ extends Node2D
 # (0.22 / 0.32 / 0.72 / 0.84); the colors are a Phase 0 render choice,
 # not sim rules. CanvasModulate tints the whole world; a large soft
 # PointLight2D follows the camera as the sun by day and the moon by
-# night. Lamps, torches, and window lights arrive in later phases.
+# night. Phase 3 adds a season tint on top of the day/night color:
+# autumn warms the light, winter cools it. Lamps, torches, and
+# window lights arrive in later phases.
 
 var canvas_modulate: CanvasModulate
 var sun_light: PointLight2D
@@ -33,8 +35,8 @@ func _ready() -> void:
 	add_child(sun_light)
 
 
-func update_for_time(p_time: float, camera: Camera2D) -> void:
-	canvas_modulate.color = _color_at(p_time)
+func update_for_time(p_time: float, camera: Camera2D, season: String = "spring") -> void:
+	canvas_modulate.color = _color_at(p_time) * _season_tint(season)
 	var phase := GodCivClock.phase_of(p_time)
 	if phase == "night":
 		sun_light.color = Color(0.6, 0.7, 1.0)
@@ -58,6 +60,19 @@ func _color_at(t: float) -> Color:
 			return (prev[1] as Color).lerp(kf[1] as Color, f)
 		prev = kf
 	return KEYFRAMES[KEYFRAMES.size() - 1][1] as Color
+
+
+## Season tint, multiplied over the day/night color: autumn warms
+## the light, winter cools it, spring and summer stay near neutral.
+func _season_tint(season: String) -> Color:
+	match season:
+		"summer":
+			return Color(1.03, 1.0, 0.95)
+		"autumn":
+			return Color(1.08, 0.92, 0.72)
+		"winter":
+			return Color(0.85, 0.90, 1.02)
+	return Color(1.0, 1.02, 0.96)
 
 
 func _make_radial_texture(size: int) -> ImageTexture:

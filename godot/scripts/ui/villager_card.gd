@@ -100,7 +100,9 @@ func _fill() -> void:
 	else:
 		var parts := home_key.split(",")
 		var btype: String = _village.building_type_at(int(parts[0]), int(parts[1]))
-		lines.append("Home: %s at (%s)" % [btype, home_key])
+		# The towncenter is the town hall, not a house.
+		var home_name: String = "town hall" if btype == "towncenter" else btype
+		lines.append("Home: %s at (%s)" % [home_name, home_key])
 		var names: Array[String] = []
 		for m in _village.household_members(v):
 			if m != v:

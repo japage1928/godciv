@@ -54,8 +54,16 @@ func step(dt: float) -> void:
 
 
 func _draw() -> void:
-	# Shadow, body, head. Small and brown so a hunter's target
-	# reads at a glance against the green ground.
+	# Shadow, body, head, legs, antlers. Small and brown so a
+	# hunter's target reads at a glance against the green ground.
 	draw_circle(Vector2(0, 3), 4.0, Color(0, 0, 0, 0.2))
+	# Legs.
+	draw_line(Vector2(-2.0, 3.0), Vector2(-2.0, 6.0), Color(0.40, 0.30, 0.18), 1.0)
+	draw_line(Vector2(2.0, 3.0), Vector2(2.0, 6.0), Color(0.40, 0.30, 0.18), 1.0)
 	draw_circle(Vector2(0, 0), 4.5, DEER_COLOR)
 	draw_circle(Vector2(3, -4), 2.0, DEER_COLOR)
+	# Antlers: two forked lines off the head.
+	draw_line(Vector2(2.0, -5.5), Vector2(1.0, -8.5), Color(0.70, 0.60, 0.45), 1.0)
+	draw_line(Vector2(4.0, -5.5), Vector2(5.5, -8.5), Color(0.70, 0.60, 0.45), 1.0)
+	draw_line(Vector2(1.0, -8.5), Vector2(0.0, -9.5), Color(0.70, 0.60, 0.45), 1.0)
+	draw_line(Vector2(5.5, -8.5), Vector2(6.5, -9.5), Color(0.70, 0.60, 0.45), 1.0)

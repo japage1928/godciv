@@ -10,6 +10,15 @@ extends Node2D
 # Ground tile by height band is a RENDER choice, not a sim rule: water
 # and shore follow the PWA exactly (water = lake disc + h < 0.62;
 # shore = land beside water); the grass/rock bands only shade the map.
+#
+# Phase 3: the texture is rebuilt when the season or the visual
+# era stage changes, so trees and ground follow the seasons and
+# roofs/walls grow up with the tech levels (the PWA's era stages:
+# 0 timber/thatch, 1 stone/tile, 2 brick/paved, 3 concrete/glass).
+# The village calls apply_season / apply_era_stage / apply_look;
+# the swap reassigns the atlas source texture, which the layers
+# pick up. Tree look is deterministic per cell (pine / broadleaf /
+# round), so regrown trees match the forest around them.
 
 signal generation_progress(fraction: float)
 signal generation_finished
@@ -46,7 +55,23 @@ const TILE_SHRINE: int = 25
 const TILE_LONGHOUSE: int = 26
 const TILE_GREATHALL: int = 27
 const TILE_FARMHOUSE: int = 28
-const TILE_COUNT: int = 29
+# Phase 3 tiles: tree variety, meadow ground, paved roads, market
+# stalls, street lamps, and housing-tier variants of the dwellings.
+const TILE_TREE2: int = 29
+const TILE_TREE3: int = 30
+const TILE_MEADOW: int = 31
+const TILE_ROAD_PAVED: int = 32
+const TILE_STALL_FOOD: int = 33
+const TILE_STALL_GOODS: int = 34
+const TILE_STALL_CRAFT: int = 35
+const TILE_STALL_GROCER: int = 36
+const TILE_LAMP: int = 37
+const TILE_HUT_T1: int = 38
+const TILE_HUT_T2: int = 39
+const TILE_LONGHOUSE_T1: int = 40
+const TILE_FARMHOUSE_T1: int = 41
+const TILE_GREATHALL_T1: int = 42
+const TILE_COUNT: int = 43
 
 var seed: int = 42
 var terrain: GodCivTerrain
@@ -56,6 +81,9 @@ var building_layer: TileMapLayer
 var generating: bool = false
 
 var _tile_source_id: int = 0
+var _tile_source: TileSetAtlasSource
+var _season: String = "spring"
+var _era_stage: int = 0
 
 
 func _ready() -> void:
@@ -109,6 +137,10 @@ func _classify_ground(x: int, z: int) -> int:
 		return TILE_GRASS_HIGH
 	if h < 0.40:
 		return TILE_GRASS_LOW
+	# Meadow: ~8% of mid grass, a wildflower patch. Deterministic
+	# per cell, so the map looks the same every load.
+	if GodCivRng.hash01(seed, x, z, 402) < 0.08:
+		return TILE_MEADOW
 	return TILE_GRASS
 
 
@@ -123,7 +155,7 @@ func _paint_chunk(cx: int, cz: int) -> void:
 			else:
 				ground_layer.set_cell(cell, _tile_source_id, Vector2i(_classify_ground(x, z), 0))
 			if terrain.has_tree(x, z):
-				feature_layer.set_cell(cell, _tile_source_id, Vector2i(TILE_TREE, 0))
+				feature_layer.set_cell(cell, _tile_source_id, Vector2i(tree_tile_for(x, z), 0))
 			elif terrain.has_stone(x, z):
 				var tile: int = TILE_ORE if terrain.has_ore(x, z) else TILE_STONE
 				feature_layer.set_cell(cell, _tile_source_id, Vector2i(tile, 0))
@@ -138,7 +170,15 @@ func cell_to_px(cell: Vector2i) -> Vector2:
 	return Vector2(float(cell.x) * TILE_SIZE + 8.0, float(cell.y) * TILE_SIZE + 8.0)
 
 
-func set_building_cell(x: int, z: int, building_type: String) -> void:
+## Which tree look a cell wears: ~30% pine, ~25% broadleaf, the
+## rest the round deciduous tree. Deterministic from the seed and
+## the cell, so a regrown tree matches the forest around it.
+func tree_tile_for(x: int, z: int) -> int:
+	var h: float = GodCivRng.hash01(seed, x, z, 401)
+	return TILE_TREE2 if h < 0.3 else (TILE_TREE3 if h < 0.55 else TILE_TREE)
+
+
+func set_building_cell(x: int, z: int, building_type: String, tier: int = 0) -> void:
 	var tile: int = TILE_HUT
 	match building_type:
 		"granary":
@@ -164,11 +204,21 @@ func set_building_cell(x: int, z: int, building_type: String) -> void:
 		"shrine":
 			tile = TILE_SHRINE
 		"longhouse":
-			tile = TILE_LONGHOUSE
+			tile = TILE_LONGHOUSE_T1 if tier >= 1 else TILE_LONGHOUSE
 		"greathall":
-			tile = TILE_GREATHALL
+			tile = TILE_GREATHALL_T1 if tier >= 1 else TILE_GREATHALL
 		"farmhouse":
-			tile = TILE_FARMHOUSE
+			tile = TILE_FARMHOUSE_T1 if tier >= 1 else TILE_FARMHOUSE
+		"hut":
+			tile = TILE_HUT_T2 if tier >= 2 else (TILE_HUT_T1 if tier >= 1 else TILE_HUT)
+		"stall_food":
+			tile = TILE_STALL_FOOD
+		"stall_goods":
+			tile = TILE_STALL_GOODS
+		"stall_craft":
+			tile = TILE_STALL_CRAFT
+		"stall_grocer":
+			tile = TILE_STALL_GROCER
 	building_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(tile, 0))
 
 
@@ -176,8 +226,16 @@ func clear_building_cell(x: int, z: int) -> void:
 	building_layer.erase_cell(Vector2i(x, z))
 
 
-func set_road_cell(x: int, z: int) -> void:
-	ground_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(TILE_ROAD, 0))
+func set_road_cell(x: int, z: int, paved: bool = false) -> void:
+	var tile: int = TILE_ROAD_PAVED if paved else TILE_ROAD
+	ground_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(tile, 0))
+
+
+## A street lamp post on a road cell (feature layer, so it sits
+## over the road without replacing it). Placed by the village at
+## the Electric age; re-placed quietly on load from a tech 5+ save.
+func set_lamp_cell(x: int, z: int) -> void:
+	feature_layer.set_cell(Vector2i(x, z), _tile_source_id, Vector2i(TILE_LAMP, 0))
 
 
 func set_crop_cell(x: int, z: int, stage: int) -> void:
@@ -205,6 +263,7 @@ func _build_tileset() -> void:
 	var source := TileSetAtlasSource.new()
 	source.texture = _make_tiles_texture()
 	source.texture_region_size = Vector2i(TILE_SIZE, TILE_SIZE)
+	_tile_source = source
 	_tile_source_id = tile_set.add_source(source)
 	for i in TILE_COUNT:
 		source.create_tile(Vector2i(i, 0))
@@ -222,23 +281,130 @@ func _build_tileset() -> void:
 	add_child(building_layer)
 
 
-func _make_tiles_texture() -> ImageTexture:
+## Season or era change: rebuild the atlas texture in place. The
+## layers keep their cells; only the pictures change, so a village
+## founded in spring looks different by winter, and a village that
+## reaches Iron craft sees its thatch turn to tile. A headless
+## probe can verify the swap by reading the texture image back
+## (e.g. a tree pixel at the TILE_TREE cell differs summer/winter).
+func apply_season(season: String) -> void:
+	if season == _season:
+		return
+	_season = season
+	_rebuild_texture()
+
+
+func apply_era_stage(era_stage: int) -> void:
+	if era_stage == _era_stage:
+		return
+	_era_stage = era_stage
+	_rebuild_texture()
+
+
+func apply_look(season: String, era_stage: int) -> void:
+	_season = season
+	_era_stage = era_stage
+	_rebuild_texture()
+
+
+func _rebuild_texture() -> void:
+	if _tile_source != null:
+		_tile_source.texture = _make_tiles_texture(_season, _era_stage)
+
+
+## Roof/wall palette per visual era stage (the PWA's eraStageOf):
+## 0 timber/thatch, 1 stone/tile, 2 brick/paved, 3 concrete/glass.
+## Production and civic buildings keep their own palettes — they
+## are tools of their trade, not homes — but the dwellings and the
+## town hall grow up with the village.
+func _era_palette(era_stage: int) -> Dictionary:
+	match era_stage:
+		1:
+			return {
+				"hut_wall": Color(0.62, 0.58, 0.50), "hut_roof": Color(0.65, 0.30, 0.20),
+				"long_wall": Color(0.60, 0.56, 0.48), "long_roof": Color(0.62, 0.28, 0.18),
+				"great_wall": Color(0.58, 0.55, 0.50), "great_roof": Color(0.60, 0.25, 0.18),
+				"farm_wall": Color(0.62, 0.28, 0.18), "farm_roof": Color(0.72, 0.68, 0.62),
+				"chimney": Color(0.55, 0.53, 0.50), "window": Color(0.25, 0.18, 0.10),
+			}
+		2:
+			return {
+				"hut_wall": Color(0.58, 0.35, 0.25), "hut_roof": Color(0.45, 0.20, 0.15),
+				"long_wall": Color(0.55, 0.32, 0.22), "long_roof": Color(0.42, 0.18, 0.14),
+				"great_wall": Color(0.55, 0.30, 0.22), "great_roof": Color(0.40, 0.16, 0.12),
+				"farm_wall": Color(0.60, 0.38, 0.28), "farm_roof": Color(0.45, 0.20, 0.15),
+				"chimney": Color(0.45, 0.22, 0.15), "window": Color(0.25, 0.18, 0.10),
+			}
+		3:
+			return {
+				"hut_wall": Color(0.78, 0.78, 0.76), "hut_roof": Color(0.35, 0.42, 0.52),
+				"long_wall": Color(0.75, 0.75, 0.73), "long_roof": Color(0.32, 0.38, 0.48),
+				"great_wall": Color(0.72, 0.72, 0.70), "great_roof": Color(0.30, 0.36, 0.46),
+				"farm_wall": Color(0.80, 0.80, 0.78), "farm_roof": Color(0.35, 0.42, 0.52),
+				"chimney": Color(0.55, 0.53, 0.50), "window": Color(0.65, 0.80, 0.90),
+			}
+	return {
+		"hut_wall": Color(0.55, 0.42, 0.28), "hut_roof": Color(0.72, 0.60, 0.32),
+		"long_wall": Color(0.55, 0.42, 0.28), "long_roof": Color(0.72, 0.60, 0.32),
+		"great_wall": Color(0.60, 0.58, 0.54), "great_roof": Color(0.45, 0.30, 0.22),
+		"farm_wall": Color(0.60, 0.22, 0.15), "farm_roof": Color(0.75, 0.72, 0.68),
+		"chimney": Color(0.55, 0.53, 0.50), "window": Color(0.25, 0.18, 0.10),
+	}
+
+
+## Ground palette per season: spring bright, summer deep, autumn
+## ochre, winter pale. The lake stays blue; the meadow keeps its
+## flowers in spring and summer only.
+func _season_ground(season: String) -> Dictionary:
+	match season:
+		"summer":
+			return {"low": Color(0.32, 0.55, 0.22), "grass": Color(0.40, 0.62, 0.26), "high": Color(0.52, 0.62, 0.28), "meadow_flowers": true}
+		"autumn":
+			return {"low": Color(0.55, 0.45, 0.22), "grass": Color(0.62, 0.50, 0.25), "high": Color(0.65, 0.55, 0.30), "meadow_flowers": false}
+		"winter":
+			return {"low": Color(0.55, 0.55, 0.48), "grass": Color(0.60, 0.60, 0.52), "high": Color(0.62, 0.62, 0.55), "meadow_flowers": false}
+	return {"low": Color(0.38, 0.58, 0.28), "grass": Color(0.45, 0.65, 0.30), "high": Color(0.58, 0.65, 0.33), "meadow_flowers": true}
+
+
+## Leaf color per season for the deciduous trees (round + broadleaf).
+## Winter returns null: the trees stand bare, trunk and branches.
+func _season_leaf(season: String) -> Color:
+	match season:
+		"summer":
+			return Color(0.16, 0.42, 0.15)
+		"autumn":
+			return Color(0.75, 0.45, 0.15)
+		"winter":
+			return Color(0, 0, 0, 0)
+	return Color(0.28, 0.55, 0.22)
+
+
+func _make_tiles_texture(season: String = "spring", era_stage: int = 0) -> ImageTexture:
 	var img := Image.create(TILE_COUNT * TILE_SIZE, TILE_SIZE, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
+	var ground: Dictionary = _season_ground(season)
+	var pal: Dictionary = _era_palette(era_stage)
+	var leaf: Color = _season_leaf(season)
 	_fill_ground_tile(img, TILE_WATER, Color(0.16, 0.38, 0.62))
 	_fill_ground_tile(img, TILE_SHORE, Color(0.85, 0.76, 0.55))
-	_fill_ground_tile(img, TILE_GRASS_LOW, Color(0.35, 0.55, 0.25))
-	_fill_ground_tile(img, TILE_GRASS, Color(0.42, 0.62, 0.28))
-	_fill_ground_tile(img, TILE_GRASS_HIGH, Color(0.55, 0.62, 0.30))
+	_fill_ground_tile(img, TILE_GRASS_LOW, ground["low"])
+	_fill_ground_tile(img, TILE_GRASS, ground["grass"])
+	_fill_ground_tile(img, TILE_GRASS_HIGH, ground["high"])
 	_fill_ground_tile(img, TILE_ROCK, Color(0.55, 0.53, 0.50))
-	_draw_tree_tile(img, TILE_TREE)
+	_draw_tree_tile(img, TILE_TREE, leaf)
+	_draw_pine_tile(img, TILE_TREE2, season)
+	_draw_broadleaf_tile(img, TILE_TREE3, leaf)
+	_draw_meadow_tile(img, TILE_MEADOW, ground["grass"], bool(ground["meadow_flowers"]))
 	_draw_stone_tile(img, TILE_STONE, Color(0.58, 0.58, 0.55))
 	_draw_ore_tile(img, TILE_ORE)
-	_draw_hut_tile(img, TILE_HUT)
+	_draw_hut_tile(img, TILE_HUT, pal["hut_wall"], pal["hut_roof"])
+	_draw_hut_tile(img, TILE_HUT_T1, pal["hut_wall"], pal["hut_roof"], true, false, pal["window"])
+	_draw_hut_tile(img, TILE_HUT_T2, pal["hut_wall"], pal["hut_roof"], true, true, pal["window"])
 	_draw_granary_tile(img, TILE_GRANARY)
-	_draw_towncenter_tile(img, TILE_TOWNCENTER)
+	_draw_towncenter_tile(img, TILE_TOWNCENTER, pal["great_roof"])
 	_draw_altar_tile(img, TILE_ALTAR)
 	_draw_road_tile(img, TILE_ROAD)
+	_draw_paved_road_tile(img, TILE_ROAD_PAVED)
 	_draw_crop_tile(img, TILE_FARM, 0)
 	_draw_crop_tile(img, TILE_CROP1, 1)
 	_draw_crop_tile(img, TILE_CROP2, 2)
@@ -251,9 +417,18 @@ func _make_tiles_texture() -> ImageTexture:
 	_draw_house_tile(img, TILE_HEALER, Color(0.88, 0.85, 0.78), Color(0.30, 0.50, 0.30), Color(0.25, 0.18, 0.10))
 	_draw_well_tile(img, TILE_WELL)
 	_draw_shrine_tile(img, TILE_SHRINE)
-	_draw_longhouse_tile(img, TILE_LONGHOUSE)
-	_draw_greathall_tile(img, TILE_GREATHALL)
-	_draw_house_tile(img, TILE_FARMHOUSE, Color(0.60, 0.22, 0.15), Color(0.75, 0.72, 0.68), Color(0.90, 0.88, 0.82))
+	_draw_longhouse_tile(img, TILE_LONGHOUSE, pal["long_wall"], pal["long_roof"])
+	_draw_longhouse_tile(img, TILE_LONGHOUSE_T1, pal["long_wall"], pal["long_roof"], true, true)
+	_draw_greathall_tile(img, TILE_GREATHALL, pal["great_wall"], pal["great_roof"])
+	_draw_greathall_tile(img, TILE_GREATHALL_T1, pal["great_wall"], pal["great_roof"], true)
+	_draw_house_tile(img, TILE_FARMHOUSE, pal["farm_wall"], pal["farm_roof"], Color(0.90, 0.88, 0.82))
+	_draw_house_tile(img, TILE_FARMHOUSE_T1, pal["farm_wall"], pal["farm_roof"], Color(0.90, 0.88, 0.82))
+	_draw_chimney(img, TILE_FARMHOUSE_T1, pal["chimney"])
+	_draw_stall_tile(img, TILE_STALL_FOOD, Color(0.85, 0.20, 0.15), Color(0.90, 0.85, 0.70), [Color(0.80, 0.15, 0.10), Color(0.25, 0.55, 0.15), Color(0.90, 0.60, 0.10)])
+	_draw_stall_tile(img, TILE_STALL_GOODS, Color(0.40, 0.30, 0.55), Color(0.90, 0.85, 0.70), [Color(0.55, 0.40, 0.20), Color(0.45, 0.35, 0.25), Color(0.60, 0.55, 0.50)])
+	_draw_stall_tile(img, TILE_STALL_CRAFT, Color(0.55, 0.30, 0.60), Color(0.85, 0.80, 0.90), [Color(0.45, 0.30, 0.60), Color(0.60, 0.35, 0.20), Color(0.30, 0.50, 0.30)])
+	_draw_stall_tile(img, TILE_STALL_GROCER, Color(0.25, 0.55, 0.25), Color(0.90, 0.85, 0.70), [Color(0.25, 0.55, 0.15), Color(0.90, 0.55, 0.10), Color(0.85, 0.75, 0.20)])
+	_draw_lamp_tile(img, TILE_LAMP)
 	return ImageTexture.create_from_image(img)
 
 
@@ -266,17 +441,74 @@ func _fill_ground_tile(img: Image, tile: int, base: Color) -> void:
 			img.set_pixel(ox + px, py, Color(base.r * f, base.g * f, base.b * f, 1.0))
 
 
-func _draw_tree_tile(img: Image, tile: int) -> void:
+## Round deciduous tree. `leaf` is the season leaf color; winter
+## passes a fully transparent color, so the tree stands bare:
+## trunk and thin branches, no canopy.
+func _draw_tree_tile(img: Image, tile: int, leaf: Color = Color(0.18, 0.42, 0.16)) -> void:
 	var ox: int = tile * TILE_SIZE
 	for py in range(11, TILE_SIZE):
 		for px in range(7, 9):
 			img.set_pixel(ox + px, py, Color(0.42, 0.28, 0.14, 1.0))
-	for py in TILE_SIZE:
-		for px in TILE_SIZE:
-			if Vector2(px, py).distance_to(Vector2(8, 6)) <= 5.5:
-				var n: float = GodCivRng.hash01(54321, px, py, 9)
+	if leaf.a > 0.0:
+		for py in TILE_SIZE:
+			for px in TILE_SIZE:
+				if Vector2(px, py).distance_to(Vector2(8, 6)) <= 5.5:
+					var n: float = GodCivRng.hash01(54321, px, py, 9)
+					var f: float = 0.9 + n * 0.2
+					img.set_pixel(ox + px, py, Color(leaf.r * f, leaf.g * f, leaf.b * f, 1.0))
+	else:
+		# Bare branches: a few thin lines reaching up from the trunk.
+		for p in [Vector2i(8, 10), Vector2i(8, 9), Vector2i(8, 8), Vector2i(7, 7), Vector2i(9, 7), Vector2i(6, 6), Vector2i(10, 6), Vector2i(5, 5), Vector2i(11, 5)]:
+			img.set_pixel(ox + p.x, p.y, Color(0.42, 0.28, 0.14, 1.0))
+
+
+## Pine: a dark green triangle stack, evergreen in every season
+## (slightly greyed in winter).
+func _draw_pine_tile(img: Image, tile: int, season: String) -> void:
+	var ox: int = tile * TILE_SIZE
+	var pine: Color = Color(0.20, 0.30, 0.22) if season == "winter" else Color(0.13, 0.32, 0.15)
+	for py in range(12, TILE_SIZE):
+		for px in range(7, 9):
+			img.set_pixel(ox + px, py, Color(0.42, 0.28, 0.14, 1.0))
+	for row in range(0, 4):
+		var y0: int = 2 + row * 3
+		var half: int = 2 + row * 2
+		for py in range(y0, y0 + 3):
+			for px in range(8 - half, 8 + half):
+				var n: float = GodCivRng.hash01(43210, tile * 1000 + px, py, 21)
 				var f: float = 0.9 + n * 0.2
-				img.set_pixel(ox + px, py, Color(0.18 * f, 0.42 * f, 0.16 * f, 1.0))
+				img.set_pixel(ox + px, py, Color(pine.r * f, pine.g * f, pine.b * f, 1.0))
+
+
+## Broadleaf: a bigger, flatter canopy than the round tree, same
+## season leaf color. Bare in winter too.
+func _draw_broadleaf_tile(img: Image, tile: int, leaf: Color) -> void:
+	var ox: int = tile * TILE_SIZE
+	for py in range(11, TILE_SIZE):
+		for px in range(7, 9):
+			img.set_pixel(ox + px, py, Color(0.42, 0.28, 0.14, 1.0))
+	if leaf.a > 0.0:
+		for py in TILE_SIZE:
+			for px in TILE_SIZE:
+				if Vector2(px, py).distance_to(Vector2(8, 7)) <= 6.5 and py <= 10:
+					var n: float = GodCivRng.hash01(65432, px, py, 11)
+					var f: float = 0.9 + n * 0.2
+					img.set_pixel(ox + px, py, Color(leaf.r * f, leaf.g * f, leaf.b * f, 1.0))
+	else:
+		for p in [Vector2i(8, 10), Vector2i(8, 9), Vector2i(8, 8), Vector2i(7, 7), Vector2i(9, 7), Vector2i(6, 6), Vector2i(10, 6), Vector2i(5, 5), Vector2i(11, 5), Vector2i(4, 6), Vector2i(12, 6)]:
+			img.set_pixel(ox + p.x, p.y, Color(0.42, 0.28, 0.14, 1.0))
+
+
+## Meadow: grass with wildflower dots in spring and summer, plain
+## grass with a few dry stalks in autumn and winter.
+func _draw_meadow_tile(img: Image, tile: int, grass: Color, flowers: bool) -> void:
+	_fill_ground_tile(img, tile, grass)
+	var ox: int = tile * TILE_SIZE
+	var dots: Array = [Color(0.95, 0.95, 0.90), Color(0.95, 0.85, 0.20), Color(0.90, 0.45, 0.60)] if flowers else [Color(0.70, 0.60, 0.35), Color(0.60, 0.50, 0.30)]
+	var i: int = 0
+	for p in [Vector2i(3, 4), Vector2i(11, 3), Vector2i(6, 9), Vector2i(13, 11), Vector2i(2, 12)]:
+		img.set_pixel(ox + p.x, p.y, dots[i % dots.size()])
+		i += 1
 
 
 func _draw_stone_tile(img: Image, tile: int, base: Color) -> void:
@@ -299,10 +531,8 @@ func _draw_ore_tile(img: Image, tile: int) -> void:
 		img.set_pixel(ox + p.x, p.y, ore_color)
 
 
-func _draw_hut_tile(img: Image, tile: int) -> void:
+func _draw_hut_tile(img: Image, tile: int, wall: Color, roof: Color, chimney: bool = false, trim: bool = false, window: Color = Color(0, 0, 0, 0)) -> void:
 	var ox: int = tile * TILE_SIZE
-	var wall := Color(0.55, 0.42, 0.28)
-	var roof := Color(0.72, 0.60, 0.32)
 	for py in range(9, TILE_SIZE):
 		for px in range(2, 14):
 			img.set_pixel(ox + px, py, wall)
@@ -313,6 +543,32 @@ func _draw_hut_tile(img: Image, tile: int) -> void:
 	for py in range(11, TILE_SIZE):
 		for px in range(7, 9):
 			img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+	if trim:
+		# Gentry trim: a gold band under the roofline.
+		for px in range(2, 14):
+			img.set_pixel(ox + px, 9, Color(0.85, 0.70, 0.25))
+	if chimney:
+		for py in range(2, 6):
+			for px in range(11, 13):
+				img.set_pixel(ox + px, py, Color(0.55, 0.53, 0.50))
+	if window.a > 0.0:
+		for py in range(11, 13):
+			for px in range(4, 6):
+				img.set_pixel(ox + px, py, window)
+		if trim:
+			for py in range(11, 13):
+				for px in range(10, 12):
+					img.set_pixel(ox + px, py, window)
+
+
+## A chimney stack on a roof's right side, for the tier-1
+## farmhouse (the house tile is generic, so the chimney is added
+## after it by the texture builder).
+func _draw_chimney(img: Image, tile: int, brick: Color) -> void:
+	var ox: int = tile * TILE_SIZE
+	for py in range(2, 6):
+		for px in range(11, 13):
+			img.set_pixel(ox + px, py, brick)
 
 
 func _draw_granary_tile(img: Image, tile: int) -> void:
@@ -331,10 +587,14 @@ func _draw_granary_tile(img: Image, tile: int) -> void:
 			img.set_pixel(ox + px, py, Color(0.42, 0.30, 0.18))
 
 
-func _draw_towncenter_tile(img: Image, tile: int) -> void:
+func _draw_towncenter_tile(img: Image, tile: int, roof: Color) -> void:
+	# The town hall: a wide stone hall with an arched door, two
+	# windows, steps at the base, and a banner on a pole — the
+	# village's civic heart, readable at a glance. Its roof grows
+	# up with the era like the dwellings.
 	var ox: int = tile * TILE_SIZE
 	var stone := Color(0.62, 0.60, 0.56)
-	var roof := Color(0.45, 0.30, 0.22)
+	var stone_dark := Color(0.50, 0.48, 0.44)
 	for py in range(8, TILE_SIZE):
 		for px in range(1, 15):
 			img.set_pixel(ox + px, py, stone)
@@ -342,10 +602,29 @@ func _draw_towncenter_tile(img: Image, tile: int) -> void:
 		var half: int = py - 2
 		for px in range(8 - half, 8 + half):
 			img.set_pixel(ox + px, py, roof)
+	# Stone base row and steps.
+	for px in range(1, 15):
+		img.set_pixel(ox + px, 15, stone_dark)
+	for px in range(5, 11):
+		img.set_pixel(ox + px, 14, stone_dark)
+	# Arched door: two wide, one narrow at the top.
+	for py in range(11, 15):
+		for px in range(7, 9):
+			img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+	img.set_pixel(ox + 7, 10, Color(0.25, 0.18, 0.10))
+	# Two windows.
+	for py in range(10, 12):
+		for px in range(3, 5):
+			img.set_pixel(ox + px, py, Color(0.65, 0.80, 0.90))
+		for px in range(11, 13):
+			img.set_pixel(ox + px, py, Color(0.65, 0.80, 0.90))
+	# Banner on a pole.
 	for py in range(0, 4):
 		img.set_pixel(ox + 8, py, Color(0.30, 0.25, 0.20))
-	for px in range(9, 13):
-		img.set_pixel(ox + px, 1, Color(0.75, 0.25, 0.20))
+	for py in range(0, 3):
+		for px in range(9, 14):
+			img.set_pixel(ox + px, py, Color(0.75, 0.25, 0.20))
+	img.set_pixel(ox + 13, 2, Color(0.75, 0.25, 0.20))
 
 
 func _draw_altar_tile(img: Image, tile: int) -> void:
@@ -368,6 +647,68 @@ func _draw_road_tile(img: Image, tile: int) -> void:
 			var n: float = GodCivRng.hash01(777, tile * 1000 + px, py, 31)
 			var f: float = 0.9 + n * 0.2
 			img.set_pixel(ox + px, py, Color(base.r * f, base.g * f, base.b * f, 1.0))
+
+
+## Paved road (Steel works): grey cobbles with darker joints, so
+## a paved street reads against a dirt one at a glance.
+func _draw_paved_road_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	var base := Color(0.55, 0.55, 0.58)
+	for py in TILE_SIZE:
+		for px in TILE_SIZE:
+			var n: float = GodCivRng.hash01(778, tile * 1000 + px, py, 33)
+			var f: float = 0.9 + n * 0.2
+			img.set_pixel(ox + px, py, Color(base.r * f, base.g * f, base.b * f, 1.0))
+	for py in [4, 11]:
+		for px in TILE_SIZE:
+			img.set_pixel(ox + px, py, Color(0.38, 0.38, 0.42))
+	for px in [5, 10]:
+		for py in TILE_SIZE:
+			img.set_pixel(ox + px, py, Color(0.38, 0.38, 0.42))
+
+
+## A market stall: striped awning, counter, and the goods it
+## sells dotted on the counter. `goods` are three dot colors.
+func _draw_stall_tile(img: Image, tile: int, awning: Color, cloth: Color, goods: Array) -> void:
+	var ox: int = tile * TILE_SIZE
+	# Awning: alternating stripes across the top.
+	for px in TILE_SIZE:
+		var c: Color = awning if (px / 2) % 2 == 0 else cloth
+		for py in range(1, 5):
+			img.set_pixel(ox + px, py, c)
+	# Two posts.
+	for py in range(5, 13):
+		img.set_pixel(ox + 2, py, Color(0.42, 0.28, 0.14))
+		img.set_pixel(ox + 13, py, Color(0.42, 0.28, 0.14))
+	# Counter.
+	for py in range(10, 13):
+		for px in range(2, 14):
+			img.set_pixel(ox + px, py, Color(0.55, 0.42, 0.28))
+	# Goods on the counter.
+	var i: int = 0
+	for p in [Vector2i(4, 9), Vector2i(7, 9), Vector2i(10, 9), Vector2i(5, 8), Vector2i(9, 8)]:
+		img.set_pixel(ox + p.x, p.y, goods[i % goods.size()])
+		i += 1
+
+
+## A street lamp: a dark post with a glowing bulb and halo. The
+## tile itself is transparent around the post, so it sits over a
+## road without hiding it.
+func _draw_lamp_tile(img: Image, tile: int) -> void:
+	var ox: int = tile * TILE_SIZE
+	for py in range(6, 15):
+		img.set_pixel(ox + 8, py, Color(0.20, 0.18, 0.16))
+	for py in range(13, 15):
+		for px in range(6, 11):
+			img.set_pixel(ox + px, py, Color(0.20, 0.18, 0.16))
+	for py in TILE_SIZE:
+		for px in TILE_SIZE:
+			if Vector2(px, py).distance_to(Vector2(8, 4)) <= 3.0:
+				img.set_pixel(ox + px, py, Color(0.95, 0.85, 0.45, 0.35))
+	for py in TILE_SIZE:
+		for px in TILE_SIZE:
+			if Vector2(px, py).distance_to(Vector2(8, 4)) <= 2.0:
+				img.set_pixel(ox + px, py, Color(1.0, 0.9, 0.5, 1.0))
 
 
 func _draw_crop_tile(img: Image, tile: int, stage: int) -> void:
@@ -471,11 +812,9 @@ func _draw_shrine_tile(img: Image, tile: int) -> void:
 	img.set_pixel(ox + 8, 4, Color(0.95, 0.80, 0.30))
 
 
-func _draw_longhouse_tile(img: Image, tile: int) -> void:
+func _draw_longhouse_tile(img: Image, tile: int, wall: Color, roof: Color, chimney: bool = false, trim: bool = false) -> void:
 	# A long low timber hall: twice the hut, one long roof.
 	var ox: int = tile * TILE_SIZE
-	var wall := Color(0.55, 0.42, 0.28)
-	var roof := Color(0.72, 0.60, 0.32)
 	for py in range(10, TILE_SIZE):
 		for px in range(0, 16):
 			img.set_pixel(ox + px, py, wall)
@@ -486,13 +825,24 @@ func _draw_longhouse_tile(img: Image, tile: int) -> void:
 	for py in range(12, TILE_SIZE):
 		for px in range(7, 9):
 			img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+	if trim:
+		# Timber trim: a pale band under the roofline, two windows.
+		for px in range(0, 16):
+			img.set_pixel(ox + px, 10, Color(0.85, 0.80, 0.70))
+		for py in range(12, 14):
+			for px in range(2, 4):
+				img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+			for px in range(12, 14):
+				img.set_pixel(ox + px, py, Color(0.25, 0.18, 0.10))
+	if chimney:
+		for py in range(2, 6):
+			for px in range(12, 14):
+				img.set_pixel(ox + px, py, Color(0.55, 0.53, 0.50))
 
 
-func _draw_greathall_tile(img: Image, tile: int) -> void:
+func _draw_greathall_tile(img: Image, tile: int, wall: Color, roof: Color, grand: bool = false) -> void:
 	# A great hall: tall roof, stone base, a banner on top.
 	var ox: int = tile * TILE_SIZE
-	var wall := Color(0.60, 0.58, 0.54)
-	var roof := Color(0.45, 0.30, 0.22)
 	for py in range(10, TILE_SIZE):
 		for px in range(1, 15):
 			img.set_pixel(ox + px, py, wall)
@@ -507,3 +857,9 @@ func _draw_greathall_tile(img: Image, tile: int) -> void:
 		img.set_pixel(ox + 8, py, Color(0.30, 0.25, 0.20))
 	for px in range(9, 13):
 		img.set_pixel(ox + px, 1, Color(0.75, 0.25, 0.20))
+	if grand:
+		# A grand hall: a second banner and a stone base row.
+		for px in range(3, 7):
+			img.set_pixel(ox + px, 1, Color(0.75, 0.25, 0.20))
+		for px in range(1, 15):
+			img.set_pixel(ox + px, 15, Color(0.45, 0.43, 0.40))

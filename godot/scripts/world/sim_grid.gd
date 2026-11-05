@@ -34,6 +34,7 @@ var stone_deltas: Dictionary = {} # "x,z" -> [stone, ore]
 var crops: Dictionary = {} # "x,z" -> [crop_stage, crop_grow]
 var buildings: Dictionary = {} # "x,z" -> type String
 var roads: Dictionary = {} # "x,z" -> true
+var roads_paved: Dictionary = {} # "x,z" -> true (Steel works, level 3)
 
 var farm_cells: Array[Vector2i] = []
 var stone_spots: Array[Vector2i] = []
@@ -233,6 +234,14 @@ func is_road(x: int, z: int) -> bool:
 
 func set_road(x: int, z: int) -> void:
 	roads[_key(x, z)] = true
+
+
+func is_road_paved(x: int, z: int) -> bool:
+	return bool(roads_paved.get(_key(x, z), false))
+
+
+func set_road_paved(x: int, z: int) -> void:
+	roads_paved[_key(x, z)] = true
 
 
 func blocked(x: int, z: int) -> bool:

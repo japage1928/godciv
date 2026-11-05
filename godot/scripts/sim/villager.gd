@@ -3,11 +3,14 @@ extends Node2D
 
 # One villager: data, utility brain, movement, and drawing.
 # Ported from the PWA (src/sim/core.js makeVillager, src/sim/brain.js
-# think/scoreJob/doWork, src/sim/step.js villager loop), Phase 2:
+# think/scoreJob/doWork, src/sim/step.js villager loop), Phase 3:
 # all 13 jobs, production recipes, tools, school/students, deer
-# hunting, guard posts (no posts exist yet — Phase 3 builds them).
-# Hauling is a STATE (carry full, walk home), not a job, exactly
-# like the PWA.
+# hunting, and the evolution gates (teacher and production jobs
+# check their discovery before scoring); guard posts are Phase 4.
+# Drawn as a person: tunic, hair or a job hat, stepping legs, a
+# tool in hand while working, a class sash, a gold circlet for the
+# leader, children visibly smaller. Hauling is a STATE (carry full,
+# walk home), not a job, exactly like the PWA.
 #
 # `sim` is the village node, held untyped (Node) so this script has
 # no cyclic class reference back to GodCivVillage; it reads the
@@ -25,6 +28,10 @@ const TUNIC_COLORS: Array[Color] = [
 	Color(0.40, 0.50, 0.35), Color(0.55, 0.50, 0.35), Color(0.45, 0.38, 0.50),
 ]
 const SKIN_COLOR: Color = Color(0.85, 0.68, 0.52)
+const HAIR_COLORS: Array[Color] = [
+	Color(0.25, 0.16, 0.10), Color(0.12, 0.10, 0.08), Color(0.75, 0.62, 0.35),
+	Color(0.45, 0.25, 0.12), Color(0.55, 0.55, 0.55),
+]
 
 var id: int = 0
 var villager_name: String = "Ash"
@@ -62,7 +69,7 @@ var wander_n: int = 0
 var education: int = 2
 var class_level: int = 0
 var parents: Array = []
-var post = null # Guard post (Vector2i), Phase 3: no posts exist yet.
+var post = null # Guard post (Vector2i), Phase 4: no posts exist yet.
 
 var sim: Node = null
 var grid: GodCivSimGrid = null
@@ -232,15 +239,23 @@ func score_job(p_job: String) -> float:
 	elif p_job == "hauler":
 		score += 7.0 if not carry.is_empty() else 1.5
 	elif p_job == "teacher":
-		# No school, no teaching: the score stays far below real work.
-		score += 5.0 if sim.has_building("school") else -30.0
+		# No school, no teaching: the score stays far below real
+		# work. A school implies Bronze craft (demands gate it),
+		# but the tech check stays explicit.
+		var teacher_ok: bool = sim.has_building("school") and int((sim.tech as Dictionary).get("level", 0)) >= 1
+		score += 5.0 if teacher_ok else -30.0
 	elif p_job in GodCivEconomy.PRODUCTION_RECIPES:
 		var recipe: Dictionary = GodCivEconomy.PRODUCTION_RECIPES[p_job]
 		var output: String = String(recipe["output"])
 		# No workplace, no work (-30, like the teacher without a
-		# school); with one, the score follows the balance of the
-		# product in the stockpile against PRODUCTION_WANT.
-		score += (float(GodCivEconomy.PRODUCTION_WANT) - float(s.get(output, 0))) * 0.3 if sim.has_building(String(recipe["workplace"])) else -30.0
+		# school); a workplace before its discovery is impossible
+		# (demands gate it), but the tech check stays explicit so
+		# a loaded save can never drift a potter into a pre-Bronze
+		# village. With a workplace, the score follows the balance
+		# of the product in the stockpile against PRODUCTION_WANT.
+		var job_gate: int = GodCivEconomy.tech_gate_for_job(p_job)
+		var tech_ok: bool = int((sim.tech as Dictionary).get("level", 0)) >= job_gate
+		score += (float(GodCivEconomy.PRODUCTION_WANT) - float(s.get(output, 0))) * 0.3 if (tech_ok and sim.has_building(String(recipe["workplace"]))) else -30.0
 	elif p_job == "guard":
 		# Guards are a delegation-only job: nobody drifts into it
 		# unless there are posts to hold. A delegated guard stays.
@@ -733,26 +748,128 @@ func _arrive_haul() -> void:
 
 
 func _draw() -> void:
-	# Shadow, body, head; a walk bob while moving, a swinging tool
-	# while working in place, a bundle on the back while carrying,
-	# and a gold dot for the leader. Phase 1 figures are simple
-	# shapes — the animated-sprite look is a later phase.
+	# A person, not a pawn: tunic, skin, hair or a job hat, legs
+	# that step while walking, a tool in hand while working, and a
+	# bundle on the back while carrying. Children are smaller.
+	# Every look is deterministic from the id, so a villager keeps
+	# their face for life. Class shows as a sash; the leader wears
+	# a gold circlet.
+	var child: bool = age_days < 3
+	var scale: float = 0.7 if child else 1.0
 	var bob: float = 0.0
 	if _moving:
 		bob = -absf(sin(_walk_phase * 3.0)) * 2.0
+	var step: float = sin(_walk_phase * 3.0) * 1.5 if _moving else 0.0
+	# Shadow stays on the ground, unscaled.
 	draw_circle(Vector2(0, 4), 5.0, Color(0, 0, 0, 0.25))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2(scale, scale))
+	# Legs: two feet that step apart while walking.
+	draw_circle(Vector2(-2.0, 4.0 + step), 1.6, Color(0.25, 0.18, 0.12))
+	draw_circle(Vector2(2.0, 4.0 - step), 1.6, Color(0.25, 0.18, 0.12))
 	var tunic: Color = TUNIC_COLORS[id % TUNIC_COLORS.size()]
+	# Body: a tunic with a belt, arms at the sides swinging as the
+	# villager walks.
 	draw_circle(Vector2(0, bob), 6.0, tunic)
+	draw_line(Vector2(-5.5, 2.0 + bob), Vector2(5.5, 2.0 + bob), Color(0.25, 0.18, 0.10), 1.0)
+	var arm_swing: float = step * 0.8
+	draw_line(Vector2(-5.0, -1.0 + bob), Vector2(-6.5, 3.0 + bob + arm_swing), SKIN_COLOR, 1.5)
+	draw_line(Vector2(5.0, -1.0 + bob), Vector2(6.5, 3.0 + bob - arm_swing), SKIN_COLOR, 1.5)
+	# Head.
 	draw_circle(Vector2(0, -6.0 + bob), 3.5, SKIN_COLOR)
+	_draw_headwear(bob)
+	# Class sash across the tunic: blue artisan, gold merchant,
+	# purple gentry.
+	if class_level >= 1:
+		var sash: Color = Color(0.30, 0.45, 0.75) if class_level == 1 else (Color(0.85, 0.70, 0.25) if class_level == 2 else Color(0.60, 0.35, 0.65))
+		draw_line(Vector2(-4.5, -3.5 + bob), Vector2(4.5, 3.5 + bob), sash, 1.5)
 	if leader:
-		draw_circle(Vector2(0, -10.0 + bob), 1.5, Color(0.95, 0.8, 0.2))
+		draw_arc(Vector2(0, -7.5 + bob), 3.8, PI * 1.15, PI * 1.85, 8, Color(0.95, 0.8, 0.2), 1.5)
 	if state == "work" and _arrived:
-		var swing: float = sin(_work_swing * 2.0) * 0.6
-		var hand := Vector2(5.0, bob)
-		var tip := hand + Vector2(cos(swing) * 7.0, sin(swing) * 7.0 - 3.0)
-		draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
+		_draw_tool(bob)
 	if not carry.is_empty():
 		draw_rect(Rect2(-3.0, -2.0 + bob, 6.0, 5.0), Color(0.55, 0.40, 0.20))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
+func _draw_headwear(bob: float) -> void:
+	# Hair and hats, deterministic per villager. Job hats win over
+	# hair: a farmer's straw hat, a builder's cap, a hunter's hood.
+	var hair: Color = HAIR_COLORS[id % HAIR_COLORS.size()]
+	if age_days >= 45:
+		hair = Color(0.75, 0.75, 0.75)
+	if job == "farmer":
+		# Straw hat: a wide flat brim and a domed top, sitting on
+		# the head without hiding the face.
+		draw_rect(Rect2(-5.0, -9.5 + bob, 10.0, 1.5), Color(0.85, 0.72, 0.40))
+		draw_circle(Vector2(0, -10.0 + bob), 2.5, Color(0.80, 0.66, 0.35))
+		return
+	if job == "builder":
+		# Flat cap: a low dome over the top of the head, brim to
+		# the side.
+		draw_circle(Vector2(0, -9.5 + bob), 3.0, Color(0.35, 0.38, 0.45))
+		draw_line(Vector2(0, -8.5 + bob), Vector2(4.5, -7.0 + bob), Color(0.35, 0.38, 0.45), 1.5)
+		return
+	if job == "hunter":
+		# Hood: a dark ring around the face.
+		draw_arc(Vector2(0, -6.0 + bob), 4.2, 0.0, TAU, 12, Color(0.30, 0.40, 0.25), 2.0)
+		return
+	if sex == "F":
+		# Hair with a bun.
+		draw_circle(Vector2(-3.0, -7.0 + bob), 2.0, hair)
+		draw_circle(Vector2(3.0, -7.0 + bob), 2.0, hair)
+		draw_circle(Vector2(0, -10.0 + bob), 1.8, hair)
+	else:
+		# Short hair on top, plus a beard on older men.
+		draw_arc(Vector2(0, -6.0 + bob), 3.6, PI, TAU, 8, hair, 2.0)
+		if age_days >= 30 and GodCivRng.hash01(id, 3, 7, 11) < 0.5:
+			draw_rect(Rect2(-1.5, -3.5 + bob, 3.0, 2.0), hair)
+
+
+func _draw_tool(bob: float) -> void:
+	# The tool of the trade, in the right hand, swinging while the
+	# villager works. A hauler's bundle is drawn separately.
+	var swing: float = sin(_work_swing * 2.0) * 0.6
+	var hand := Vector2(5.0, bob)
+	var tip := hand + Vector2(cos(swing) * 7.0, sin(swing) * 7.0 - 3.0)
+	match job:
+		"woodcutter":
+			# Axe: handle + head.
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
+			draw_rect(Rect2(tip.x - 1.0, tip.y - 2.5, 3.0, 3.0), Color(0.60, 0.60, 0.62))
+		"miner":
+			# Pick: handle + two-point head.
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
+			draw_line(tip + Vector2(-2.0, -1.0), tip + Vector2(2.0, -1.0), Color(0.60, 0.60, 0.62), 1.5)
+		"farmer":
+			# Sickle: handle + curved blade.
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
+			draw_arc(tip, 2.5, PI * 0.5, PI * 1.5, 6, Color(0.75, 0.75, 0.78), 1.5)
+		"fisher":
+			# Rod: a long line up to the water.
+			draw_line(hand, hand + Vector2(8.0, -9.0), Color(0.42, 0.28, 0.14), 1.0)
+		"builder", "smith":
+			# Hammer.
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
+			draw_rect(Rect2(tip.x - 2.0, tip.y - 1.5, 4.0, 3.0), Color(0.50, 0.50, 0.52))
+		"hunter", "guard":
+			# Spear: a long shaft with a tip.
+			draw_line(hand + Vector2(-3.0, 4.0), hand + Vector2(6.0, -8.0), Color(0.42, 0.28, 0.14), 1.5)
+			draw_colored_polygon(PackedVector2Array([hand + Vector2(6.0, -8.0), hand + Vector2(4.5, -6.0), hand + Vector2(7.5, -6.0)]), Color(0.75, 0.75, 0.78))
+		"carpenter":
+			# Saw: a small grey blade.
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 1.5)
+			draw_rect(Rect2(tip.x - 1.0, tip.y - 1.0, 5.0, 2.0), Color(0.65, 0.65, 0.68))
+		"potter":
+			# A clay pot in both hands.
+			draw_circle(Vector2(5.0, 1.0 + bob), 2.0, Color(0.65, 0.40, 0.25))
+		"teacher":
+			# A book.
+			draw_rect(Rect2(4.0, -1.0 + bob, 3.5, 4.5), Color(0.90, 0.88, 0.80))
+		"factory":
+			# A wrench.
+			draw_line(hand, tip, Color(0.55, 0.55, 0.58), 2.0)
+		_:
+			draw_line(hand, tip, Color(0.42, 0.28, 0.14), 2.0)
 
 
 func to_save() -> Dictionary:
