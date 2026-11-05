@@ -33,18 +33,14 @@ func _ready() -> void:
 	_title_label = Label.new()
 	_title_label.text = "GodCiv"
 	_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_title_label.add_theme_font_size_override("font_size", 150 if GodCivPhoneUI.is_portrait(get_viewport()) else 110)
-	_title_label.add_theme_color_override("font_color", Color(1, 1, 1))
-	_title_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	GodCivTheme.style_label(_title_label, 150 if GodCivPhoneUI.is_portrait(get_viewport()) else 110, GodCivTheme.GOLD, GodCivPhoneUI.is_portrait(get_viewport()))
 	_title_label.add_theme_constant_override("shadow_offset_x", 3)
 	_title_label.add_theme_constant_override("shadow_offset_y", 3)
 	column.add_child(_title_label)
 	var tag := Label.new()
 	tag.text = "Raising a village from nothing"
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	tag.add_theme_font_size_override("font_size", GodCivPhoneUI.body_font(get_viewport()))
-	tag.add_theme_color_override("font_color", Color(1, 1, 1))
-	tag.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	GodCivTheme.style_label(tag, GodCivPhoneUI.body_font(get_viewport()), GodCivTheme.TEXT_DIM, GodCivPhoneUI.is_portrait(get_viewport()))
 	tag.add_theme_constant_override("shadow_offset_x", 2)
 	tag.add_theme_constant_override("shadow_offset_y", 2)
 	column.add_child(tag)
@@ -54,13 +50,12 @@ func _ready() -> void:
 	_bar.value = 0.0
 	_bar.show_percentage = false
 	_bar.custom_minimum_size = Vector2(900, 56) if GodCivPhoneUI.is_portrait(get_viewport()) else Vector2(700, 40)
+	GodCivTheme.style_progress_bar(_bar, GodCivPhoneUI.is_portrait(get_viewport()))
 	column.add_child(_bar)
 	_status_label = Label.new()
 	_status_label.text = "Shaping the land… 0%"
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_status_label.add_theme_font_size_override("font_size", GodCivPhoneUI.body_font(get_viewport()))
-	_status_label.add_theme_color_override("font_color", Color(1, 1, 1))
-	_status_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	GodCivTheme.style_label(_status_label, GodCivPhoneUI.body_font(get_viewport()), GodCivTheme.TEXT_MAIN, GodCivPhoneUI.is_portrait(get_viewport()))
 	_status_label.add_theme_constant_override("shadow_offset_x", 2)
 	_status_label.add_theme_constant_override("shadow_offset_y", 2)
 	column.add_child(_status_label)

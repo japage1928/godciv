@@ -19,6 +19,8 @@ extends PanelContainer
 # No unicode symbols the default font may lack: state is shown
 # with plain text pills (NOW / DONE / LOCKED), not glyphs.
 
+signal closed
+
 var _title_label: Label
 var _close_button: Button
 var _body_vbox: VBoxContainer
@@ -28,7 +30,6 @@ var _now_pct: Label
 var _now_blurb: Label
 var _next_text: Label
 var _discovery_marks: Array = []
-var _class_values: Array = []
 var _tech_level: int = 0
 var _tech_progress: int = 0
 var _dock_top: float = -1.0
@@ -185,7 +186,6 @@ func _build_body() -> void:
 		vv.text = str(int(GodCivEconomy.CLASS_THRESHOLDS[i]))
 		GodCivTheme.style_label(vv, body_font, GodCivTheme.GOLD, phone)
 		row2.add_child(vv)
-		_class_values.append(vv)
 	var jobs_lines: Array[String] = []
 	for i in range(GodCivEconomy.DISCOVERIES.size()):
 		var d2: Dictionary = GodCivEconomy.DISCOVERIES[i] as Dictionary
@@ -259,6 +259,7 @@ func hide_sidebar() -> void:
 func _on_slide_finished() -> void:
 	if _hiding:
 		visible = false
+		closed.emit()
 
 
 func toggle_sidebar() -> void:

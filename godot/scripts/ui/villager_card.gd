@@ -12,6 +12,8 @@ extends PanelContainer
 # The design doc's deliberation/intent fields are model work and
 # are NOT in this card: no LLM anywhere in the rebuild.
 
+signal closed
+
 var _title_label: Label
 var _body_vbox: VBoxContainer
 var _close_button: Button
@@ -194,6 +196,7 @@ func _on_slide_finished() -> void:
 		visible = false
 		_villager = null
 		_village = null
+		closed.emit()
 
 
 func is_open() -> bool:

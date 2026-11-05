@@ -49,8 +49,7 @@ func _ready() -> void:
 	_title_label.text = "GodCiv"
 	_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_title_label.add_theme_font_size_override("font_size", 170 if phone else 120)
-	_title_label.add_theme_color_override("font_color", Color(1, 1, 1))
-	_title_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	GodCivTheme.style_label(_title_label, 170 if phone else 120, GodCivTheme.GOLD, phone)
 	_title_label.add_theme_constant_override("shadow_offset_x", 4)
 	_title_label.add_theme_constant_override("shadow_offset_y", 4)
 	column.add_child(_title_label)
@@ -58,31 +57,28 @@ func _ready() -> void:
 	tag.text = "Raise a village. Guide its people. Watch it grow."
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	tag.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	tag.add_theme_font_size_override("font_size", GodCivPhoneUI.body_font(vp))
-	tag.add_theme_color_override("font_color", Color(1, 1, 1))
-	tag.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	GodCivTheme.style_label(tag, GodCivPhoneUI.body_font(vp), GodCivTheme.TEXT_DIM, phone)
 	tag.add_theme_constant_override("shadow_offset_x", 2)
 	tag.add_theme_constant_override("shadow_offset_y", 2)
 	column.add_child(tag)
 	var btn_size := Vector2(560, 120) if phone else Vector2(420, 90)
 	var btn_font: int = GodCivPhoneUI.button_font(vp)
-	_continue_button = _menu_button("Continue", btn_size, btn_font)
+	_continue_button = _menu_button("Continue", btn_size, btn_font, "primary")
 	_continue_button.pressed.connect(func() -> void: continue_requested.emit())
 	column.add_child(_continue_button)
-	var new_button := _menu_button("New Game", btn_size, btn_font)
+	var new_button := _menu_button("New Game", btn_size, btn_font, "primary")
 	new_button.pressed.connect(_on_new_game_pressed)
 	column.add_child(new_button)
-	var how_button := _menu_button("How to Play", btn_size, btn_font)
+	var how_button := _menu_button("How to Play", btn_size, btn_font, "secondary")
 	how_button.pressed.connect(func() -> void: _how_panel.visible = true)
 	column.add_child(how_button)
 	_how_panel = _overlay_panel(func(col: VBoxContainer) -> void:
 		var how_label := Label.new()
 		how_label.text = HOW_TO_TEXT
 		how_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		how_label.add_theme_font_size_override("font_size", 40 if phone else 22)
-		how_label.add_theme_color_override("font_color", Color(1, 1, 1))
+		GodCivTheme.style_label(how_label, 40 if phone else 22, GodCivTheme.TEXT_MAIN, phone)
 		col.add_child(how_label)
-		var how_close := GodCivPhoneUI.big_button(vp, "Got it")
+		var how_close := GodCivPhoneUI.big_button(vp, "Got it", "secondary")
 		how_close.pressed.connect(func() -> void: _how_panel.visible = false)
 		col.add_child(how_close)
 	)
@@ -91,13 +87,12 @@ func _ready() -> void:
 		var confirm_label := Label.new()
 		confirm_label.text = "A saved village already exists.\nStart a new village and erase the old one?"
 		confirm_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		confirm_label.add_theme_font_size_override("font_size", 44 if phone else 24)
-		confirm_label.add_theme_color_override("font_color", Color(1, 1, 1))
+		GodCivTheme.style_label(confirm_label, 44 if phone else 24, GodCivTheme.TEXT_MAIN, phone)
 		col.add_child(confirm_label)
-		var yes_button := GodCivPhoneUI.big_button(vp, "Yes, start over")
+		var yes_button := GodCivPhoneUI.big_button(vp, "Yes, start over", "primary")
 		yes_button.pressed.connect(func() -> void: new_game_requested.emit())
 		col.add_child(yes_button)
-		var no_button := GodCivPhoneUI.big_button(vp, "No, keep my village")
+		var no_button := GodCivPhoneUI.big_button(vp, "No, keep my village", "secondary")
 		no_button.pressed.connect(func() -> void: _confirm_panel.visible = false)
 		col.add_child(no_button)
 	)
@@ -111,11 +106,12 @@ func _process(delta: float) -> void:
 	_title_label.modulate.a = 0.85 + 0.15 * sin(_t * 2.0)
 
 
-func _menu_button(text: String, min_size: Vector2, font_size: int) -> Button:
+func _menu_button(text: String, min_size: Vector2, font_size: int, kind: String = "primary") -> Button:
 	var b := Button.new()
 	b.text = text
 	b.custom_minimum_size = min_size
 	b.add_theme_font_size_override("font_size", font_size)
+	GodCivTheme.style_button(b, GodCivPhoneUI.is_portrait(get_viewport()), kind)
 	return b
 
 
@@ -134,13 +130,7 @@ func _overlay_panel(build: Callable) -> Control:
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.add_child(center)
 	var panel := PanelContainer.new()
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.08, 0.1, 0.95)
-	style.content_margin_left = 28.0
-	style.content_margin_right = 28.0
-	style.content_margin_top = 24.0
-	style.content_margin_bottom = 24.0
-	panel.add_theme_stylebox_override("panel", style)
+	panel.add_theme_stylebox_override("panel", GodCivTheme.panel_style(GodCivPhoneUI.is_portrait(get_viewport()), GodCivTheme.PANEL_BG_SOLID))
 	var w: float = get_viewport().get_visible_rect().size.x
 	panel.custom_minimum_size = Vector2(minf(w * 0.88, 900.0), 0)
 	center.add_child(panel)

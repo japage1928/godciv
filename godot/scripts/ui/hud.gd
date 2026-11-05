@@ -62,6 +62,10 @@ func _ready() -> void:
 	# all tech/discovery detail so the top bar stays simple.
 	_evolution_sidebar = GodCivEvolutionSidebar.new()
 	add_child(_evolution_sidebar)
+	# When a panel finishes sliding closed, the phone log may
+	# need to come back (see _update_log_visibility).
+	_evolution_sidebar.closed.connect(_update_log_visibility)
+	_villager_card.closed.connect(_update_log_visibility)
 	get_viewport().size_changed.connect(_on_viewport_resized)
 	call_deferred("_position_panels")
 
