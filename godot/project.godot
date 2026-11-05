@@ -8,7 +8,7 @@ config_version=5
 
 config/name="GodCiv"
 config/description="GodCiv rebuilt in Godot 4 — god game, villagers with households, visible eras."
-run/main_scene="res://main.tscn"
+run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
